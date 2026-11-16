@@ -40,7 +40,14 @@ CENTER_LON, CENTER_LAT = 7.4246, 43.7384
 DROP_CLASSES = {7, 9, 18, 64, 65, 66}
 
 # Share of the kept points at each level of the 1 km tile.
-LEVEL_SHARE = (0.10, 0.25, 0.65)  # 1 km node, 500 m nodes, 250 m nodes
+# Quadtree inside each 1 km tile: cell size, share of the kept points, and
+# geometric error (metres) at each level. Leaves hold most of the points.
+LEVELS = ((1000, 0.04, 6.0), (500, 0.08, 3.0), (250, 0.23, 1.5), (125, 0.65, 0.0))
+
+# Facade points: a point more than this far below the highest point in its
+# orthophoto cell cannot be seen from the air, so the photo colour is wrong.
+OCCLUDED_DROP_M = 1.5
+FACADE_CELL_M = 0.5
 ROOT_SAMPLE_PER_TILE = 12000
 
 
@@ -114,18 +121,43 @@ def load_tile(name, budget, rng, to_geo, to_ecef, rot, origin):
         idx = rng.choice(idx, size=budget, replace=False)
     rng.shuffle(idx)
 
+    tx, ty = (int(v) for v in name.split("_"))
+
+    # Highest point in every 0.5 m cell, from all kept points (before thinning).
+    allk = np.flatnonzero(keep)
+    ncell = int(1000 / FACADE_CELL_M)
+    def cell(xx, yy):
+        ci = np.clip(((xx - tx * 1000) / FACADE_CELL_M).astype(np.int64), 0, ncell - 1)
+        cj = np.clip(((ty * 1000 - yy) / FACADE_CELL_M).astype(np.int64), 0, ncell - 1)
+        return cj * ncell + ci
+    top = np.full(ncell * ncell, -1e9)
+    np.maximum.at(top, cell(np.asarray(las.x)[allk], np.asarray(las.y)[allk]), np.asarray(las.z)[allk])
+
     x = np.asarray(las.x)[idx]
     y = np.asarray(las.y)[idx]
     z = np.asarray(las.z)[idx]
     c = cls[idx]
 
     # Colour from the orthophoto covering exactly this 1 km tile.
-    tx, ty = (int(v) for v in name.split("_"))
     img = np.asarray(Image.open(RAW / "ortho" / f"ortho_{name}.jpg").convert("RGB"))
     res = 1000.0 / img.shape[1]
     col = np.clip(((x - tx * 1000) / res).astype(int), 0, img.shape[1] - 1)
     row = np.clip(((ty * 1000 - y) / res).astype(int), 0, img.shape[0] - 1)
-    rgb = img[row, col]
+    rgb = img[row, col].astype(np.float32)
+
+    # Points hidden from the air (facades, ground under trees) would take the
+    # colour of the roof or canopy above them. Give them a material colour
+    # instead, darker towards the ground, so walls read as walls.
+    hidden = z < top[cell(x, y)] - OCCLUDED_DROP_M
+    depth = np.clip((top[cell(x, y)] - z) / 40.0, 0, 1)[:, None]
+    shade = 1.0 - 0.45 * depth
+    stone = np.array([214, 204, 188], np.float32)   # Riviera render and stone
+    leaf = np.array([62, 84, 52], np.float32)
+    ground = np.array([120, 112, 100], np.float32)
+    mat = np.where(np.isin(c, [3, 4, 5])[:, None], leaf, np.where((c == 2)[:, None], ground, stone))
+    # Keep a little of the photo hue so walls pick up local tint.
+    facade = (0.8 * mat + 0.2 * rgb) * shade
+    rgb = np.where(hidden[:, None], facade, rgb).clip(0, 255).astype(np.uint8)
 
     lon, lat, h = to_geo.transform(x, y, z)
     ex, ey, ez = to_ecef.transform(lon, lat, h)
@@ -136,7 +168,7 @@ def load_tile(name, budget, rng, to_geo, to_ecef, rot, origin):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "build" / "tiles"))
-    ap.add_argument("--points-per-km2", type=int, default=1_500_000)
+    ap.add_argument("--points-per-km2", type=int, default=5_000_000)
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 
@@ -164,36 +196,34 @@ def main():
         enu, rgb, cls, x, y = enu[r:], rgb[r:], cls[r:], x[r:], y[r:]
         n = len(enu)
 
-        a = int(n * LEVEL_SHARE[0])
-        b = a + int(n * LEVEL_SHARE[1])
         lx = x - tx * 1000          # 0..1000 east
         ly = ty * 1000 - y          # 0..1000 south
+        # Each point belongs to one level, by its position in the shuffled order.
+        bounds = np.cumsum([0] + [int(n * share) for _, share, _ in LEVELS])
+        bounds[-1] = n
+        level_of = np.searchsorted(bounds, np.arange(n), side="right") - 1
 
-        def node(sel, file, err, children):
-            lo, hi = write_pnts(out / file, enu[sel], rgb[sel], cls[sel])
+        def build(level, ci, cj):
+            size, _, err = LEVELS[level]
+            inside = (lx // size == ci) & (ly // size == cj)
+            if not inside.any():
+                return None
+            kids = []
+            if level + 1 < len(LEVELS):
+                for di in range(2):
+                    for dj in range(2):
+                        k = build(level + 1, ci * 2 + di, cj * 2 + dj)
+                        if k:
+                            kids.append(k)
+            sel = inside & (level_of == level)
+            if not sel.any():
+                sel = inside & (np.cumsum(inside) == 1)   # keep the node valid
+            f = f"{name}_L{level}_{ci}_{cj}.pnts"
+            lo, hi = write_pnts(out / f, enu[sel], rgb[sel], cls[sel])
             return {"boundingVolume": box(lo, hi), "geometricError": err, "refine": "ADD",
-                    "content": {"uri": file}, "children": children,
-                    "_lo": lo, "_hi": hi}
+                    "content": {"uri": f}, "children": kids, "_lo": lo, "_hi": hi}
 
-        level2 = []
-        for qi in range(2):
-            for qj in range(2):
-                level3 = []
-                for si in range(2):
-                    for sj in range(2):
-                        ci, cj = qi * 2 + si, qj * 2 + sj
-                        m = np.zeros(n, bool); m[b:] = True
-                        m &= (lx // 250 == ci) & (ly // 250 == cj)
-                        if m.sum() > 0:
-                            level3.append(node(m, f"{name}_{ci}{cj}.pnts", 0.0, []))
-                m = np.zeros(n, bool); m[a:b] = True
-                m &= (lx // 500 == qi) & (ly // 500 == qj)
-                if m.sum() > 0 or level3:
-                    if m.sum() == 0:
-                        m[np.flatnonzero((lx // 500 == qi) & (ly // 500 == qj))[:1]] = True
-                    level2.append(node(m, f"{name}_q{qi}{qj}.pnts", 2.0, level3))
-        m = np.zeros(n, bool); m[:a] = True
-        tile_nodes.append(node(m, f"{name}.pnts", 6.0, level2))
+        tile_nodes.append(build(0, 0, 0))
 
     pos = np.concatenate(root_pos); col = np.concatenate(root_rgb); cl = np.concatenate(root_cls)
     lo, hi = write_pnts(out / "root.pnts", pos, col, cl)

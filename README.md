@@ -41,5 +41,5 @@ a private repository needs a paid GitHub plan).
 ## Point budget
 
 The full scan of Monaco is about 430 million points. The default build keeps
-1.5 million points per km² (about 19 million in total, 190 MB) so the result is
+5 million points per km² (about 60 million in total, 610 MB) so the result is
 easy to host. Raise `--points-per-km2` for a denser city if the hosting allows.

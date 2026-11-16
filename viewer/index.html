@@ -28,6 +28,8 @@
       background: var(--panel); padding: 3px 8px; border-radius: 6px; max-width: calc(100% - 40px); }
     .credit a { color: var(--muted); }
     .cesium-viewer-bottom { display: none; }
+    /* Google's attribution must stay visible while its tiles are shown. */
+    body.photoreal .cesium-viewer-bottom { display: block; bottom: 30px; }
     @media (max-width: 600px) {
       .panel { left: 8px; right: 8px; top: 8px; max-width: none; padding: 10px 12px; }
       .panel p { display: none; }
@@ -50,6 +52,9 @@
         <button data-style="class">Class</button>
         <button data-style="height">Height</button>
       </div>
+      <div class="row" style="margin-top:6px">
+        <button id="photoreal" hidden>Photoreal (Google)</button>
+      </div>
       <div id="legend">
         <span style="background:#e9e3d6"></span>Buildings
         <span style="background:#5f9c4f"></span>Trees
@@ -64,6 +69,7 @@
     <a href="https://cesium.com/platform/cesiumjs/" target="_blank">CesiumJS</a>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
+  <script src="config.js"></script>
   <script src="main.js"></script>
 </body>
 </html>
