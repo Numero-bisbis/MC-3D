@@ -23,14 +23,16 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: data/raw
-          key: raw-${{ hashFiles('pipeline/tiles.txt', 'pipeline/download.sh') }}
+          key: raw-${{ hashFiles('pipeline/tiles.txt', 'pipeline/download.sh') }}-v2
       - run: pip install -r pipeline/requirements.txt
       - run: bash pipeline/download.sh
       - run: python pipeline/build_tiles.py --out build/tiles
+      - run: python pipeline/build_surface.py --out build/surface
       - run: |
           mkdir -p _site
           cp -r viewer/* _site/
           cp -r build/tiles _site/tiles
+          cp -r build/surface _site/surface
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

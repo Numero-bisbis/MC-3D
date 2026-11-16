@@ -14,9 +14,16 @@ source and needs no Cesium ion or Google account.
 pip install -r pipeline/requirements.txt
 bash pipeline/download.sh                      # ~2 GB into data/raw/
 python pipeline/build_tiles.py --out build/tiles
+python pipeline/build_surface.py --out build/surface
 ln -s ../build/tiles viewer/tiles
+ln -s ../build/surface viewer/surface
 python -m http.server 8000 --directory viewer  # open http://localhost:8000
 ```
+
+Two views: **Surface** (default) drapes the 20 cm IGN photo over the 50 cm
+LiDAR surface model, so roofs, streets and hills are solid; walls look
+stretched up close. **Points** shows the LiDAR point cloud. Add `?mode=points`
+to open in Points.
 
 Add `?place=monte-carlo` (or `le rocher`, `port hercule`, `fontvieille`,
 `larvotto`, `monaco`, `riviera`) to the URL to start at a given place.
@@ -34,6 +41,7 @@ a private repository needs a paid GitHub plan).
 | `pipeline/tiles.txt` | the 14 IGN 1 km tiles covering Monaco |
 | `pipeline/download.sh` | downloads LiDAR, orthophotos and the RAF20 geoid grid |
 | `pipeline/build_tiles.py` | thins, colours, reprojects and tiles the point cloud |
+| `pipeline/build_surface.py` | turns the 50 cm surface model into height tiles for the Surface view |
 | `viewer/` | the CesiumJS viewer |
 | `data/sources.md` | every data source with licence and date |
 | `docs/crs.md` | coordinate and height choices |
