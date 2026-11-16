@@ -324,4 +324,86 @@ if (start) {
   view(PLACES[0], 0);
   setTimeout(() => view(PLACES[1], 6), 1500);
 }
+// ---- Navigation -------------------------------------------------------
+// Mouse: drag = move, right-drag (or Ctrl/Shift + drag) = turn and tilt,
+// wheel = zoom, double-click = fly to that spot.
+// Touch: one finger = move, two fingers = pinch to zoom, twist to turn,
+// slide up/down to tilt, double-tap = fly to that spot.
+const ctrl = scene.screenSpaceCameraController;
+const E = Cesium.CameraEventType, K = Cesium.KeyboardEventModifier;
+ctrl.zoomEventTypes = [E.WHEEL, E.PINCH];
+ctrl.tiltEventTypes = [E.RIGHT_DRAG, E.MIDDLE_DRAG, E.PINCH,
+  { eventType: E.LEFT_DRAG, modifier: K.CTRL }, { eventType: E.LEFT_DRAG, modifier: K.SHIFT }];
+// Never closer than 60 m above the city (closer, the open data falls apart
+// and you end up inside buildings), never further than the whole of Europe.
+ctrl.minimumZoomDistance = 60;
+ctrl.maximumZoomDistance = 2500000;
+ctrl.enableCollisionDetection = true;
+ctrl.inertiaSpin = 0.85; ctrl.inertiaTranslate = 0.85; ctrl.inertiaZoom = 0.7;
+
+const cam = viewer.camera;
+const handler = viewer.cesiumWidget.screenSpaceEventHandler;
+handler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
+function pickGround(pos) {
+  const ray = cam.getPickRay(pos);
+  return (scene.pickPositionSupported && scene.pickPosition(pos)) || scene.globe.pick(ray, scene);
+}
+function screenCenter() {
+  const c = scene.canvas;
+  return pickGround(new Cesium.Cartesian2(c.clientWidth / 2, c.clientHeight / 2));
+}
+// Turn, tilt or zoom around the point in the middle of the screen.
+function orbit(dHeading, dPitch, zoomFactor) {
+  const target = screenCenter();
+  if (!target) {               // looking at the sky: just zoom along the view
+    if (zoomFactor) cam.zoomIn((1 - zoomFactor) * cam.positionCartographic.height);
+    return;
+  }
+  const range = Cesium.Cartesian3.distance(cam.position, target);
+  const heading = cam.heading + Cesium.Math.toRadians(dHeading);
+  const pitch = Cesium.Math.clamp(cam.pitch + Cesium.Math.toRadians(dPitch),
+    Cesium.Math.toRadians(-89), Cesium.Math.toRadians(-8));
+  const newRange = Cesium.Math.clamp(range * (zoomFactor || 1), ctrl.minimumZoomDistance + 20, ctrl.maximumZoomDistance);
+  cam.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), {
+    offset: new Cesium.HeadingPitchRange(heading, pitch, newRange), duration: 0.6,
+  });
+}
+const on = (id, fn) => { document.getElementById(id).onclick = fn; };
+on("nav-zoom-in", () => orbit(0, 0, 0.5));
+on("nav-zoom-out", () => orbit(0, 0, 2));
+on("nav-left", () => orbit(-30, 0));
+on("nav-right", () => orbit(30, 0));
+on("nav-tilt-up", () => orbit(0, -12));
+on("nav-tilt-down", () => orbit(0, 12));
+on("compass", () => orbit(-Cesium.Math.toDegrees(cam.heading), 0));
+on("nav-home", () => view(PLACES[1], 2));
+
+// Double-click or double-tap: glide to that spot, keeping the direction.
+handler.setInputAction((e) => {
+  const target = pickGround(e.position);
+  if (!target) return;
+  const range = Math.max(250, Math.min(Cesium.Cartesian3.distance(cam.position, target) * 0.5, 4000));
+  cam.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), {
+    offset: new Cesium.HeadingPitchRange(cam.heading, Math.min(cam.pitch, Cesium.Math.toRadians(-25)), range),
+    duration: 1.2,
+  });
+}, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
+// Compass needle follows the view direction.
+const needle = document.querySelector("#compass svg");
+cam.percentageChanged = 0.01;
+cam.changed.addEventListener(() => {
+  needle.style.transform = `rotate(${-Cesium.Math.toDegrees(cam.heading)}deg)`;
+});
+
+// One-line help, gone after the first interaction or 12 seconds.
+const hint = document.getElementById("hint");
+hint.textContent = MOBILE
+  ? "One finger to move · pinch to zoom · two fingers to turn and tilt · double-tap to fly there"
+  : "Drag to move · right-drag to turn and tilt · scroll to zoom · double-click to fly there";
+const hideHint = () => hint.classList.add("gone");
+setTimeout(hideHint, 12000);
+scene.canvas.addEventListener("pointerdown", () => setTimeout(hideHint, 4000), { once: true });
+
 window.__viewer = viewer;
