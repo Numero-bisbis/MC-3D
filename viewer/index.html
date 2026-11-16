@@ -56,6 +56,22 @@
       .panel { left: 8px; right: 8px; top: 8px; max-width: none; padding: 10px 12px; }
       .panel p { display: none; }
     }
+    /* Le Rocher tour caption card (rocher.js) */
+    .rt-card { position: absolute; left: 16px; bottom: 40px; width: 360px; max-width: calc(100% - 32px);
+      box-sizing: border-box; background: var(--panel); border-radius: 12px; padding: 12px 14px;
+      backdrop-filter: blur(6px); z-index: 5; }
+    .rt-card[hidden] { display: none; }
+    .rt-head { display: flex; justify-content: space-between; align-items: center; }
+    .rt-step { font-size: 11px; letter-spacing: .08em; color: var(--accent); }
+    .rt-close { background: none; border: 0; padding: 2px 6px; color: var(--muted); font-size: 16px; }
+    .rt-title { font-size: 17px; font-weight: 600; margin: 2px 0 4px; }
+    .rt-text { font-size: 14px; color: #d5dbe1; }
+    .rt-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+    .rt-buttons button { min-width: 72px; padding: 8px 12px; }
+    .rt-next { background: var(--accent); color: #111; border-color: var(--accent); }
+    @media (max-width: 600px) {
+      .rt-card { left: 8px; right: 8px; bottom: 30px; width: auto; max-width: none; }
+    }
   </style>
 </head>
 <body>
@@ -111,5 +127,6 @@
   <script src="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
   <script src="config.js"></script>
   <script src="main.js"></script>
+  <script src="rocher.js"></script>
 </body>
 </html>
