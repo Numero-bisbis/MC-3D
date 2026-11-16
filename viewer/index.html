@@ -24,6 +24,28 @@
     #legend { margin-top: 8px; font-size: 12px; color: var(--muted); display: none; }
     #legend span { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px 0 8px; }
     #legend span:first-child { margin-left: 0; }
+    .nav { position: absolute; right: 16px; bottom: 40px; display: grid; gap: 6px;
+      grid-template-columns: repeat(3, 40px); }
+    .nav button { width: 40px; height: 40px; padding: 0; font-size: 18px; line-height: 1;
+      background: var(--panel); border-color: rgba(255,255,255,.18); display: grid; place-items: center; }
+    .nav .wide { grid-column: span 3; width: auto; font-size: 13px; }
+    #compass svg { transition: transform .1s linear; }
+    .hint { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%);
+      background: var(--panel); color: var(--text); font-size: 12px; padding: 7px 12px; border-radius: 8px;
+      max-width: calc(100% - 180px); text-align: center; transition: opacity .6s; }
+    .hint.gone { opacity: 0; pointer-events: none; }
+    @media (max-width: 600px) {
+      .panel h1 { font-size: 15px; }
+      .panel .label { display: none; }
+      .group { margin-top: 6px; }
+      #places { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+      #places button { flex: 0 0 auto; }
+      .credit { font-size: 9px; left: 8px; right: 8px; max-width: none; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis; }
+      .nav { right: 8px; bottom: 34px; grid-template-columns: repeat(3, 44px); }
+      .nav button { width: 44px; height: 44px; }
+      .hint { left: 8px; transform: none; max-width: calc(100% - 170px); bottom: 36px; }
+    }
     .credit { position: absolute; right: 12px; bottom: 6px; font-size: 11px; color: var(--muted);
       background: var(--panel); padding: 3px 8px; border-radius: 6px; max-width: calc(100% - 40px); }
     .credit a { color: var(--muted); }
@@ -40,7 +62,7 @@
   <div id="globe"></div>
   <div class="panel">
     <h1>Monaco 3D</h1>
-    <p>IGN LiDAR HD laser scan, georeferenced to the metre. Drag to orbit, scroll or pinch to zoom.</p>
+    <p>Open IGN LiDAR data, accurate to the metre.</p>
     <div class="group">
       <div class="label">Go to</div>
       <div class="row" id="places"></div>
@@ -69,6 +91,17 @@
       </div>
     </div>
   </div>
+  <div class="nav" aria-label="Camera controls">
+    <button id="nav-tilt-up" title="Look more from above" aria-label="Tilt up">⤒</button>
+    <button id="nav-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+    <button id="compass" title="Face north" aria-label="Face north"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M11 2 L15 12 L11 10 L7 12 Z" fill="#e8c27a"/><path d="M11 20 L7 12 L11 13.5 L15 12 Z" fill="#9aa5b1"/></svg></button>
+    <button id="nav-left" title="Turn left" aria-label="Turn left">↺</button>
+    <button id="nav-zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+    <button id="nav-right" title="Turn right" aria-label="Turn right">↻</button>
+    <button id="nav-tilt-down" title="Look more towards the horizon" aria-label="Tilt down">⤓</button>
+    <button id="nav-home" class="wide" style="grid-column: span 2" title="Back to the overview of Monaco">Reset view</button>
+  </div>
+  <div class="hint" id="hint"></div>
   <div class="credit">
     LiDAR &amp; orthophoto © <a href="https://geoservices.ign.fr/lidarhd" target="_blank">IGN</a> (Etalab 2.0) ·
     Sentinel-2 cloudless © <a href="https://s2maps.eu" target="_blank">EOX</a> ·
