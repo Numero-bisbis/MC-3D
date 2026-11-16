@@ -1,0 +1,4 @@
+data/raw/
+build/
+viewer/tiles
+__pycache__/
