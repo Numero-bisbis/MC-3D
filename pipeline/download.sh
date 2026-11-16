@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RAW="$ROOT/data/raw"
-mkdir -p "$RAW/lidar" "$RAW/ortho" "$RAW/grids" "$RAW/mns"
+mkdir -p "$RAW/lidar" "$RAW/ortho" "$RAW/grids" "$RAW/mns" "$RAW/mnt" "$RAW/buildings"
 
 LIDAR_BASE="https://data.geopf.fr/telechargement/download/LiDARHD-NUALID/NUALHD_1-0__LAZ_LAMB93_SP_2025-06-20"
 WMS="https://data.geopf.fr/wms-r"
@@ -47,6 +47,26 @@ for t in $(grep -v '^#' "$ROOT/pipeline/tiles.txt"); do
     echo "mns $t"
     fetch "$m" \
       "$WMS?SERVICE=WMS&VERSION=1.3.0&EXCEPTIONS=text/xml&REQUEST=GetMap&LAYERS=IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93&FORMAT=image/geotiff&STYLES=&CRS=EPSG:2154&BBOX=$((x * 1000 - 1)).75,$((y * 1000 - 1000)).25,$((x * 1000 + 999)).75,$((y * 1000)).25&WIDTH=2000&HEIGHT=2000"
+    sleep 1.2
+  fi
+  g="$RAW/mnt/mnt_${t}.tif"
+  if [ ! -s "$g" ]; then
+    # IGN LiDAR HD terrain model (MNT, bare ground), 50 cm, NGF-IGN69.
+    echo "mnt $t"
+    fetch "$g" \
+      "$WMS?SERVICE=WMS&VERSION=1.3.0&EXCEPTIONS=text/xml&REQUEST=GetMap&LAYERS=IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93&FORMAT=image/geotiff&STYLES=&CRS=EPSG:2154&BBOX=$((x * 1000 - 1)).75,$((y * 1000 - 1000)).25,$((x * 1000 + 999)).75,$((y * 1000)).25&WIDTH=2000&HEIGHT=2000"
+    sleep 1.2
+  fi
+done
+
+# Building outlines: IGN BD TOPO (covers Monaco too), in Lambert-93.
+# The bounding box is latitude first, as the WFS expects for EPSG:4326.
+for start in 0 5000 10000 15000; do
+  b="$RAW/buildings/bdtopo_${start}.json"
+  if [ ! -s "$b" ]; then
+    echo "buildings from $start"
+    fetch "$b" \
+      "https://data.geopf.fr/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=BDTOPO_V3:batiment&OUTPUTFORMAT=application/json&SRSNAME=EPSG:2154&SORTBY=cleabs&COUNT=5000&STARTINDEX=$start&CQL_FILTER=BBOX(geometrie,43.716,7.392,43.758,7.455)"
     sleep 1.2
   fi
 done

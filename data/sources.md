@@ -4,6 +4,8 @@
 |---|---|---|---|---|
 | Classified point cloud | IGN LiDAR HD, 14 COPC tiles (see `pipeline/tiles.txt`) | Etalab Open Licence 2.0 | flown May–June 2021, edition 2025-06-20 | the 3D city |
 | Surface model (MNS) | IGN LiDAR HD MNS 50 cm via Géoplateforme WMS (`IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93`) | Etalab Open Licence 2.0 | derived from the 2021 flights | Surface view |
+| Terrain model (MNT) | IGN LiDAR HD MNT 50 cm via Géoplateforme WMS | Etalab Open Licence 2.0 | 2021 flights | ground under buildings, wall bottoms |
+| Building outlines | IGN BD TOPO `BDTOPO_V3:batiment` via WFS (covers Monaco) | Etalab Open Licence 2.0 | current edition | 3D buildings |
 | Orthophoto | IGN BD ORTHO via Géoplateforme WMS/WMTS (`ORTHOIMAGERY.ORTHOPHOTOS`) | Etalab Open Licence 2.0 | latest IGN edition | point colours; ground imagery near Monaco |
 | Geoid grid | IGN RAF20 (`fr_ign_RAF20.tif` from cdn.proj.org) | Etalab Open Licence 2.0 | 2020 | NGF-IGN69 heights to WGS84 ellipsoid |
 | Wide imagery | EOX Sentinel-2 cloudless 2020 | CC BY-NC-SA 4.0 (non-commercial) | 2020 | Riviera view |

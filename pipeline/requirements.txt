@@ -2,3 +2,5 @@ laspy[lazrs]==2.7.0
 numpy>=2.0
 pyproj==3.8.0
 Pillow>=10.0
+shapely>=2.0
+triangle>=20230923

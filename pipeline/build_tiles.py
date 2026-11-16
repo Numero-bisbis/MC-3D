@@ -168,7 +168,7 @@ def load_tile(name, budget, rng, to_geo, to_ecef, rot, origin):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "build" / "tiles"))
-    ap.add_argument("--points-per-km2", type=int, default=5_000_000)
+    ap.add_argument("--points-per-km2", type=int, default=4_000_000)
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 

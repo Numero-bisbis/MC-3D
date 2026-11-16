@@ -27,7 +27,7 @@ MIN_LEVEL, MAX_LEVEL = 13, 19
 NODATA = -9999.0
 
 
-def load_mosaic(names):
+def load_mosaic(names, kind="mns"):
     xs = [int(n.split("_")[0]) for n in names]
     ys = [int(n.split("_")[1]) for n in names]
     x0, y0 = min(xs) * 1000, max(ys) * 1000          # top-left, pixel centre
@@ -35,12 +35,32 @@ def load_mosaic(names):
     h = (max(ys) - min(ys) + 1) * 2000
     mos = np.full((h, w), np.nan, np.float32)
     for n, tx, ty in zip(names, xs, ys):
-        a = np.asarray(Image.open(RAW / "mns" / f"mns_{n}.tif"), dtype=np.float32).copy()
+        a = np.asarray(Image.open(RAW / kind / f"{kind}_{n}.tif"), dtype=np.float32).copy()
         a[a <= NODATA + 1] = np.nan
         r = (y0 - ty * 1000) * 2
         c = (tx * 1000 - x0) * 2
         mos[r:r + 2000, c:c + 2000] = a
     return mos, x0, y0
+
+
+def building_mask(shape_, x0, y0):
+    """Raster mask (0.5 m) of IGN building outlines, grown by about 1 m."""
+    import glob
+    from PIL import ImageDraw, ImageFilter
+    from shapely.geometry import shape
+    img = Image.new("L", (shape_[1], shape_[0]), 0)
+    draw = ImageDraw.Draw(img)
+    for f in sorted(glob.glob(str(RAW / "buildings" / "*.json"))):
+        for feat in json.load(open(f))["features"]:
+            g = shape(feat["geometry"])
+            for p in getattr(g, "geoms", [g]):
+                if p.is_empty:
+                    continue
+                pts = [((x - x0) / 0.5, (y0 - y) / 0.5) for x, y, *_ in p.exterior.coords]
+                if len(pts) >= 3:
+                    draw.polygon(pts, fill=255)
+    img = img.filter(ImageFilter.MaxFilter(5))
+    return np.asarray(img) > 0
 
 
 def pyramid(mos, levels):
@@ -58,11 +78,21 @@ def pyramid(mos, levels):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "build" / "surface"))
+    ap.add_argument("--keep-buildings", action="store_true",
+                    help="keep buildings in the surface (no separate 3D buildings)")
     args = ap.parse_args()
     out = Path(args.out)
 
     names = [l.strip() for l in open(ROOT / "pipeline" / "tiles.txt") if l.strip() and not l.startswith("#")]
     mos, x0, y0 = load_mosaic(names)
+    if not args.keep_buildings:
+        # Buildings are drawn as separate 3D models (build_buildings.py), so
+        # take them out of the surface: inside each outline (+1 m) use the
+        # bare-ground model instead. Trees, rocks and walls stay.
+        mnt, _, _ = load_mosaic(names, "mnt")
+        mask = building_mask(mos.shape, x0, y0)
+        mos = np.where(mask & np.isfinite(mnt), mnt, mos)
+        print("flattened", round(float(mask.mean()), 3), "of the area under buildings")
     pyr = pyramid(mos, 6)
     print("mosaic", mos.shape, "valid", round(float(np.isfinite(mos).mean()), 3))
 

@@ -32,9 +32,28 @@ const viewer = new Cesium.Viewer("globe", {
 });
 const scene = viewer.scene;
 scene.globe.baseColor = Cesium.Color.fromCssColorString("#0d2236");
-scene.globe.enableLighting = false;
+// Light: a late-morning summer sun over Monaco (11:30 local time, from the
+// south-east, the sea side), so the façades seen from the sea are lit.
+const IS_SMALL = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 700;
+viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T09:30:00Z");
+viewer.clock.shouldAnimate = false;
+scene.globe.enableLighting = true;
+scene.globe.dynamicAtmosphereLighting = true;
+scene.globe.showGroundAtmosphere = true;
 scene.skyAtmosphere.show = true;
 scene.fog.enabled = true;
+scene.fog.density = 0.00012;
+scene.highDynamicRange = !IS_SMALL;
+if (!IS_SMALL) {
+  // Shadows are costly on phones; on desktop the surface model casts them,
+  // so buildings and the Rock throw real shadows.
+  viewer.shadows = true;
+  viewer.terrainShadows = Cesium.ShadowMode.ENABLED;
+  viewer.shadowMap.softShadows = true;
+  viewer.shadowMap.size = 4096;
+  viewer.shadowMap.maximumDistance = 4000;
+  viewer.shadowMap.darkness = 0.55;
+}
 scene.postProcessStages.fxaa.enabled = true;
 if (Cesium.FeatureDetection.supportsImageRenderingPixelated()) {
   viewer.resolutionScale = Math.min(window.devicePixelRatio, 2);
@@ -214,6 +233,7 @@ async function setPhotoreal(on) {
   }
   if (google) google.show = on;
   if (tileset) tileset.show = !on && mode === "points";
+  if (buildings) buildings.show = !on && mode === "surface";
   scene.globe.show = !on;   // Google's mesh already includes the terrain
   document.body.classList.toggle("photoreal", on);
 }
@@ -230,6 +250,20 @@ if (GOOGLE_KEY) {
     }
   };
 }
+
+// 3D buildings with straight walls (pipeline/build_buildings.py), shown in
+// the Surface view on top of the ground model.
+let buildings;
+Cesium.Cesium3DTileset.fromUrl("buildings/tileset.json", {
+  maximumScreenSpaceError: MOBILE ? 8 : 4,
+  // Buildings cast shadows on the ground but do not receive them, which
+  // avoids striped "shadow acne" on flat walls.
+  shadows: Cesium.ShadowMode.CAST_ONLY,
+}).then((ts) => {
+  buildings = ts;
+  ts.show = mode === "surface" && !document.body.classList.contains("photoreal");
+  scene.primitives.add(ts);
+}).catch((e) => console.error("buildings failed", e));
 
 // View mode: "surface" = IGN surface model draped with the 20 cm photo,
 // "points" = the LiDAR point cloud.
@@ -252,6 +286,7 @@ async function setMode(m) {
   }
   const photoOn = document.body.classList.contains("photoreal");
   if (tileset) tileset.show = m === "points" && !photoOn;
+  if (buildings) buildings.show = m === "surface" && !photoOn;
 }
 document.querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => setMode(b.dataset.mode); });
 setMode(mode);
