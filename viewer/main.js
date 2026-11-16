@@ -149,20 +149,59 @@ const STYLES = {
   }),
 };
 
+// Phones get a lighter load; desktops load the full density.
+const MOBILE = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 700;
+
 Cesium.Cesium3DTileset.fromUrl("tiles/tileset.json", {
-  maximumScreenSpaceError: 2,
+  maximumScreenSpaceError: MOBILE ? 3 : 1.5,
+  cacheBytes: (MOBILE ? 384 : 1536) * 1024 * 1024,
+  maximumCacheOverflowBytes: (MOBILE ? 128 : 512) * 1024 * 1024,
   pointCloudShading: {
+    // Points grow with distance only up to 2.5 px, so close up they stay
+    // small and sharp instead of turning into blocks.
     attenuation: true,
-    maximumAttenuation: 4,
-    baseResolution: 0.8,
+    maximumAttenuation: 2.5,
+    baseResolution: 0.35,
     eyeDomeLighting: true,
-    eyeDomeLightingStrength: 0.6,
-    eyeDomeLightingRadius: 1.0,
+    eyeDomeLightingStrength: 0.9,
+    eyeDomeLightingRadius: 0.8,
   },
 }).then((ts) => {
   tileset = ts;
   scene.primitives.add(ts);
 }).catch((e) => console.error("tileset failed", e));
+
+// Optional photoreal layer: Google Photorealistic 3D Tiles. Needs a Google
+// Maps Platform key with the Map Tiles API enabled, restricted to this site.
+// Set it in config.js, or add ?gkey=YOUR_KEY to the URL to try one.
+const GOOGLE_KEY = new URLSearchParams(location.search).get("gkey") ||
+  (window.MC3D_CONFIG && window.MC3D_CONFIG.googleKey) || "";
+let google;
+async function setPhotoreal(on) {
+  if (on && !google) {
+    google = await Cesium.createGooglePhotorealistic3DTileset(GOOGLE_KEY, {
+      maximumScreenSpaceError: MOBILE ? 16 : 8,
+    });
+    scene.primitives.add(google);
+  }
+  if (google) google.show = on;
+  if (tileset) tileset.show = !on;
+  scene.globe.show = !on;   // Google's mesh already includes the terrain
+  document.body.classList.toggle("photoreal", on);
+}
+const realBtn = document.getElementById("photoreal");
+if (GOOGLE_KEY) {
+  realBtn.hidden = false;
+  realBtn.onclick = async () => {
+    const on = !realBtn.classList.contains("on");
+    realBtn.classList.toggle("on", on);
+    try { await setPhotoreal(on); } catch (e) {
+      console.error("Google 3D Tiles failed", e);
+      realBtn.classList.remove("on");
+      realBtn.textContent = "Photoreal unavailable";
+    }
+  };
+}
 
 // Camera helpers.
 function view(p, duration) {
