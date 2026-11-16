@@ -1,0 +1,45 @@
+# Build the Monaco point cloud from IGN open data and publish the viewer on GitHub Pages.
+# Needs Pages enabled with "GitHub Actions" as the source (Settings > Pages).
+name: Build and publish viewer
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: raw-${{ hashFiles('pipeline/tiles.txt', 'pipeline/download.sh') }}
+      - run: pip install -r pipeline/requirements.txt
+      - run: bash pipeline/download.sh
+      - run: python pipeline/build_tiles.py --out build/tiles
+      - run: |
+          mkdir -p _site
+          cp -r viewer/* _site/
+          cp -r build/tiles _site/tiles
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

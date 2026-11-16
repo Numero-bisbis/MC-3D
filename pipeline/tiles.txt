@@ -1,0 +1,17 @@
+# IGN LiDAR HD 1 km tiles covering Monaco (Lambert-93 km, north-west corner: X_Y).
+# Found with the WFS layer IGNF_LIDAR-HD_METADONNEE:metadata (field coordonnees_nw).
+# 1057_6302 and 1057_6303 do not exist (open sea).
+1054_6302
+1054_6303
+1054_6304
+1054_6305
+1055_6302
+1055_6303
+1055_6304
+1055_6305
+1056_6302
+1056_6303
+1056_6304
+1056_6305
+1057_6304
+1057_6305
