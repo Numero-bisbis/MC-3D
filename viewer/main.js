@@ -74,7 +74,13 @@ viewer.imageryLayers.add(new Cesium.ImageryLayer(new Cesium.WebMapTileServiceIma
   maximumLevel: 19,
   rectangle: Cesium.Rectangle.fromDegrees(7.2, 43.62, 7.6, 43.85),
   credit: "IGN orthophoto",
-}), { minimumTerrainLevel: 11 }));
+}), {
+  minimumTerrainLevel: 11,
+  // Out at sea the IGN photo stops in blank white squares; make those
+  // see-through so the satellite image of the sea shows instead.
+  colorToAlpha: Cesium.Color.WHITE,
+  colorToAlphaThreshold: 0.03,
+}));
 
 // Terrain. Everywhere: AWS/Mapzen Terrarium tiles (open), decoded into a
 // heightmap. Over Monaco, in "Surface" mode: the IGN LiDAR HD surface model
@@ -407,3 +413,6 @@ setTimeout(hideHint, 12000);
 scene.canvas.addEventListener("pointerdown", () => setTimeout(hideHint, 4000), { once: true });
 
 window.__viewer = viewer;
+
+// Shared handle for add-ons loaded after this file (tours.js, lap.js).
+window.MC3D = { viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode };
