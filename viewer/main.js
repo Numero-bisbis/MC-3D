@@ -28,13 +28,32 @@ const viewer = new Cesium.Viewer("globe", {
   fullscreenButton: false,
   infoBox: false,
   selectionIndicator: false,
-  terrainProvider: makeTerrain(),
+  terrainProvider: makeTerrain(null),
 });
 const scene = viewer.scene;
 scene.globe.baseColor = Cesium.Color.fromCssColorString("#0d2236");
-scene.globe.enableLighting = false;
+// Light: a late-morning summer sun over Monaco (11:30 local time, from the
+// south-east, the sea side), so the façades seen from the sea are lit.
+const IS_SMALL = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 700;
+viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T09:30:00Z");
+viewer.clock.shouldAnimate = false;
+scene.globe.enableLighting = true;
+scene.globe.dynamicAtmosphereLighting = true;
+scene.globe.showGroundAtmosphere = true;
 scene.skyAtmosphere.show = true;
 scene.fog.enabled = true;
+scene.fog.density = 0.00012;
+scene.highDynamicRange = !IS_SMALL;
+if (!IS_SMALL) {
+  // Shadows are costly on phones; on desktop the surface model casts them,
+  // so buildings and the Rock throw real shadows.
+  viewer.shadows = true;
+  viewer.terrainShadows = Cesium.ShadowMode.ENABLED;
+  viewer.shadowMap.softShadows = true;
+  viewer.shadowMap.size = 4096;
+  viewer.shadowMap.maximumDistance = 4000;
+  viewer.shadowMap.darkness = 0.55;
+}
 scene.postProcessStages.fxaa.enabled = true;
 if (Cesium.FeatureDetection.supportsImageRenderingPixelated()) {
   viewer.resolutionScale = Math.min(window.devicePixelRatio, 2);
@@ -57,11 +76,14 @@ viewer.imageryLayers.add(new Cesium.ImageryLayer(new Cesium.WebMapTileServiceIma
   credit: "IGN orthophoto",
 }), { minimumTerrainLevel: 11 }));
 
-// Terrain: AWS/Mapzen Terrarium tiles (open), decoded into a heightmap.
-function makeTerrain() {
+// Terrain. Everywhere: AWS/Mapzen Terrarium tiles (open), decoded into a
+// heightmap. Over Monaco, in "Surface" mode: the IGN LiDAR HD surface model
+// (50 cm, roofs and trees included) from surface/, built by
+// pipeline/build_surface.py. The orthophoto drapes over it.
+function makeTerrain(surface) {
   const scheme = new Cesium.GeographicTilingScheme();
   const cache = new Map();
-  const SIZE = 33;
+  const SIZE = 65;
 
   function loadTile(z, x, y) {
     const key = `${z}/${x}/${y}`;
@@ -78,41 +100,65 @@ function makeTerrain() {
     return cache.get(key);
   }
 
+  async function terrarium(x, y, level) {
+    const rect = scheme.tileXYToRectangle(x, y, level);
+    const z = Math.min(level + 1, 13);
+    const n = 2 ** z;
+    const samples = [];
+    const need = new Map();
+    for (let j = 0; j < SIZE; j++) {
+      const lat = rect.north - (rect.north - rect.south) * (j / (SIZE - 1));
+      for (let i = 0; i < SIZE; i++) {
+        const lon = rect.west + (rect.east - rect.west) * (i / (SIZE - 1));
+        const fx = ((Cesium.Math.toDegrees(lon) + 180) / 360) * n;
+        const s = Math.sin(Math.max(Math.min(lat, 1.484), -1.484));
+        const fy = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n;
+        const tx = Math.min(Math.floor(fx), n - 1), ty = Math.min(Math.floor(fy), n - 1);
+        const key = `${tx}/${ty}`;
+        if (!need.has(key)) need.set(key, loadTile(z, tx, ty));
+        samples.push([key, Math.min(255, Math.floor((fx - tx) * 256)), Math.min(255, Math.floor((fy - ty) * 256))]);
+      }
+    }
+    const tiles = new Map();
+    await Promise.all([...need].map(async ([k, p]) => tiles.set(k, await p)));
+    const out = new Float32Array(SIZE * SIZE);
+    samples.forEach(([k, px, py], idx) => {
+      const d = tiles.get(k);
+      let h = 0;
+      if (d) {
+        const o = (py * 256 + px) * 4;
+        h = d[o] * 256 + d[o + 1] + d[o + 2] / 256 - 32768;
+      }
+      out[idx] = Math.max(h, 0) + GEOID_N; // sea floor is flattened to the sea surface
+    });
+    return out;
+  }
+
+  function surfaceUrl(x, y, level) {
+    if (!surface || level < surface.minLevel) return null;
+    const r = surface.levels[Math.min(level, surface.maxLevel)];
+    if (level > surface.maxLevel) return null;
+    if (x < r[0] || x > r[1] || y < r[2] || y > r[3]) return null;
+    return `surface/${level}/${x}/${y}.bin`;
+  }
+
   return new Cesium.CustomHeightmapTerrainProvider({
     width: SIZE,
     height: SIZE,
     tilingScheme: scheme,
     callback: async (x, y, level) => {
-      const rect = scheme.tileXYToRectangle(x, y, level);
-      const z = Math.min(level + 1, 13);
-      const n = 2 ** z;
-      const samples = [];
-      const need = new Map();
-      for (let j = 0; j < SIZE; j++) {
-        const lat = rect.north - (rect.north - rect.south) * (j / (SIZE - 1));
-        for (let i = 0; i < SIZE; i++) {
-          const lon = rect.west + (rect.east - rect.west) * (i / (SIZE - 1));
-          const fx = ((Cesium.Math.toDegrees(lon) + 180) / 360) * n;
-          const s = Math.sin(Math.max(Math.min(lat, 1.484), -1.484));
-          const fy = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n;
-          const tx = Math.min(Math.floor(fx), n - 1), ty = Math.min(Math.floor(fy), n - 1);
-          const key = `${tx}/${ty}`;
-          if (!need.has(key)) need.set(key, loadTile(z, tx, ty));
-          samples.push([key, Math.min(255, Math.floor((fx - tx) * 256)), Math.min(255, Math.floor((fy - ty) * 256))]);
-        }
-      }
-      const tiles = new Map();
-      await Promise.all([...need].map(async ([k, p]) => tiles.set(k, await p)));
+      const url = surfaceUrl(x, y, level);
+      if (!url) return terrarium(x, y, level);
+      let enc = null;
+      try { enc = new Uint16Array(await Cesium.Resource.fetchArrayBuffer({ url })); } catch (e) { /* tile not built */ }
+      if (!enc || enc.length !== SIZE * SIZE) return terrarium(x, y, level);
       const out = new Float32Array(SIZE * SIZE);
-      samples.forEach(([k, px, py], idx) => {
-        const d = tiles.get(k);
-        let h = 0;
-        if (d) {
-          const o = (py * 256 + px) * 4;
-          h = d[o] * 256 + d[o + 1] + d[o + 2] / 256 - 32768;
-        }
-        out[idx] = Math.max(h, 0) + GEOID_N; // sea floor is flattened to the sea surface
-      });
+      let fallback = null;
+      for (let i = 0; i < out.length; i++) {
+        if (enc[i]) { out[i] = enc[i] / 50 - 100; continue; }
+        fallback = fallback || await terrarium(x, y, level);
+        out[i] = fallback[i];
+      }
       return out;
     },
   });
@@ -168,6 +214,7 @@ Cesium.Cesium3DTileset.fromUrl("tiles/tileset.json", {
   },
 }).then((ts) => {
   tileset = ts;
+  ts.show = mode === "points";
   scene.primitives.add(ts);
 }).catch((e) => console.error("tileset failed", e));
 
@@ -185,7 +232,8 @@ async function setPhotoreal(on) {
     scene.primitives.add(google);
   }
   if (google) google.show = on;
-  if (tileset) tileset.show = !on;
+  if (tileset) tileset.show = !on && mode === "points";
+  if (buildings) buildings.show = !on && mode === "surface";
   scene.globe.show = !on;   // Google's mesh already includes the terrain
   document.body.classList.toggle("photoreal", on);
 }
@@ -202,6 +250,46 @@ if (GOOGLE_KEY) {
     }
   };
 }
+
+// 3D buildings with straight walls (pipeline/build_buildings.py), shown in
+// the Surface view on top of the ground model.
+let buildings;
+Cesium.Cesium3DTileset.fromUrl("buildings/tileset.json", {
+  maximumScreenSpaceError: MOBILE ? 8 : 4,
+  // Buildings cast shadows on the ground but do not receive them, which
+  // avoids striped "shadow acne" on flat walls.
+  shadows: Cesium.ShadowMode.CAST_ONLY,
+}).then((ts) => {
+  buildings = ts;
+  ts.show = mode === "surface" && !document.body.classList.contains("photoreal");
+  scene.primitives.add(ts);
+}).catch((e) => console.error("buildings failed", e));
+
+// View mode: "surface" = IGN surface model draped with the 20 cm photo,
+// "points" = the LiDAR point cloud.
+let mode = new URLSearchParams(location.search).get("mode") === "points" ? "points" : "surface";
+const surfaceIndex = Cesium.Resource.fetchJson({ url: "surface/index.json" }).catch(() => null);
+const pointsTerrain = viewer.terrainProvider;
+let surfaceTerrain;
+async function setMode(m) {
+  mode = m;
+  document.querySelectorAll("[data-mode]").forEach((o) => o.classList.toggle("on", o.dataset.mode === m));
+  document.getElementById("colour-group").hidden = m !== "points";
+  if (m === "surface") {
+    const idx = await surfaceIndex;
+    if (idx) {
+      surfaceTerrain = surfaceTerrain || makeTerrain(idx);
+      scene.terrainProvider = surfaceTerrain;
+    }
+  } else {
+    scene.terrainProvider = pointsTerrain;
+  }
+  const photoOn = document.body.classList.contains("photoreal");
+  if (tileset) tileset.show = m === "points" && !photoOn;
+  if (buildings) buildings.show = m === "surface" && !photoOn;
+}
+document.querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => setMode(b.dataset.mode); });
+setMode(mode);
 
 // Camera helpers.
 function view(p, duration) {
