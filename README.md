@@ -45,6 +45,14 @@ replaced by a clean modelled track (asphalt, kerbs, barriers) and a modelled
 tunnel, so the scan's parked cars and roadworks disappear (`viewer/clean-track.js`;
 add `?clean=0` to see the raw scan).
 
+**Street View stops**: in the lap tours, the pegman button pauses the lap and
+opens Google's own 360° Street View panorama of the corner you are at; ‹ and ›
+walk through all the corners. The Le Rocher tour has a Street View button at
+each landmark. The panorama is Google's official viewer (Maps Embed API, free
+with no usage limit), shown in an overlay; it is never copied onto the 3D
+scene (`viewer/streetview.js`). The Google key needs **Maps Embed API**
+enabled in its project and ticked in its API restrictions.
+
 ## Publish it
 
 `.github/workflows/pages.yml` rebuilds the tiles from IGN and publishes the viewer

@@ -580,7 +580,8 @@
     buttons: [
       { html: ICON_ONBOARD, title: "Onboard camera", onClick: () => switchView() },
       { html: ICON_LIST, title: "Choose another lap", onClick: () => openPicker() },
-    ],
+    ].concat(M.streetView && M.streetView.available && K.svButton
+      ? [K.svButton(() => (lap ? uAt(tl) * DS : 0), () => (state === "intro" ? seek(0) : pause(false)))] : []),
     more: { label: "Other laps", onClick: () => openPicker() },
   };
 
