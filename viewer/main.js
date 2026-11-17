@@ -244,17 +244,25 @@ async function setPhotoreal(on) {
   document.body.classList.toggle("photoreal", on);
 }
 const realBtn = document.getElementById("photoreal");
+// Photoreal is a third view next to Surface and Points: picking it lights its
+// button and dims the others; picking Surface or Points turns it off.
+async function choosePhotoreal(on) {
+  realBtn.classList.toggle("on", on);
+  if (on) document.querySelectorAll("[data-mode]").forEach((o) => o.classList.remove("on"));
+  try {
+    await setPhotoreal(on);
+  } catch (e) {
+    console.error("Google 3D Tiles failed", e);
+    realBtn.classList.remove("on");
+    realBtn.textContent = "Photoreal unavailable";
+    realBtn.disabled = true;
+    await setPhotoreal(false).catch(() => {});
+    setMode(mode);
+  }
+}
 if (GOOGLE_KEY) {
   realBtn.hidden = false;
-  realBtn.onclick = async () => {
-    const on = !realBtn.classList.contains("on");
-    realBtn.classList.toggle("on", on);
-    try { await setPhotoreal(on); } catch (e) {
-      console.error("Google 3D Tiles failed", e);
-      realBtn.classList.remove("on");
-      realBtn.textContent = "Photoreal unavailable";
-    }
-  };
+  realBtn.onclick = () => choosePhotoreal(true);
 }
 
 // 3D buildings with straight walls (pipeline/build_buildings.py), shown in
@@ -294,8 +302,15 @@ async function setMode(m) {
   if (tileset) tileset.show = m === "points" && !photoOn;
   if (buildings) buildings.show = m === "surface" && !photoOn;
 }
-document.querySelectorAll("[data-mode]").forEach((b) => { b.onclick = () => setMode(b.dataset.mode); });
+document.querySelectorAll("[data-mode]").forEach((b) => {
+  b.onclick = async () => {
+    if (document.body.classList.contains("photoreal")) await choosePhotoreal(false);
+    setMode(b.dataset.mode);
+  };
+});
 setMode(mode);
+// With a Google key, open in the photoreal view unless a view was asked for.
+if (GOOGLE_KEY && !new URLSearchParams(location.search).get("mode")) choosePhotoreal(true);
 
 // Camera helpers.
 function view(p, duration) {

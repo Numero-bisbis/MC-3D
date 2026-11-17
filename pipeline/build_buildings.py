@@ -72,6 +72,87 @@ class Raster:
         return out
 
 
+def interior_heights(r, poly):
+    """Surface-model heights at the raster cells inside a polygon."""
+    from shapely import contains_xy
+    x0, y0, x1, y1 = poly.bounds
+    xs = np.arange(np.floor(x0 / r.res) * r.res + r.res / 2, x1, r.res)
+    ys = np.arange(np.floor(y0 / r.res) * r.res + r.res / 2, y1, r.res)
+    if not len(xs) or not len(ys):
+        return np.array([])
+    X, Y = np.meshgrid(xs, ys)
+    X, Y = X.ravel(), Y.ravel()
+    if len(X) > 40000:
+        k = np.random.default_rng(0).choice(len(X), 40000, replace=False)
+        X, Y = X[k], Y[k]
+    ins = contains_xy(poly, X, Y)
+    z = r.sample(X[ins], Y[ins])
+    return z[np.isfinite(z)]
+
+
+def facade_texture():
+    """One window bay by one storey, repeated over every wall. White render
+    (the vertex colour tints it), a tall window with a stone surround and
+    green Riviera shutters folded open either side, and a floor band."""
+    from PIL import Image, ImageDraw, ImageFilter
+    import io
+    W = H = 128
+    img = Image.new("RGB", (W, H), (246, 244, 240))
+    d = ImageDraw.Draw(img)
+    rng = np.random.default_rng(1)
+    px = np.asarray(img).astype(np.int16)
+    px = (px + rng.integers(-6, 7, (H, W, 1))).clip(0, 255).astype(np.uint8)
+    img = Image.fromarray(px)
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, H - 9, W, H - 1], fill=(222, 216, 204))          # floor band
+    d.rectangle([0, H - 10, W, H - 9], fill=(200, 194, 182))
+    wx0, wx1, wy0, wy1 = 48, 80, 26, 100                             # window
+    d.rectangle([wx0 - 5, wy0 - 5, wx1 + 5, wy1 + 4], fill=(226, 220, 208))   # surround
+    d.rectangle([wx0, wy0, wx1, wy1], fill=(70, 80, 92))                       # glass
+    d.rectangle([wx0, wy0, wx1, wy0 + 30], fill=(112, 128, 142))               # sky reflection
+    d.line([(64, wy0), (64, wy1)], fill=(214, 210, 200), width=2)              # mullion
+    d.line([(wx0, 52), (wx1, 52)], fill=(214, 210, 200), width=2)
+    for sx in (wx0 - 19, wx1 + 6):                                             # shutters
+        d.rectangle([sx, wy0 - 2, sx + 13, wy1 + 2], fill=(150, 160, 140))
+        for yy in range(wy0 + 2, wy1, 5):
+            d.line([(sx + 2, yy), (sx + 11, yy)], fill=(128, 138, 120), width=1)
+    d.rectangle([wx0 - 7, wy1 + 4, wx1 + 7, wy1 + 8], fill=(206, 198, 184))   # sill
+    img = img.filter(ImageFilter.SMOOTH)
+    b = io.BytesIO()
+    img.save(b, "JPEG", quality=88)
+    return b.getvalue()
+
+
+ROOF_MARGIN = 200   # m of neighbouring photo around each km tile
+ROOF_TEX = 4096     # px; a safe texture size on phones
+
+
+def roof_texture(tx, ty):
+    """The tile's orthophoto plus a margin from its neighbours, so buildings
+    that cross a tile edge get the right roof photo instead of smeared edge
+    pixels. Returns jpeg bytes covering [tx*1000 - M, (tx+1)*1000 + M] x
+    [(ty-1)*1000 - M, ty*1000 + M]."""
+    from PIL import Image
+    import io
+    px = 4                                    # source px per metre
+    span = 1000 + 2 * ROOF_MARGIN
+    canvas = Image.new("RGB", (span * px, span * px), (90, 90, 90))
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            f = RAW / "ortho" / f"ortho_{tx + dx}_{ty + dy}.jpg"
+            if not f.exists():
+                continue
+            im = Image.open(f)
+            # Top-left of that tile on the canvas.
+            ox = (dx * 1000 + ROOF_MARGIN) * px
+            oy = (-dy * 1000 + ROOF_MARGIN) * px
+            canvas.paste(im, (ox, oy))
+    canvas = canvas.resize((ROOF_TEX, ROOF_TEX), Image.LANCZOS)
+    b = io.BytesIO()
+    canvas.save(b, "JPEG", quality=85)
+    return b.getvalue()
+
+
 def polygons(geom):
     g = shape(geom)
     g = g.buffer(0)
@@ -113,7 +194,7 @@ def triangulate(poly):
     return t["vertices"], t["triangles"], data["segments"]
 
 
-def write_glb(path, roof, wall, texture_bytes):
+def write_glb(path, roof, wall, texture_bytes, facade_bytes):
     """roof/wall: dicts of numpy arrays. glTF is y-up: we write (e, u, -n)."""
     def yup(p):
         return np.column_stack([p[:, 0], p[:, 2], -p[:, 1]]).astype("<f4")
@@ -147,10 +228,14 @@ def write_glb(path, roof, wall, texture_bytes):
         a_p = add(yup(wall["pos"]), 34962, minmax=True)
         a_n = add(yup(wall["nrm"]), 34962)
         a_c = add(wall["col"].astype("u1"), 34962, comp=5121, typ="VEC4", normalized=True)
-        prims.append({"attributes": {"POSITION": a_p, "NORMAL": a_n, "COLOR_0": a_c}, "material": 1})
-    img_off = sum(len(c) for c in chunks)
-    chunks.append(texture_bytes + b"\0" * ((-len(texture_bytes)) % 4))
-    views.append({"buffer": 0, "byteOffset": img_off, "byteLength": len(texture_bytes)})
+        a_t = add(wall["uv"].astype("<f4"), 34962, typ="VEC2")
+        prims.append({"attributes": {"POSITION": a_p, "NORMAL": a_n, "COLOR_0": a_c, "TEXCOORD_0": a_t}, "material": 1})
+    img_views = []
+    for data in (texture_bytes, facade_bytes):
+        img_off = sum(len(c) for c in chunks)
+        chunks.append(data + b"\0" * ((-len(data)) % 4))
+        views.append({"buffer": 0, "byteOffset": img_off, "byteLength": len(data)})
+        img_views.append(len(views) - 1)
     binary = b"".join(chunks)
     gltf = {
         "asset": {"version": "2.0", "generator": "MC-3D build_buildings.py"},
@@ -158,11 +243,13 @@ def write_glb(path, roof, wall, texture_bytes):
         "meshes": [{"primitives": prims}],
         "materials": [
             {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}, "metallicFactor": 0, "roughnessFactor": 0.9}},
-            {"pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1], "metallicFactor": 0, "roughnessFactor": 0.85}},
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 1}, "metallicFactor": 0, "roughnessFactor": 0.85}},
         ],
-        "textures": [{"source": 0, "sampler": 0}],
-        "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}],
-        "images": [{"bufferView": len(views) - 1, "mimeType": "image/jpeg"}],
+        "textures": [{"source": 0, "sampler": 0}, {"source": 1, "sampler": 1}],
+        "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071},
+                     {"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}],
+        "images": [{"bufferView": img_views[0], "mimeType": "image/jpeg"},
+                   {"bufferView": img_views[1], "mimeType": "image/jpeg"}],
         "buffers": [{"byteLength": len(binary)}],
         "bufferViews": views, "accessors": accessors,
     }
@@ -185,7 +272,8 @@ def main():
     names = [l.strip() for l in open(ROOT / "pipeline" / "tiles.txt") if l.strip() and not l.startswith("#")]
     mns, x0, y0 = load_mosaic(names, "mns")
     mnt, _, _ = load_mosaic(names, "mnt")
-    roof_r = Raster(filt(mns, np.fmax), x0, y0)   # max filter: roof edges do not drop to the street
+    roof_r = Raster(filt(mns, np.fmax), x0, y0)
+    mns_r = Raster(mns, x0, y0)   # max filter: roof edges do not drop to the street
     ground_r = Raster(filt(mnt, np.fmin), x0, y0)
 
     pyproj.datadir.append_data_dir(str(RAW / "grids"))
@@ -205,6 +293,7 @@ def main():
     print(len(feats), "outlines")
 
     tiles = {n: {"roof": [], "wall": []} for n in names}
+    facade = facade_texture()
     kept = 0
     for feat in feats:
         props = feat["properties"]
@@ -218,6 +307,17 @@ def main():
                 continue
             v, t, segs = tri
             zr = roof_r.sample(v[:, 0], v[:, 1])
+            # Outline corners can pick up a taller neighbour, a tree or a
+            # crane in the max-filtered model, which made shards and spikes.
+            # Keep every roof vertex within the range of the unfiltered
+            # surface model inside the outline (eroded by 1 m).
+            inner = poly.buffer(-1.0)
+            if inner.is_empty:
+                inner = poly
+            zin = interior_heights(mns_r, inner)
+            if len(zin) >= 4:
+                lo_r, hi_r = np.percentile(zin, [10, 97])
+                zr = np.clip(zr, lo_r, hi_r)
             zg = ground_r.sample(v[:, 0], v[:, 1])
             if np.isnan(zg).all():
                 gmin = props.get("altitude_minimale_sol")
@@ -239,7 +339,9 @@ def main():
                 continue
             seed = int(hashlib.md5(str(props.get("cleabs", kept)).encode()).hexdigest()[:8], 16)
             tiles[name]["roof"].append((v, t, zr))
-            tiles[name]["wall"].append((v, segs, zr, zg, FACADE[seed % len(FACADE)]))
+            bay = 3.6 + (seed >> 8) % 9 * 0.15          # 3.6 to 4.8 m
+            storey = 2.9 + (seed >> 12) % 5 * 0.12      # 2.9 to 3.4 m
+            tiles[name]["wall"].append((v, segs, zr, zg, FACADE[seed % len(FACADE)], bay, storey))
             kept += 1
     print(kept, "buildings kept")
 
@@ -253,7 +355,9 @@ def main():
         base = 0
         for v, t, zr in parts["roof"]:
             pos.append(to_enu(v[:, 0], v[:, 1], zr))
-            uv.append(np.column_stack([(v[:, 0] - tx * 1000) / 1000, (ty * 1000 - v[:, 1]) / 1000]))
+            span = 1000 + 2 * ROOF_MARGIN
+            uv.append(np.column_stack([(v[:, 0] - tx * 1000 + ROOF_MARGIN) / span,
+                                       (ty * 1000 + ROOF_MARGIN - v[:, 1]) / span]))
             idx.append(t + base)
             base += len(v)
         rp = np.concatenate(pos); ri = np.concatenate(idx); ruv = np.clip(np.concatenate(uv), 0, 1)
@@ -269,9 +373,21 @@ def main():
         rn /= np.linalg.norm(rn, axis=1, keepdims=True) + 1e-9
 
         # Walls: one quad per outline segment, flat normals, vertex colours.
-        wp, wc = [], []
-        for v, segs, zr, zg, col in parts["wall"]:
+        wp, wc, wuv = [], [], []
+        for v, segs, zr, zg, col, bay, storey in parts["wall"]:
             i, j = segs[:, 0], segs[:, 1]
+            # u: metres along the outline / bay width; v: height above the
+            # building's ground / storey height, so windows line up floor by
+            # floor around the building.
+            seg_len = np.hypot(*(v[j] - v[i]).T)
+            u0 = np.concatenate([[0], np.cumsum(seg_len)[:-1]]) / bay
+            u1 = u0 + seg_len / bay
+            base_z = np.min(zg)
+            vg_i, vg_j = (zg[i] - base_z) / storey, (zg[j] - base_z) / storey
+            vr_i, vr_j = (zr[i] - base_z) / storey, (zr[j] - base_z) / storey
+            uvq = np.stack([np.column_stack([u0, vg_i]), np.column_stack([u1, vg_j]),
+                            np.column_stack([u1, vr_j]), np.column_stack([u0, vr_i])], axis=1)
+            wuv.append(np.concatenate([uvq[:, [0, 1, 2]], uvq[:, [0, 2, 3]]], axis=0))
             p = np.stack([
                 to_enu(v[i, 0], v[i, 1], zg[i]), to_enu(v[j, 0], v[j, 1], zg[j]),
                 to_enu(v[j, 0], v[j, 1], zr[j]), to_enu(v[i, 0], v[i, 1], zr[i]),
@@ -282,6 +398,7 @@ def main():
             colours = (col[None, None, :] * shade[:, :, None]).clip(0, 255)
             wp.append(quads); wc.append(colours)
         wp = np.concatenate(wp)                                  # (ntri, 3, 3)
+        wuv = np.concatenate(wuv)
         wc = np.concatenate(wc)
         n = np.cross(wp[:, 1] - wp[:, 0], wp[:, 2] - wp[:, 0])
         n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-9
@@ -291,9 +408,11 @@ def main():
             "pos": wp2.reshape(-1, 3),
             "nrm": np.repeat(n2, 3, axis=0),
             "col": np.concatenate([wc2.reshape(-1, 3), np.full((len(wc2) * 3, 1), 255)], axis=1),
+            # glTF v runs down the image: flip so storeys stack upward.
+            "uv": np.column_stack([wuv.reshape(-1, 2)[:, 0], -wuv.reshape(-1, 2)[:, 1]]),
         }
-        tex = (RAW / "ortho" / f"ortho_{name}.jpg").read_bytes()
-        write_glb(out / f"{name}.glb", {"pos": rp, "nrm": rn, "uv": ruv, "idx": ri}, wall, tex)
+        tex = roof_texture(tx, ty)
+        write_glb(out / f"{name}.glb", {"pos": rp, "nrm": rn, "uv": ruv, "idx": ri}, wall, tex, facade)
         allp = np.concatenate([rp, wall["pos"]])
         lo, hi = allp.min(axis=0), allp.max(axis=0)
         cen, half = (lo + hi) / 2, (hi - lo) / 2 + 1
