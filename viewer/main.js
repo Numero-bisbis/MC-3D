@@ -328,6 +328,11 @@ function setTourQuality(on) {
   if (!google) return;
   google.maximumScreenSpaceError = tourQ ? tourQ.sse : GOOGLE_SSE.still;
   google.cullRequestsWhileMoving = !tourQ;
+  // "Foveated" loading puts off every tile away from the centre of the
+  // screen until the camera has been still for a moment. In a lap the
+  // camera is never still, so the buildings at the sides never sharpened:
+  // the main cause of the endless loading at street level.
+  google.foveatedScreenSpaceError = !tourQ;
   google.cacheBytes = tourQ ? GOOGLE_CACHE.bytes * 1.5 : GOOGLE_CACHE.bytes;
   google.maximumCacheOverflowBytes = tourQ ? GOOGLE_CACHE.overflow * 2 : GOOGLE_CACHE.overflow;
   google.dynamicScreenSpaceError = true;
