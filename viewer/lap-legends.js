@@ -347,6 +347,8 @@
   const local = new Cesium.Cartesian3(), world = new Cesium.Cartesian3();
   const rot = new Cesium.Matrix3(), localM = new Cesium.Matrix4(), carM = new Cesium.Matrix4();
   function placeCar(u) {
+    const clean = M.cleanTrack && M.cleanTrack.on;
+    if (clean) zOff = M.cleanTrack.lift;          // on the modelled track
     const x = lerp(CX, u), y = lerp(CY, u), z = lerp(CZ, u) + zOff;
     const a = u + 1.2 / DS, b = u - 1.2 / DS;
     let fx = lerp(CX, a) - lerp(CX, b), fy = lerp(CY, a) - lerp(CY, b), fz = lerp(CZ, a) - lerp(CZ, b);
@@ -366,7 +368,7 @@
   // Keep the car on the ground of whichever 3D view is shown: the route
   // heights come from the LiDAR and can sit a little above or below it.
   function settle(pos) {
-    if (++frame % 3 || !scene.clampToHeightSupported) return;
+    if (++frame % 3 || !scene.clampToHeightSupported || (M.cleanTrack && M.cleanTrack.on)) return;
     Cesium.Matrix4.multiplyByPoint(toWorld, Cesium.Cartesian3.fromElements(pos.x, pos.y, pos.z - zOff, local), world);
     let hit;
     try { hit = scene.clampToHeight(world, [car.body, car.shadow]); } catch (e) { hit = undefined; }
@@ -430,6 +432,7 @@
     // Tunnel.
     let d = 0;
     for (const [a, b] of TUN) d = Math.max(d, smoothstep(a - 30, a - 4, s) * (1 - smoothstep(b + 4, b + 40, s)));
+    if (M.cleanTrack && M.cleanTrack.on) d = 0;     // the modelled tunnel has its own lights
     tunnelDark = d;
     dark.enabled = d > 0.002;
     ui.tunnel.style.opacity = (d * 0.85).toFixed(3);
@@ -558,6 +561,7 @@
   function start() {
     state = "pick";
     if (M.setTourQuality) M.setTourQuality(true);
+    if (M.cleanTrack) M.cleanTrack.show(true);
     lap = null;
     const photoreal = document.body.classList.contains("photoreal");
     if (M.getMode() !== "surface" && !photoreal) M.setMode("surface");
@@ -682,6 +686,7 @@
     const was = state;
     prep.hidden = true;
     if (M.setTourQuality) M.setTourQuality(false);
+    if (M.cleanTrack) M.cleanTrack.show(false);
     state = "off";
     run++;
     clearTimers();

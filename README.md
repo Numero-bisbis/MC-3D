@@ -40,7 +40,10 @@ three fastest Monaco laps of each decade since the 1950s (official pole laps
 and race fastest laps). Each replay takes exactly the real lap time; the speed
 in each corner is estimated from the shape of the road. A camera button
 switches between the chase view and an onboard view. Add `?tour=legends` to
-open the picker, or `?tour=legends&legend=1985-senna` to start one lap.
+open the picker, or `?tour=legends&legend=1985-senna` to start one lap. During the laps the photoreal road is
+replaced by a clean modelled track (asphalt, kerbs, barriers) and a modelled
+tunnel, so the scan's parked cars and roadworks disappear (`viewer/clean-track.js`;
+add `?clean=0` to see the raw scan).
 
 ## Publish it
 
