@@ -55,8 +55,28 @@ if (!IS_SMALL) {
   viewer.shadowMap.darkness = 0.55;
 }
 scene.postProcessStages.fxaa.enabled = true;
-if (Cesium.FeatureDetection.supportsImageRenderingPixelated()) {
-  viewer.resolutionScale = Math.min(window.devicePixelRatio, 2);
+// Resolution. Rendering at the full pixel density of a phone screen (3x on
+// iPhones) costs up to 9 times the work of 1x and was the main cause of
+// stutter. Draw at a lighter scale while the camera moves and sharpen once
+// it stops for a moment.
+const SHARP_SCALE = Cesium.FeatureDetection.supportsImageRenderingPixelated()
+  ? Math.min(window.devicePixelRatio, IS_SMALL ? 1.5 : 2) : 1;
+const MOVING_SCALE = IS_SMALL ? 1 : Math.min(SHARP_SCALE, 1.5);
+viewer.resolutionScale = SHARP_SCALE;
+{
+  let idle;
+  viewer.camera.moveStart.addEventListener(() => {
+    clearTimeout(idle);
+    if (viewer.resolutionScale !== MOVING_SCALE) viewer.resolutionScale = MOVING_SCALE;
+    if (google) google.maximumScreenSpaceError = GOOGLE_SSE.moving;
+  });
+  viewer.camera.moveEnd.addEventListener(() => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
+      viewer.resolutionScale = SHARP_SCALE;
+      if (google) google.maximumScreenSpaceError = GOOGLE_SSE.still;
+    }, 400);
+  });
 }
 
 // Imagery: Sentinel-2 cloudless for the wide view, IGN 20 cm orthophoto near Monaco.
@@ -204,7 +224,10 @@ const STYLES = {
 // Phones get a lighter load; desktops load the full density.
 const MOBILE = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 700;
 
-Cesium.Cesium3DTileset.fromUrl("tiles/tileset.json", {
+let pointsLoading = null;
+function loadPoints() {
+  if (pointsLoading) return pointsLoading;
+  pointsLoading = Cesium.Cesium3DTileset.fromUrl("tiles/tileset.json", {
   maximumScreenSpaceError: MOBILE ? 3 : 1.5,
   cacheBytes: (MOBILE ? 384 : 1536) * 1024 * 1024,
   maximumCacheOverflowBytes: (MOBILE ? 128 : 512) * 1024 * 1024,
@@ -218,24 +241,61 @@ Cesium.Cesium3DTileset.fromUrl("tiles/tileset.json", {
     eyeDomeLightingStrength: 0.9,
     eyeDomeLightingRadius: 0.8,
   },
-}).then((ts) => {
-  tileset = ts;
-  ts.show = mode === "points";
-  scene.primitives.add(ts);
-}).catch((e) => console.error("tileset failed", e));
+  }).then((ts) => {
+    tileset = ts;
+    watchLoading(ts);
+    ts.show = mode === "points" && !document.body.classList.contains("photoreal");
+    scene.primitives.add(ts);
+    const active = document.querySelector("[data-style].on");
+    if (active) ts.style = STYLES[active.dataset.style];
+  }).catch((e) => console.error("tileset failed", e));
+  return pointsLoading;
+}
 
 // Optional photoreal layer: Google Photorealistic 3D Tiles. Needs a Google
 // Maps Platform key with the Map Tiles API enabled, restricted to this site.
 // Set it in config.js, or add ?gkey=YOUR_KEY to the URL to try one.
 const GOOGLE_KEY = new URLSearchParams(location.search).get("gkey") ||
   (window.MC3D_CONFIG && window.MC3D_CONFIG.googleKey) || "";
+// A small "Loading" pill while tiles stream in, shown only if loading lasts
+// more than half a second, so short top-ups do not flicker.
+const loadingEl = document.getElementById("loading");
+const pending = new Map();
+let loadingTimer;
+function setPending(key, n) {
+  pending.set(key, n);
+  const busy = [...pending.values()].some((v) => v > 0);
+  if (busy && !loadingTimer && loadingEl.hidden) {
+    loadingTimer = setTimeout(() => { loadingEl.hidden = false; loadingTimer = null; }, 500);
+  } else if (!busy) {
+    clearTimeout(loadingTimer); loadingTimer = null;
+    loadingEl.hidden = true;
+  }
+}
+function watchLoading(ts) {
+  ts.loadProgress.addEventListener((reqs, processing) => setPending(ts, reqs + processing));
+}
+scene.globe.tileLoadProgressEvent.addEventListener((n) => setPending("globe", scene.globe.show ? n : 0));
+
 let google;
+// Google detail: coarser while the camera moves (fewer downloads, smoother
+// motion), finer once it stops, so a still view is sharper than before.
+const GOOGLE_SSE = MOBILE ? { moving: 24, still: 12 } : { moving: 12, still: 6 };
 async function setPhotoreal(on) {
   if (on && !google) {
     google = await Cesium.createGooglePhotorealistic3DTileset(GOOGLE_KEY, {
-      maximumScreenSpaceError: MOBILE ? 16 : 8,
+      // A cache that stays clear of iOS Safari's memory limit on phones, and
+      // less detail far from the screen centre and while moving.
+      maximumScreenSpaceError: GOOGLE_SSE.still,
+      cacheBytes: (MOBILE ? 256 : 1024) * 1024 * 1024,
+      maximumCacheOverflowBytes: (MOBILE ? 64 : 512) * 1024 * 1024,
+      dynamicScreenSpaceError: true,
+      foveatedScreenSpaceError: true,
+      cullRequestsWhileMoving: true,
+      preloadFlightDestinations: true,
     });
     scene.primitives.add(google);
+    watchLoading(google);
   }
   if (google) google.show = on;
   if (tileset) tileset.show = !on && mode === "points";
@@ -275,6 +335,7 @@ Cesium.Cesium3DTileset.fromUrl("buildings/tileset.json", {
   shadows: Cesium.ShadowMode.CAST_ONLY,
 }).then((ts) => {
   buildings = ts;
+  watchLoading(ts);
   ts.show = mode === "surface" && !document.body.classList.contains("photoreal");
   scene.primitives.add(ts);
 }).catch((e) => console.error("buildings failed", e));
@@ -297,6 +358,7 @@ async function setMode(m) {
     }
   } else {
     scene.terrainProvider = pointsTerrain;
+    loadPoints();
   }
   const photoOn = document.body.classList.contains("photoreal");
   if (tileset) tileset.show = m === "points" && !photoOn;
@@ -310,7 +372,11 @@ document.querySelectorAll("[data-mode]").forEach((b) => {
 });
 setMode(mode);
 // With a Google key, open in the photoreal view unless a view was asked for.
-if (GOOGLE_KEY && !new URLSearchParams(location.search).get("mode")) choosePhotoreal(true);
+if (GOOGLE_KEY && !new URLSearchParams(location.search).get("mode")) {
+  document.body.classList.add("photoreal");
+  scene.globe.show = false;
+  choosePhotoreal(true);
+}
 
 // Camera helpers.
 function view(p, duration) {
@@ -336,11 +402,19 @@ document.querySelectorAll("[data-style]").forEach((b) => {
   };
 });
 
-// Start outside, over the Riviera, then glide into Monaco.
+// Opening shot. In the photoreal view, start just outside Monaco and glide
+// in: starting 90 km out over the Riviera made Google stream the whole coast
+// first, which was most of the wait. The open-data views keep the Riviera
+// opening.
 const params = new URLSearchParams(location.search);
 const start = PLACES.find((p) => p.name.toLowerCase() === (params.get("place") || "").toLowerCase());
 if (start) {
   view(start, 0);
+} else if (params.get("tour")) {
+  view(PLACES[1], 0);
+} else if (document.body.classList.contains("photoreal")) {
+  view({ ...PLACES[1], range: 6500, pitch: -24 }, 0);
+  setTimeout(() => view(PLACES[1], 4), 1200);
 } else {
   view(PLACES[0], 0);
   setTimeout(() => view(PLACES[1], 6), 1500);
