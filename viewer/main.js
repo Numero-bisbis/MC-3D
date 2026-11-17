@@ -232,7 +232,7 @@ const GOOGLE_KEY = new URLSearchParams(location.search).get("gkey") ||
 let google;
 async function setPhotoreal(on) {
   if (on && !google) {
-    google = await Cesium.createGooglePhotorealistic3DTileset(GOOGLE_KEY, {
+    google = await Cesium.createGooglePhotorealistic3DTileset({ key: GOOGLE_KEY, onlyUsingWithGoogleGeocoder: true }, {
       maximumScreenSpaceError: MOBILE ? 16 : 8,
     });
     scene.primitives.add(google);
