@@ -380,7 +380,11 @@
     zOffOk = true;
   }
 
-  let view = "chase";
+  // Phones start with the high TV camera, which streams far more smoothly;
+  // ?cam=chase, tv or onboard picks one.
+  const CAM = new URLSearchParams(location.search).get("cam");
+  let view = ["chase", "tv", "onboard"].includes(CAM) ? CAM
+    : (matchMedia("(pointer: coarse)").matches && Math.min(screen.width, screen.height) < 700 ? "tv" : "chase");
   const zUp = new Cesium.Cartesian3(0, 0, 1);
   const dir = new Cesium.Cartesian3(), up = new Cesium.Cartesian3(), right = new Cesium.Cartesian3(), eye = new Cesium.Cartesian3();
   function cameraFor(u, v) {
@@ -389,6 +393,15 @@
       const back = 8.5 + 0.035 * v, uc = u - back / DS, ut = u + 2.5 / DS;
       ex = lerp(QX, uc); ey = lerp(QY, uc); ez = Math.max(lerp(CZ, uc), lerp(CZ, u)) + zOff + 2.6;
       tx = lerp(CX, ut); ty = lerp(CY, ut); tz = lerp(CZ, ut) + zOff + 0.75;
+    } else if (view === "tv") {
+      // A high camera following from further back, like the TV pictures:
+      // it needs far less fine detail right next to it than the low chase
+      // view, so it streams much more smoothly. Low again in the tunnel.
+      const back = 17 + 0.06 * v, uc = u - back / DS, ut = u + 6 / DS;
+      const inTunnel = K.tunnelWeight(((uc % N) + N) % N * DS, 25, 10);
+      ex = lerp(QX, uc); ey = lerp(QY, uc);
+      ez = Math.max(lerp(CZ, uc), lerp(CZ, u)) + zOff + 9 * (1 - inTunnel) + 3.6 * inTunnel;
+      tx = lerp(CX, ut); ty = lerp(CY, ut); tz = lerp(CZ, ut) + zOff + 0.3;
     } else {
       const ua = u + 0.4 / DS, ut = u + 30 / DS;
       ex = lerp(CX, ua); ey = lerp(CY, ua); ez = lerp(CZ, ua) + zOff + 1.05;
@@ -461,7 +474,7 @@
     if (!(f instanceof Cesium.PerspectiveFrustum)) return;
     if (oldFov === null) oldFov = f.fov;
     const c = scene.canvas, portrait = c.clientHeight > c.clientWidth;
-    const deg = view === "chase" ? (portrait ? 72 : 60) : (portrait ? 80 : 68);
+    const deg = view === "onboard" ? (portrait ? 80 : 68) : (portrait ? 72 : 60);
     f.fov = Cesium.Math.toRadians(deg);
   }
   // The timing card sits just under the mini map.
@@ -521,16 +534,24 @@
     if (state === "paused") looked = true;
   });
 
-  function switchView() {
-    view = view === "chase" ? "onboard" : "chase";
-    hud.buttons[0].innerHTML = view === "chase" ? ICON_ONBOARD : ICON_CHASE;
-    hud.buttons[0].title = view === "chase" ? "Onboard camera" : "Chase camera";
-    showCar(view === "chase" && state !== "off");
+  // The camera button cycles chase → TV → onboard, and shows the next one.
+  const VIEWS = ["chase", "tv", "onboard"];
+  const nextView = () => VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length];
+  function labelViewButton() {
+    const n = nextView();
+    hud.buttons[0].innerHTML = n === "onboard" ? ICON_ONBOARD : n === "tv" ? ICON_TV : ICON_CHASE;
+    hud.buttons[0].title = n === "onboard" ? "Onboard camera" : n === "tv" ? "TV camera (smoothest)" : "Chase camera";
+  }
+  function switchView(to) {
+    view = to || nextView();
+    labelViewButton();
+    showCar(view !== "onboard" && state !== "off");
     setFov();
     if (state !== "playing") { looked = false; applyCamera(); }
   }
   const ICON_ONBOARD = '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10" cy="10" r="7.2"/><circle cx="10" cy="10" r="1.6" fill="currentColor"/><path d="M3 10h5.4M11.6 10H17M10 11.6V17"/></svg>';
   const ICON_CHASE = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M3 12.5h14v2.2H3zM6 9.5h8l1.2 3H4.8zM8.6 7.4h2.8v2.2H8.6z"/><circle cx="5.2" cy="15" r="1.7"/><circle cx="14.8" cy="15" r="1.7"/></svg>';
+  const ICON_TV = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><rect x="2.5" y="6" width="10.5" height="8" rx="1.6"/><path d="M13.8 9.2 17.5 7v6l-3.7-2.2z"/></svg>';
   const ICON_LIST = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><rect x="3" y="4" width="14" height="2.2" rx="1"/><rect x="3" y="9" width="14" height="2.2" rx="1"/><rect x="3" y="14" width="14" height="2.2" rx="1"/></svg>';
 
   const handlers = {
@@ -595,11 +616,10 @@
     ctrl.enableInputs = false;
     zOffOk = false; zOff = 0;
     car = makeCar(shapeOf(lap.year));
-    showCar(view === "chase");
+    showCar(view !== "onboard");
     setFov();
     hud.show(handlers);
-    hud.buttons[0].innerHTML = view === "chase" ? ICON_ONBOARD : ICON_CHASE;
-    hud.buttons[0].title = view === "chase" ? "Onboard camera" : "Chase camera";
+    labelViewButton();
     tWho.textContent = `${lap.last.toUpperCase()} · ${lap.year}`;
     tOf.textContent = `/ ${lap.time}`;
     timer.hidden = false;
@@ -626,11 +646,10 @@
   }
 
   let prepared = false;
-  const PREP_STEP = 150;         // m between the places the camera visits
+  const PREP_STEP = 150;          // m between the places the camera visits
   // Each stop waits for its tiles, but never long: the whole preparation
-  // stays under about 20 s on a slow connection, and the lap itself keeps
-  // loading what is left.
-  const PREP_WAIT = 900;
+  // stays under about 10 s on a slow connection.
+  const PREP_WAIT = 1200;
   const frameDone = () => new Promise((res) => {
     const off = scene.postRender.addEventListener(() => { off(); res(); });
   });
@@ -643,8 +662,12 @@
     prepSkip.onclick = () => { skip = true; };
     // From just after the start round to the run-up, so the first metres
     // of the lap are the freshest in the cache.
+    // Only the first stretch: a phone's tile cache cannot hold the whole
+    // circuit at street level, so tiles loaded for the far side of the lap
+    // were thrown away again before the car got there. The rest streams
+    // in during the lap.
     const stops = [];
-    for (let s = PREP_STEP; s < LEN; s += PREP_STEP) stops.push(s / DS);
+    for (let s = 600; s > 0; s -= PREP_STEP) stops.push(s / DS);
     stops.push(-RUNUP / DS, -RUNUP / 2 / DS, 0, 30 / DS);
     for (let k = 0; k < stops.length && !skip; k++) {
       if (mine !== run) break;
@@ -714,6 +737,6 @@
   M.legends = {
     LAPS, choose, seek, bake,
     get state() { return state; }, get clock() { return tl; }, get lap() { return lap; },
-    set view(v) { if (v !== view) switchView(); },
+    set view(v) { if (v !== view && VIEWS.includes(v)) switchView(v); },
   };
 })();
