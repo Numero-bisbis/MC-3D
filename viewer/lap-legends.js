@@ -455,26 +455,10 @@
     const u = uAt(tl);
     cam.setView(cameraFor(u, speedAt(tl, u)));
   }
-  // Prefetch: Cesium already loads the tiles at the end of a camera
-  // flight before the camera gets there ("preloadFlightDestinations").
-  // During the lap we point that same look-ahead at where the camera will
-  // be a moment later, so the next corner is loading before we reach it.
-  const AHEAD = 1.6;                                   // s
-  const LOOKAHEAD = { cancelTween() {} };              // stands in for a flight
-  function prefetch() {
-    const pc = scene.preloadFlightCamera;
-    if (!pc || !(M.getGoogle && M.getGoogle())) return;
-    const ta = Math.min(tl + AHEAD, tPost), ua = uAt(ta);
-    pc.setView(cameraFor(ua, speedAt(ta, ua)));
-    scene.preloadFlightCullingVolume = pc.frustum.computeCullingVolume(pc.positionWC, pc.directionWC, pc.upWC);
-    if (!cam._currentFlight) cam._currentFlight = LOOKAHEAD;
-  }
-  const stopPrefetch = () => { if (cam._currentFlight === LOOKAHEAD) cam._currentFlight = undefined; };
-
   function tick() {
     const lapPlaying = state === "playing";
     document.body.classList.toggle("lap-playing", lapPlaying);
-    if (!lapPlaying) stopPrefetch();
+    if (!lapPlaying && M.setTourSpeed) M.setTourSpeed(0);
     if (state === "off" || state === "pick" && !lap) return;
     if (state === "paused" && !looked && !flying) applyCamera();
     if ((state === "playing" || state === "intro" || flying) && ctrl.enableInputs) ctrl.enableInputs = false;
@@ -483,7 +467,8 @@
     tl += Math.min(0.5, (now - last) / 1000);     // real time, so the lap takes the real lap time
     last = now;
     if (tl >= tPost) { tl = tPost; draw(); applyCamera(); finish(); return; }
-    prefetch();
+    // Report the speed so the scenery detail can follow it (main.js).
+    if (M.setTourSpeed) { const u = uAt(tl); M.setTourSpeed(speedAt(tl, u)); }
     draw();
     applyCamera();
   }
