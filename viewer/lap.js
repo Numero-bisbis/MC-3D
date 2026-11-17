@@ -465,6 +465,13 @@
   }
 
   M.tours.register({ id: "lap", label: "Grand Prix lap", start: begin, stop });
+  // Shared with the "Legendary laps" tour (lap-legends.js), which drives a
+  // car around the same route and reuses the map, lights and tunnel.
+  M.lapKit = {
+    P, N, DS, LEN, X, Y, ZG, ZC, TUN, wrap, smooth, smoothstep, tunnelWeight, toWorld, toLocal,
+    CORNERS, cornerAt, bounds: { minX, maxX, minY, maxY },
+    ui: { map, mapDone, mapCar, mx, my, lights, tunnel },
+  };
   // For checks and tuning from the browser console.
   M.lap = { get duration() { return F.DURATION; }, get style() { return styleName; }, length: LEN, seek, get state() { return state; }, get time() { return t; } };
 })();
