@@ -397,7 +397,7 @@
       // A high camera following from further back, like the TV pictures:
       // it needs far less fine detail right next to it than the low chase
       // view, so it streams much more smoothly. Low again in the tunnel.
-      const back = 17 + 0.06 * v, uc = u - back / DS, ut = u + 6 / DS;
+      const back = 17 + 0.06 * v, uc = u - back / DS, ut = u + 4 / DS;
       const inTunnel = K.tunnelWeight(((uc % N) + N) % N * DS, 25, 10);
       ex = lerp(QX, uc); ey = lerp(QY, uc);
       ez = Math.max(lerp(CZ, uc), lerp(CZ, u)) + zOff + 9 * (1 - inTunnel) + 3.6 * inTunnel;
@@ -455,7 +455,26 @@
     const u = uAt(tl);
     cam.setView(cameraFor(u, speedAt(tl, u)));
   }
+  // Prefetch: Cesium already loads the tiles at the end of a camera
+  // flight before the camera gets there ("preloadFlightDestinations").
+  // During the lap we point that same look-ahead at where the camera will
+  // be a moment later, so the next corner is loading before we reach it.
+  const AHEAD = 1.6;                                   // s
+  const LOOKAHEAD = { cancelTween() {} };              // stands in for a flight
+  function prefetch() {
+    const pc = scene.preloadFlightCamera;
+    if (!pc || !(M.getGoogle && M.getGoogle())) return;
+    const ta = Math.min(tl + AHEAD, tPost), ua = uAt(ta);
+    pc.setView(cameraFor(ua, speedAt(ta, ua)));
+    scene.preloadFlightCullingVolume = pc.frustum.computeCullingVolume(pc.positionWC, pc.directionWC, pc.upWC);
+    if (!cam._currentFlight) cam._currentFlight = LOOKAHEAD;
+  }
+  const stopPrefetch = () => { if (cam._currentFlight === LOOKAHEAD) cam._currentFlight = undefined; };
+
   function tick() {
+    const lapPlaying = state === "playing";
+    document.body.classList.toggle("lap-playing", lapPlaying);
+    if (!lapPlaying) stopPrefetch();
     if (state === "off" || state === "pick" && !lap) return;
     if (state === "paused" && !looked && !flying) applyCamera();
     if ((state === "playing" || state === "intro" || flying) && ctrl.enableInputs) ctrl.enableInputs = false;
@@ -464,6 +483,7 @@
     tl += Math.min(0.5, (now - last) / 1000);     // real time, so the lap takes the real lap time
     last = now;
     if (tl >= tPost) { tl = tPost; draw(); applyCamera(); finish(); return; }
+    prefetch();
     draw();
     applyCamera();
   }

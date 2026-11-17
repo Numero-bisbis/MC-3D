@@ -336,8 +336,8 @@ function setTourQuality(on) {
   google.cacheBytes = tourQ ? GOOGLE_CACHE.bytes * 1.5 : GOOGLE_CACHE.bytes;
   google.maximumCacheOverflowBytes = tourQ ? GOOGLE_CACHE.overflow * 2 : GOOGLE_CACHE.overflow;
   google.dynamicScreenSpaceError = true;
-  google.dynamicScreenSpaceErrorDensity = tourQ ? 2.2e-3 : DYN.density;
-  google.dynamicScreenSpaceErrorFactor = tourQ ? 48 : DYN.factor;
+  google.dynamicScreenSpaceErrorDensity = tourQ ? (MOBILE ? 3e-3 : 2.2e-3) : DYN.density;
+  google.dynamicScreenSpaceErrorFactor = tourQ ? (MOBILE ? 64 : 48) : DYN.factor;
 }
 const realBtn = document.getElementById("photoreal");
 // Photoreal is a third view next to Surface and Points: picking it lights its
