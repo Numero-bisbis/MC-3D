@@ -179,3 +179,7 @@ body.picking .tour-hud .tour-bar { visibility: hidden; }
 .legend-prep-rail { height: 6px; margin: 18px 0 14px; border-radius: 3px; background: rgba(255, 255, 255, .14); overflow: hidden; }
 .legend-prep-fill { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .3s; }
 .legend-prep-skip { padding: 8px 16px; border-radius: 18px; }
+
+/* While a lap runs, tiles are always streaming in ahead of the car; the
+   "Loading" pill would never go away, so it stays hidden then. */
+body.lap-playing .loading { display: none !important; }
