@@ -51,6 +51,7 @@ a private repository needs a paid GitHub plan).
 | `pipeline/build_surface.py` | ground height tiles for the Surface view (surface model with buildings taken out) |
 | `pipeline/build_buildings.py` | 3D buildings from IGN outlines + LiDAR roofs and ground |
 | `pipeline/build_lap.py` | bakes the circuit route and its heights into `viewer/lap-route.js` (already committed) |
+| `pipeline/build_splat.py` | places a Gaussian splat (.spz) on the map as 3D Tiles in `viewer/splats/<name>/`; open with `?splat=<name>` |
 | `viewer/` | the CesiumJS viewer |
 | `data/sources.md` | every data source with licence and date |
 | `docs/crs.md` | coordinate and height choices |
