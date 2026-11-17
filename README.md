@@ -35,6 +35,13 @@ lap**: one lap of the Circuit de Monaco along the real route, with corner names,
 play/pause and a progress bar you can drag. Add `?tour=lap` to start it straight
 away. Tours register themselves with `MC3D.tours.register` (see `viewer/tours.js`).
 
+**Legendary laps** rides along behind a small generic single-seater on the
+three fastest Monaco laps of each decade since the 1950s (official pole laps
+and race fastest laps). Each replay takes exactly the real lap time; the speed
+in each corner is estimated from the shape of the road. A camera button
+switches between the chase view and an onboard view. Add `?tour=legends` to
+open the picker, or `?tour=legends&legend=1985-senna` to start one lap.
+
 ## Publish it
 
 `.github/workflows/pages.yml` rebuilds the tiles from IGN and publishes the viewer

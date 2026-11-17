@@ -66,6 +66,7 @@
   const rail = el("div", "tour-rail", track);
   const fill = el("div", "tour-fill", rail);
   const marks = el("div", "tour-marks", rail);
+  const extras = el("div", "tour-extras", bar);     // a tour's own buttons
   const closeBtn = el("button", "tour-close", bar, "✕");
   closeBtn.setAttribute("aria-label", "Close the tour");
   closeBtn.title = "Close the tour";
@@ -78,6 +79,8 @@
   const endRow = el("div", "tour-end-row", endCard);
   const againBtn = el("button", "on", endRow, "Watch again");
   const exploreBtn = el("button", "", endRow, "Explore Monaco");
+  const moreBtn = el("button", "", endRow);
+  moreBtn.hidden = true;
 
   const ICON_PLAY = '<svg width="18" height="18" viewBox="0 0 18 18"><path d="M5 3 L15 9 L5 15 Z" fill="currentColor"/></svg>';
   const ICON_PAUSE = '<svg width="18" height="18" viewBox="0 0 18 18"><path d="M4 3h3.5v12H4zM10.5 3H14v12h-3.5z" fill="currentColor"/></svg>';
@@ -88,6 +91,7 @@
   closeBtn.onclick = stop;
   exploreBtn.onclick = stop;
   againBtn.onclick = () => { endCard.hidden = true; if (handlers.onReplay) handlers.onReplay(); };
+  moreBtn.onclick = () => { endCard.hidden = true; if (handlers.more) handlers.more.onClick(); };
 
   // Tap or drag on the progress bar to jump.
   function seek(e) {
@@ -116,10 +120,23 @@
 
   const hud = {
     root,
-    // h: { onToggle, onSeek(fraction), onReplay, marks: [fractions 0..1] }
+    // h: { onToggle, onSeek(fraction), onReplay, marks: [fractions 0..1],
+    //      buttons: [{ html, title, onClick }] shown next to ✕,
+    //      more: { label, onClick } a third button on the end card }
     show(h) {
       handlers = h || {};
       marks.textContent = "";
+      extras.textContent = "";
+      hud.buttons = (handlers.buttons || []).map((b) => {
+        const e = el("button", "tour-extra", extras);
+        e.innerHTML = b.html;
+        e.title = b.title || "";
+        e.setAttribute("aria-label", b.title || "");
+        e.onclick = b.onClick;
+        return e;
+      });
+      moreBtn.hidden = !handlers.more;
+      if (handlers.more) moreBtn.textContent = handlers.more.label;
       for (const f of handlers.marks || []) el("i", "", marks).style.left = `${f * 100}%`;
       endCard.hidden = true;
       root.classList.remove("ended");
