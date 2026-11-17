@@ -17,30 +17,35 @@
     },
     {
       title: "The Prince's Palace",
+      sv: { lat: 43.73128, lng: 7.42068, heading: 265 },
       text: "Home of the Grimaldis, the Palace began as a Genoese fortress in 1215. "
         + "The Changing of the Guard takes place on the square in front every day at 11:55.",
       lon: 7.41982, lat: 43.73126, h: 62, range: 450, pitch: -24, heading: 260,
     },
     {
       title: "Place du Palais",
+      sv: { lat: 43.73105, lng: 7.4215, heading: 40 },
       text: "The palace square, lined with old cannons. From its ramparts you look "
         + "straight down on Port Hercule and across to Monte-Carlo.",
       lon: 7.42138, lat: 43.73090, h: 60, range: 480, pitch: -16, heading: 35,
     },
     {
       title: "Monaco Cathedral",
+      sv: { lat: 43.73042, lng: 7.4223, heading: 120 },
       text: "Built from 1875 in white stone from La Turbie, the Cathedral of Our Lady "
         + "Immaculate is where Princess Grace and Prince Rainier III are buried.",
       lon: 7.42265, lat: 43.73025, h: 60, range: 390, pitch: -26, heading: 290,
     },
     {
       title: "Saint-Martin Gardens",
+      sv: { lat: 43.7303, lng: 7.4241, heading: 160 },
       text: "Pine-shaded paths and lookouts along the cliff top, with the open "
         + "Mediterranean below.",
       lon: 7.42428, lat: 43.73004, h: 50, range: 480, pitch: -20, heading: 350,
     },
     {
       title: "Oceanographic Museum",
+      sv: { lat: 43.73095, lng: 7.4252, heading: 150 },
       text: "Opened in 1910 by Prince Albert I, the explorer prince. Its façade rises "
         + "straight out of the cliff, 85 metres above the sea. Jacques-Yves Cousteau "
         + "directed it from 1957 to 1988.",
@@ -48,6 +53,7 @@
     },
     {
       title: "Fort Antoine",
+      sv: { lat: 43.7328, lng: 7.4276, heading: 60 },
       text: "An early 18th-century fort at the tip of the Rock, now an open-air "
         + "theatre for summer evenings by the sea.",
       lon: 7.42794, lat: 43.73308, h: 35, range: 450, pitch: -24, heading: 240,
@@ -68,7 +74,7 @@
       <button class="rt-close" aria-label="End tour" title="End tour">✕</button></div>
     <div class="rt-title"></div>
     <div class="rt-text"></div>
-    <div class="rt-buttons"><button class="rt-prev">Back</button><button class="rt-next">Next</button></div>`;
+    <div class="rt-buttons"><button class="rt-sv" hidden>Street View</button><button class="rt-prev">Back</button><button class="rt-next">Next</button></div>`;
   document.body.appendChild(card);
   const $ = (s) => card.querySelector(s);
 
@@ -139,6 +145,7 @@
     $(".rt-title").textContent = s.title;
     $(".rt-text").textContent = s.text;
     $(".rt-prev").hidden = index === 0;
+    $(".rt-sv").hidden = !(s.sv && MC3D.streetView && MC3D.streetView.available);
     $(".rt-next").textContent = index === STOPS.length - 1 ? "Finish" : "Next";
     card.hidden = false;
     viewer().camera.flyToBoundingSphere(new Cesium.BoundingSphere(target(s), 1), {
@@ -166,6 +173,12 @@
     card.hidden = true;
   }
 
+  // Street View walks through every stop that has one, starting here.
+  $(".rt-sv").onclick = () => {
+    const list = STOPS.filter((t) => t.sv);
+    MC3D.streetView.open(list.map((t) => ({ ...t.sv, kicker: "Le Rocher", title: t.title })),
+      list.indexOf(STOPS[index]));
+  };
   $(".rt-prev").onclick = () => show(index - 1);
   $(".rt-next").onclick = () => show(index + 1);
   $(".rt-close").onclick = () => (MC3D.tours.stop ? MC3D.tours.stop() : stop());

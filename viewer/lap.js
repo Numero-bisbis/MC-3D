@@ -380,7 +380,32 @@
     if (state === "paused") looked = true;
   });
 
-  const handlers = { onToggle: toggle, onSeek: seek, onReplay: () => begin(), marks: CORNERS.slice(1).map((c) => c.s / LEN) };
+  // Street View at each corner: a point on the road just before it, looking
+  // along the track towards the corner.
+  const CORNER_SPOTS = CORNERS.map((c) => {
+    const s0 = Math.max(0, c.s - 25), i = wrap(Math.round(s0 / DS)), j = wrap(i + Math.round(30 / DS));
+    const [lng, lat] = P[i], [lng2, lat2] = P[j];
+    const heading = Math.atan2((lng2 - lng) * Math.cos(lat * Math.PI / 180), lat2 - lat) * 180 / Math.PI;
+    return { lat, lng, heading, kicker: c.k, title: c.t };
+  });
+  // Opens the panorama of the corner the lap is at (or coming up to); the
+  // lap waits, paused, until ▶ is pressed again.
+  function streetViewAt(s, pauseLap) {
+    if (!M.streetView) return;
+    if (pauseLap) pauseLap();
+    M.streetView.open(CORNER_SPOTS, CORNERS.indexOf(cornerAt(s)));
+  }
+  const svButton = (getS, pauseLap) => ({
+    html: M.streetView ? M.streetView.ICON : "",
+    title: "Street View of this corner",
+    onClick: () => streetViewAt(getS(), pauseLap),
+  });
+
+  const handlers = {
+    onToggle: toggle, onSeek: seek, onReplay: () => begin(), marks: CORNERS.slice(1).map((c) => c.s / LEN),
+    buttons: M.streetView && M.streetView.available
+      ? [svButton(() => indexAt(t) * DS, () => (state === "intro" ? seek(0) : pause(false)))] : [],
+  };
 
   function begin() {
     clearTimers();
@@ -471,7 +496,7 @@
   // car around the same route and reuses the map, lights and tunnel.
   M.lapKit = {
     P, N, DS, LEN, X, Y, ZG, ZC, TUN, wrap, smooth, smoothstep, tunnelWeight, toWorld, toLocal,
-    CORNERS, cornerAt, bounds: { minX, maxX, minY, maxY },
+    CORNERS, cornerAt, CORNER_SPOTS, svButton, bounds: { minX, maxX, minY, maxY },
     ui: { map, mapDone, mapCar, mx, my, lights, tunnel },
   };
   // For checks and tuning from the browser console.
