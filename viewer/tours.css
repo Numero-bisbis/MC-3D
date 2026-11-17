@@ -169,3 +169,13 @@ body.picking .tour-hud .tour-bar { visibility: hidden; }
   .legends-sheet { width: 100%; max-height: 82%; border-radius: 16px 16px 0 0;
     padding-bottom: max(14px, env(safe-area-inset-bottom)); }
 }
+
+.legend-prep { position: fixed; inset: 0; z-index: 21; display: grid; place-items: center; padding: 16px;
+  background: radial-gradient(ellipse at 50% 40%, #1a1f27 0%, #07090c 75%); }
+.legend-prep[hidden] { display: none; }
+.legend-prep-card { width: min(340px, 100%); text-align: center; }
+.legend-prep-title { font-size: 22px; font-weight: 700; margin-top: 6px; }
+.legend-prep-note { font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+.legend-prep-rail { height: 6px; margin: 18px 0 14px; border-radius: 3px; background: rgba(255, 255, 255, .14); overflow: hidden; }
+.legend-prep-fill { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .3s; }
+.legend-prep-skip { padding: 8px 16px; border-radius: 18px; }

@@ -63,15 +63,20 @@ const SHARP_SCALE = Cesium.FeatureDetection.supportsImageRenderingPixelated()
   ? Math.min(window.devicePixelRatio, IS_SMALL ? 1.5 : 2) : 1;
 const MOVING_SCALE = IS_SMALL ? 1 : Math.min(SHARP_SCALE, 1.5);
 viewer.resolutionScale = SHARP_SCALE;
+// A tour that keeps the camera moving all the time (the lap tours) can hold
+// one steady quality instead, see setTourQuality below.
+let tourQ = null;
 {
   let idle;
   viewer.camera.moveStart.addEventListener(() => {
     clearTimeout(idle);
+    if (tourQ) return;
     if (viewer.resolutionScale !== MOVING_SCALE) viewer.resolutionScale = MOVING_SCALE;
     if (google) google.maximumScreenSpaceError = GOOGLE_SSE.moving;
   });
   viewer.camera.moveEnd.addEventListener(() => {
     clearTimeout(idle);
+    if (tourQ) return;
     idle = setTimeout(() => {
       viewer.resolutionScale = SHARP_SCALE;
       if (google) google.maximumScreenSpaceError = GOOGLE_SSE.still;
@@ -278,6 +283,7 @@ function watchLoading(ts) {
 scene.globe.tileLoadProgressEvent.addEventListener((n) => setPending("globe", scene.globe.show ? n : 0));
 
 let google;
+const GOOGLE_CACHE = { bytes: (MOBILE ? 256 : 1024) * 1024 * 1024, overflow: (MOBILE ? 64 : 512) * 1024 * 1024 };
 // Google detail: coarser while the camera moves (fewer downloads, smoother
 // motion), finer once it stops, so a still view is sharper than before.
 const GOOGLE_SSE = MOBILE ? { moving: 24, still: 12 } : { moving: 12, still: 6 };
@@ -287,8 +293,8 @@ async function setPhotoreal(on) {
       // A cache that stays clear of iOS Safari's memory limit on phones, and
       // less detail far from the screen centre and while moving.
       maximumScreenSpaceError: GOOGLE_SSE.still,
-      cacheBytes: (MOBILE ? 256 : 1024) * 1024 * 1024,
-      maximumCacheOverflowBytes: (MOBILE ? 64 : 512) * 1024 * 1024,
+      cacheBytes: GOOGLE_CACHE.bytes,
+      maximumCacheOverflowBytes: GOOGLE_CACHE.overflow,
       dynamicScreenSpaceError: true,
       foveatedScreenSpaceError: true,
       cullRequestsWhileMoving: true,
@@ -296,12 +302,26 @@ async function setPhotoreal(on) {
     });
     scene.primitives.add(google);
     watchLoading(google);
+    if (tourQ) setTourQuality(true);
   }
   if (google) google.show = on;
   if (tileset) tileset.show = !on && mode === "points";
   if (buildings) buildings.show = !on && mode === "surface";
   scene.globe.show = !on;   // Google's mesh already includes the terrain
   document.body.classList.toggle("photoreal", on);
+}
+// Street-level tours: one steady level of Google detail while the camera
+// keeps moving (the usual "coarser while moving" would leave the whole lap
+// blurry), a larger cache so the circuit is not thrown away and fetched
+// again, and requests kept even at speed. null puts everything back.
+function setTourQuality(on) {
+  tourQ = on ? { sse: MOBILE ? 16 : 8, scale: MOBILE ? Math.min(SHARP_SCALE, 1.25) : MOVING_SCALE } : null;
+  viewer.resolutionScale = tourQ ? tourQ.scale : SHARP_SCALE;
+  if (!google) return;
+  google.maximumScreenSpaceError = tourQ ? tourQ.sse : GOOGLE_SSE.still;
+  google.cullRequestsWhileMoving = !tourQ;
+  google.cacheBytes = tourQ ? GOOGLE_CACHE.bytes * 1.5 : GOOGLE_CACHE.bytes;
+  google.maximumCacheOverflowBytes = tourQ ? GOOGLE_CACHE.overflow * 2 : GOOGLE_CACHE.overflow;
 }
 const realBtn = document.getElementById("photoreal");
 // Photoreal is a third view next to Surface and Points: picking it lights its
@@ -504,4 +524,8 @@ scene.canvas.addEventListener("pointerdown", () => setTimeout(hideHint, 4000), {
 window.__viewer = viewer;
 
 // Shared handle for add-ons loaded after this file (tours.js, lap.js).
-window.MC3D = { viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode };
+window.MC3D = {
+  viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode, setTourQuality,
+  // The Google tileset while the photoreal view is shown, else null.
+  getGoogle: () => (google && google.show ? google : null),
+};

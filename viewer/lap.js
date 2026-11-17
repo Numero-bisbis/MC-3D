@@ -394,6 +394,7 @@
     const asked = new URLSearchParams(location.search).get("lap");
     styleName = STYLES[asked] ? asked : (photoreal ? "street" : "air");
     F = bake(styleName);
+    if (M.setTourQuality) M.setTourQuality(F.S.dive);   // steady detail at street level
     buildLines();
     showLines(true);
     setFov();
@@ -449,6 +450,7 @@
   }
   function stop() {
     const was = state;
+    if (was !== "off" && M.setTourQuality) M.setTourQuality(false);
     state = "off";
     run++;
     clearTimers();
