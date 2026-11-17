@@ -30,6 +30,11 @@ to open in Points.
 Add `?place=monte-carlo` (or `le rocher`, `port hercule`, `fontvieille`,
 `larvotto`, `monaco`, `riviera`) to the URL to start at a given place.
 
+**Tours** in the panel start guided flights. The first is the **Grand Prix
+lap**: one lap of the Circuit de Monaco along the real route, with corner names,
+play/pause and a progress bar you can drag. Add `?tour=lap` to start it straight
+away. Tours register themselves with `MC3D.tours.register` (see `viewer/tours.js`).
+
 ## Publish it
 
 `.github/workflows/pages.yml` rebuilds the tiles from IGN and publishes the viewer
@@ -45,6 +50,7 @@ a private repository needs a paid GitHub plan).
 | `pipeline/build_tiles.py` | thins, colours, reprojects and tiles the point cloud |
 | `pipeline/build_surface.py` | ground height tiles for the Surface view (surface model with buildings taken out) |
 | `pipeline/build_buildings.py` | 3D buildings from IGN outlines + LiDAR roofs and ground |
+| `pipeline/build_lap.py` | bakes the circuit route and its heights into `viewer/lap-route.js` (already committed) |
 | `viewer/` | the CesiumJS viewer |
 | `data/sources.md` | every data source with licence and date |
 | `docs/crs.md` | coordinate and height choices |

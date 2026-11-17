@@ -1,0 +1,101 @@
+/* Guided tours: menu button, shared player, and the Grand Prix lap extras. */
+.tour-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.tour-btn::before { content: "▶ "; font-size: 10px; vertical-align: 1px; }
+
+/* While a tour runs the normal controls step aside. */
+body.touring .panel, body.touring .nav, body.touring .hint, body.touring .credit { display: none; }
+
+.tour-hud { position: absolute; inset: 0; pointer-events: none; z-index: 5;
+  --pad: max(12px, env(safe-area-inset-left)); }
+.tour-hud[hidden] { display: none; }
+.tour-hud button { pointer-events: auto; }
+
+.tour-caption { position: absolute; left: var(--pad); top: max(12px, env(safe-area-inset-top));
+  max-width: min(330px, calc(100% - 130px)); padding: 10px 14px 11px;
+  background: linear-gradient(100deg, rgba(10, 13, 18, .88), rgba(10, 13, 18, .55));
+  border-left: 3px solid var(--accent); border-radius: 4px 10px 10px 4px;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); opacity: 0; }
+.tour-caption.in { animation: tour-in .55s cubic-bezier(.2, .7, .2, 1) forwards; }
+@keyframes tour-in { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
+.tour-kicker { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.tour-title { font-size: 24px; line-height: 1.12; font-weight: 700; letter-spacing: .01em; margin-top: 2px;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, .5); }
+.tour-note { font-size: 13px; color: #cfd6dd; margin-top: 4px; }
+.tour-note:empty, .tour-kicker:empty { display: none; }
+.tour-hud.ended .tour-caption { display: none; }
+
+.tour-bar { position: absolute; left: var(--pad); right: var(--pad);
+  bottom: max(14px, env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; background: var(--panel); border-radius: 14px; pointer-events: auto;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); max-width: 640px; margin: 0 auto; }
+.tour-play, .tour-close { flex: 0 0 auto; width: 46px; height: 46px; padding: 0; border-radius: 50%;
+  display: grid; place-items: center; font-size: 16px; }
+.tour-play { background: var(--accent); color: #111; border-color: var(--accent); }
+.tour-close { background: rgba(255, 255, 255, .08); }
+.tour-track { flex: 1 1 auto; height: 46px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
+.tour-rail { position: relative; width: 100%; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .22); }
+.tour-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: var(--accent); }
+.tour-fill::after { content: ""; position: absolute; right: -7px; top: -5px; width: 15px; height: 15px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+.tour-marks i { position: absolute; top: -2px; width: 2px; height: 9px; margin-left: -1px;
+  background: rgba(255, 255, 255, .55); border-radius: 1px; }
+
+.tour-tip { position: absolute; left: 0; right: 0; bottom: calc(max(14px, env(safe-area-inset-bottom)) + 74px);
+  text-align: center; font-size: 13px; color: var(--text); opacity: 0; transition: opacity .4s;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .9); padding: 0 16px; }
+.tour-tip.show { opacity: 1; }
+
+.tour-end { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(320px, calc(100% - 48px)); padding: 20px 20px 18px; text-align: center; pointer-events: auto;
+  background: rgba(10, 13, 18, .86); border-radius: 14px; border-top: 3px solid var(--accent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); animation: tour-pop .6s cubic-bezier(.2, .7, .2, 1); }
+.tour-end[hidden] { display: none; }
+@keyframes tour-pop { from { opacity: 0; transform: translate(-50%, -44%); } to { opacity: 1; transform: translate(-50%, -50%); } }
+.tour-end-row { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
+.tour-end-row button { padding: 11px 14px; font-size: 14px; border-radius: 8px; }
+
+/* ---- Grand Prix lap ---- */
+.lap-map { position: absolute; right: var(--pad); top: max(12px, env(safe-area-inset-top));
+  width: 92px; padding: 6px; background: rgba(10, 13, 18, .6); border-radius: 10px;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.lap-map svg { display: block; width: 100%; height: auto; overflow: visible; }
+.lap-map .all { fill: none; stroke: rgba(255, 255, 255, .45); stroke-width: 2.4; stroke-linejoin: round; }
+.lap-map .done { fill: none; stroke: var(--accent); stroke-width: 2.8; stroke-linejoin: round; stroke-linecap: round; }
+.lap-map .car { fill: #fff; stroke: #e10600; stroke-width: 2.2; }
+.tour-hud.ended .lap-map { display: none; }
+
+.lap-lights { position: absolute; left: 50%; top: 38%; transform: translate(-50%, -50%); display: flex; gap: 10px;
+  padding: 12px 16px; background: rgba(8, 9, 11, .92); border-radius: 14px; opacity: 0; transition: opacity .3s; }
+.lap-lights.show { opacity: 1; }
+.lap-lights i { width: 30px; height: 30px; border-radius: 50%; background: #2a0d0d;
+  box-shadow: inset 0 0 0 2px #111; transition: background .08s, box-shadow .08s; }
+.lap-lights i.on { background: #ff2a1a; box-shadow: 0 0 18px 4px rgba(255, 42, 26, .75), inset 0 0 0 2px #7a0d06; }
+
+/* The tunnel is not in the open 3D data, so the lap shows it as darkness
+   with lamps rushing past. */
+.lap-tunnel { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 46%, #17120c 0%, #050506 62%);
+  opacity: 0; overflow: hidden; pointer-events: none; }
+.lap-tunnel i { position: absolute; left: 50%; top: 46%; width: 60vmax; height: 34vmax; margin: -17vmax 0 0 -30vmax;
+  border-radius: 46% 46% 8% 8% / 70% 70% 8% 8%; border: 3px solid rgba(255, 196, 120, .0);
+  border-top-color: rgba(255, 206, 140, .95); box-shadow: 0 -6px 26px -4px rgba(255, 180, 90, .55);
+  transform: scale(.02); opacity: 0; animation: lap-lamp .9s cubic-bezier(.55, 0, .9, .45) infinite; }
+.lap-tunnel i:nth-child(2) { animation-delay: -.3s; }
+.lap-tunnel i:nth-child(3) { animation-delay: -.6s; }
+.lap-tunnel.paused i { animation-play-state: paused; }
+@keyframes lap-lamp { 0% { transform: scale(.02); opacity: 0; } 15% { opacity: .9; } 100% { transform: scale(3.4); opacity: .55; } }
+
+@media (max-width: 600px) {
+  .tour-title { font-size: 21px; }
+  .tour-note { font-size: 12px; }
+  .lap-map { width: 76px; }
+}
+@media (max-height: 480px) {            /* phone held sideways */
+  .tour-title { font-size: 19px; }
+  .tour-bar { padding: 4px 8px; }
+  .tour-play, .tour-close { width: 40px; height: 40px; }
+  .tour-track { height: 40px; }
+  .lap-map { width: 64px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lap-tunnel i { animation: none; opacity: .3; transform: scale(1); }
+}

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Monaco 3D</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Widgets/widgets.css">
+  <link rel="stylesheet" href="tours.css">
   <style>
     :root { --panel: rgba(16, 20, 26, 0.82); --text: #eef1f4; --muted: #9aa5b1; --accent: #e8c27a; }
     html, body { margin: 0; height: 100%; background: #0b0e12; color: var(--text);
@@ -67,6 +68,10 @@
       <div class="label">Go to</div>
       <div class="row" id="places"></div>
     </div>
+    <div class="group" id="tours-group" hidden>
+      <div class="label">Tours</div>
+      <div class="row" id="tours"></div>
+    </div>
     <div class="group">
       <div class="label">View</div>
       <div class="row">
@@ -106,10 +111,14 @@
     LiDAR &amp; orthophoto © <a href="https://geoservices.ign.fr/lidarhd" target="_blank">IGN</a> (Etalab 2.0) ·
     Sentinel-2 cloudless © <a href="https://s2maps.eu" target="_blank">EOX</a> ·
     Terrain © <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank">Mapzen/AWS</a> ·
+    Circuit route © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> ·
     <a href="https://cesium.com/platform/cesiumjs/" target="_blank">CesiumJS</a>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
   <script src="config.js"></script>
   <script src="main.js"></script>
+  <script src="tours.js"></script>
+  <script src="lap-route.js"></script>
+  <script src="lap.js"></script>
 </body>
 </html>
