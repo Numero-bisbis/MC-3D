@@ -80,6 +80,8 @@ def main():
     ap.add_argument("--out", default=str(ROOT / "build" / "surface"))
     ap.add_argument("--keep-buildings", action="store_true",
                     help="keep buildings in the surface (no separate 3D buildings)")
+    ap.add_argument("--keep-canopy", action="store_true",
+                    help="keep trees, boats and other objects above the ground in the surface")
     args = ap.parse_args()
     out = Path(args.out)
 
@@ -93,6 +95,20 @@ def main():
         mask = building_mask(mos.shape, x0, y0)
         mos = np.where(mask & np.isfinite(mnt), mnt, mos)
         print("flattened", round(float(mask.mean()), 3), "of the area under buildings")
+    if not args.keep_canopy:
+        # Trees and moored yachts in the surface model come out as spikes
+        # and lumps with the photo smeared down their sides. Use the bare
+        # ground everywhere it exists: the photo then shows them flat, which
+        # reads far better from an angle. Cliffs and walls of rock are part
+        # of the ground model, so the relief stays.
+        if args.keep_buildings:
+            mnt, _, _ = load_mosaic(names, "mnt")
+            mask = building_mask(mos.shape, x0, y0)
+            mos = np.where(~mask & np.isfinite(mnt), mnt, mos)
+        else:
+            # No ground model = water (the sea, the ports): leave it empty so
+            # the viewer shows flat sea there, without boats as lumps.
+            mos = mnt.copy()
     pyr = pyramid(mos, 6)
     print("mosaic", mos.shape, "valid", round(float(np.isfinite(mos).mean()), 3))
 
