@@ -300,6 +300,19 @@
   const tSpeed = el("div", "legend-timer-speed", timer);
   timer.hidden = true;
 
+  // "Preparing the track": before the first lap the camera visits the whole
+  // circuit behind this card, so the photoreal tiles are loaded (and kept)
+  // before the car sets off, instead of streaming in at 250 km/h.
+  const prep = el("div", "legend-prep", document.body);
+  prep.hidden = true;
+  const prepCard = el("div", "legend-prep-card", prep);
+  el("div", "legends-kicker", prepCard, "Preparing the track");
+  const prepTitle = el("div", "legend-prep-title", prepCard);
+  el("div", "legend-prep-note", prepCard, "Loading the streets along the whole circuit, so the lap runs smoothly.");
+  const prepRail = el("div", "legend-prep-rail", prepCard);
+  const prepFill = el("div", "legend-prep-fill", prepRail);
+  const prepSkip = el("button", "legend-prep-skip", prepCard, "Skip");
+
   const fmt = (s, digits) => {
     s = Math.max(0, s);
     const m = Math.floor(s / 60), r = s - m * 60;
@@ -544,6 +557,7 @@
 
   function start() {
     state = "pick";
+    if (M.setTourQuality) M.setTourQuality(true);
     lap = null;
     const photoreal = document.body.classList.contains("photoreal");
     if (M.getMode() !== "surface" && !photoreal) M.setMode("surface");
@@ -591,13 +605,56 @@
     draw();
     hud.caption(`${lap.year} · ${lap.kind === "pole" ? "Pole lap" : "Race fastest lap"}`, lap.who,
       lap.story || `${lap.team} · ${lap.time} on the ${lap.layout.km.toFixed(3)} km circuit`);
-    const p = cameraFor(uAt(tl), 0);
-    cam.flyTo({
-      destination: Cesium.Cartesian3.clone(p.destination),
-      orientation: { direction: Cesium.Cartesian3.clone(p.orientation.direction), up: Cesium.Cartesian3.clone(p.orientation.up) },
-      duration: 2.5, easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT,
-      complete: () => { if (mine === run && state === "intro") startLights(mine); },
-    });
+    const google = M.getGoogle && M.getGoogle();
+    const intro = (fly) => {
+      if (mine !== run || state !== "intro") return;
+      const p = cameraFor(uAt(tl), 0);
+      if (!fly) { cam.setView(p); later(() => startLights(mine), 400); return; }
+      cam.flyTo({
+        destination: Cesium.Cartesian3.clone(p.destination),
+        orientation: { direction: Cesium.Cartesian3.clone(p.orientation.direction), up: Cesium.Cartesian3.clone(p.orientation.up) },
+        duration: 2.5, easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT,
+        complete: () => { if (mine === run && state === "intro") startLights(mine); },
+      });
+    };
+    if (google && !prepared) prepare(google, mine).then((done) => { if (done) intro(false); });
+    else intro(true);
+  }
+
+  let prepared = false;
+  const PREP_STEP = 90;          // m between the places the camera visits
+  const frameDone = () => new Promise((res) => {
+    const off = scene.postRender.addEventListener(() => { off(); res(); });
+  });
+  async function prepare(google, mine) {
+    cam.cancelFlight();
+    prepTitle.textContent = `${lap.who} · ${lap.year}`;
+    prepFill.style.width = "0%";
+    prep.hidden = false;
+    let skip = false;
+    prepSkip.onclick = () => { skip = true; };
+    // From just after the start round to the run-up, so the first metres
+    // of the lap are the freshest in the cache.
+    const stops = [];
+    for (let s = PREP_STEP; s < LEN; s += PREP_STEP) stops.push(s / DS);
+    stops.push(-RUNUP / DS, -RUNUP / 2 / DS, 0, 30 / DS);
+    for (let k = 0; k < stops.length && !skip; k++) {
+      if (mine !== run) break;
+      const u = stops[k];
+      cam.setView(cameraFor(u, lap.V[wrap(Math.round(u))]));
+      const t0 = performance.now();
+      let frames = 0;
+      while (!skip && mine === run) {
+        await frameDone();
+        frames++;
+        if ((frames > 3 && google.tilesLoaded) || performance.now() - t0 > 2000) break;
+      }
+      prepFill.style.width = `${((k + 1) / stops.length * 100).toFixed(1)}%`;
+    }
+    prep.hidden = true;
+    if (mine !== run) return false;
+    prepared = !skip;
+    return true;
   }
   function startLights(mine) {
     const dots = [...ui.lights.querySelectorAll("i")];
@@ -623,6 +680,8 @@
   }
   function stop() {
     const was = state;
+    prep.hidden = true;
+    if (M.setTourQuality) M.setTourQuality(false);
     state = "off";
     run++;
     clearTimers();
