@@ -320,8 +320,41 @@ async function setPhotoreal(on) {
 // of tiles to fetch per second. More requests may run at once, too.
 const DYN = { density: 2e-4, factor: 24 };
 const REQ = { perServer: Cesium.RequestScheduler.maximumRequestsPerServer, total: Cesium.RequestScheduler.maximumRequests };
+// Bandwidth varies a lot from one phone and network to the next, so the
+// detail adapts while a lap plays: when downloads fall behind (many tiles
+// requested or still being decoded) the buildings get coarser right away,
+// and once the queue has been short for a while detail comes back step by
+// step. The road and the car are modelled, so they stay sharp either way.
+const TOUR_SSE = MOBILE ? { base: 24, max: 64 } : { base: 8, max: 32 };
+const BACKLOG = { high: MOBILE ? 16 : 24, low: MOBILE ? 6 : 8 };
+let adaptAt = 0, calmSince = 0;
+function adaptTour() {
+  if (!tourQ || !google || !google.show) return;
+  const now = performance.now();
+  if (now - adaptAt < 250) return;
+  adaptAt = now;
+  const st = google.statistics || google._statistics;
+  if (!st) return;
+  const backlog = st.numberOfPendingRequests + st.numberOfTilesProcessing;
+  let sse = tourQ.sse;
+  if (backlog > BACKLOG.high) {
+    sse = Math.min(TOUR_SSE.max, sse * 1.3);
+    calmSince = now;
+  } else if (backlog > BACKLOG.low) {
+    calmSince = now;
+  } else if (now - calmSince > 1500) {
+    sse = Math.max(TOUR_SSE.base, sse / 1.1);
+    calmSince = now - 1000;   // next step back after another half second
+  }
+  if (sse !== tourQ.sse) {
+    tourQ.sse = sse;
+    google.maximumScreenSpaceError = sse;
+  }
+}
+viewer.scene.postRender.addEventListener(adaptTour);
 function setTourQuality(on) {
-  tourQ = on ? { sse: MOBILE ? 18 : 8, scale: MOBILE ? 1 : MOVING_SCALE } : null;
+  tourQ = on ? { sse: TOUR_SSE.base, scale: MOBILE ? 1 : MOVING_SCALE } : null;
+  calmSince = performance.now();
   viewer.resolutionScale = tourQ ? tourQ.scale : SHARP_SCALE;
   Cesium.RequestScheduler.maximumRequestsPerServer = tourQ ? 36 : REQ.perServer;
   Cesium.RequestScheduler.maximumRequests = tourQ ? 72 : REQ.total;
@@ -544,4 +577,5 @@ window.MC3D = {
   viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode, setTourQuality,
   // The Google tileset while the photoreal view is shown, else null.
   getGoogle: () => (google && google.show ? google : null),
+  tourDetail: () => (tourQ ? tourQ.sse : null),
 };
