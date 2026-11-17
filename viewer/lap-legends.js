@@ -461,7 +461,7 @@
     if (!(f instanceof Cesium.PerspectiveFrustum)) return;
     if (oldFov === null) oldFov = f.fov;
     const c = scene.canvas, portrait = c.clientHeight > c.clientWidth;
-    const deg = view === "chase" ? (portrait ? 80 : 62) : (portrait ? 88 : 72);
+    const deg = view === "chase" ? (portrait ? 72 : 60) : (portrait ? 80 : 68);
     f.fov = Cesium.Math.toRadians(deg);
   }
   // The timing card sits just under the mini map.
@@ -626,7 +626,11 @@
   }
 
   let prepared = false;
-  const PREP_STEP = 90;          // m between the places the camera visits
+  const PREP_STEP = 150;         // m between the places the camera visits
+  // Each stop waits for its tiles, but never long: the whole preparation
+  // stays under about 20 s on a slow connection, and the lap itself keeps
+  // loading what is left.
+  const PREP_WAIT = 900;
   const frameDone = () => new Promise((res) => {
     const off = scene.postRender.addEventListener(() => { off(); res(); });
   });
@@ -651,7 +655,7 @@
       while (!skip && mine === run) {
         await frameDone();
         frames++;
-        if ((frames > 3 && google.tilesLoaded) || performance.now() - t0 > 2000) break;
+        if ((frames > 2 && google.tilesLoaded) || performance.now() - t0 > PREP_WAIT) break;
       }
       prepFill.style.width = `${((k + 1) / stops.length * 100).toFixed(1)}%`;
     }

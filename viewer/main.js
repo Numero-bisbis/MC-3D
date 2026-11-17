@@ -314,14 +314,25 @@ async function setPhotoreal(on) {
 // keeps moving (the usual "coarser while moving" would leave the whole lap
 // blurry), a larger cache so the circuit is not thrown away and fetched
 // again, and requests kept even at speed. null puts everything back.
+// Down at street level most of what a wide view takes in is far away: a
+// much stronger distance fall-off (dynamic screen-space error) keeps the
+// near streets sharp while far blocks come in coarse, which cuts the number
+// of tiles to fetch per second. More requests may run at once, too.
+const DYN = { density: 2e-4, factor: 24 };
+const REQ = { perServer: Cesium.RequestScheduler.maximumRequestsPerServer, total: Cesium.RequestScheduler.maximumRequests };
 function setTourQuality(on) {
-  tourQ = on ? { sse: MOBILE ? 16 : 8, scale: MOBILE ? Math.min(SHARP_SCALE, 1.25) : MOVING_SCALE } : null;
+  tourQ = on ? { sse: MOBILE ? 18 : 8, scale: MOBILE ? 1 : MOVING_SCALE } : null;
   viewer.resolutionScale = tourQ ? tourQ.scale : SHARP_SCALE;
+  Cesium.RequestScheduler.maximumRequestsPerServer = tourQ ? 36 : REQ.perServer;
+  Cesium.RequestScheduler.maximumRequests = tourQ ? 72 : REQ.total;
   if (!google) return;
   google.maximumScreenSpaceError = tourQ ? tourQ.sse : GOOGLE_SSE.still;
   google.cullRequestsWhileMoving = !tourQ;
   google.cacheBytes = tourQ ? GOOGLE_CACHE.bytes * 1.5 : GOOGLE_CACHE.bytes;
   google.maximumCacheOverflowBytes = tourQ ? GOOGLE_CACHE.overflow * 2 : GOOGLE_CACHE.overflow;
+  google.dynamicScreenSpaceError = true;
+  google.dynamicScreenSpaceErrorDensity = tourQ ? 2.2e-3 : DYN.density;
+  google.dynamicScreenSpaceErrorFactor = tourQ ? 48 : DYN.factor;
 }
 const realBtn = document.getElementById("photoreal");
 // Photoreal is a third view next to Surface and Points: picking it lights its
