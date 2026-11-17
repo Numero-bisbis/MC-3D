@@ -346,14 +346,27 @@ function adaptTour() {
     sse = Math.max(TOUR_SSE.base, sse / 1.1);
     calmSince = now - 1000;   // next step back after another half second
   }
-  if (sse !== tourQ.sse) {
-    tourQ.sse = sse;
-    google.maximumScreenSpaceError = sse;
-  }
+  tourQ.sse = sse;
+  applyTourDetail();
+}
+// Speed matters too: at 80 m/s a lap runs through new streets almost three
+// times faster than the Grand Prix lap tour's 30 m/s, so it needs about
+// three times as many tiles a second. The legendary laps report their speed
+// and the detail drops with it (back to normal at 30 m/s and below).
+const SPEED_REF = 30;
+function applyTourDetail() {
+  if (!tourQ || !google) return;
+  const mul = Math.min(2.2, Math.max(1, (tourQ.speed / SPEED_REF) ** 0.75));
+  const eff = tourQ.sse * mul;
+  if (Math.abs(eff - google.maximumScreenSpaceError) > 0.02 * eff) google.maximumScreenSpaceError = eff;
+}
+function setTourSpeed(v) {
+  if (!tourQ) return;
+  tourQ.speed = v || 0;
 }
 viewer.scene.postRender.addEventListener(adaptTour);
 function setTourQuality(on) {
-  tourQ = on ? { sse: TOUR_SSE.base, scale: MOBILE ? 1 : MOVING_SCALE } : null;
+  tourQ = on ? { sse: TOUR_SSE.base, speed: 0, scale: MOBILE ? 1 : MOVING_SCALE } : null;
   calmSince = performance.now();
   viewer.resolutionScale = tourQ ? tourQ.scale : SHARP_SCALE;
   Cesium.RequestScheduler.maximumRequestsPerServer = tourQ ? 36 : REQ.perServer;
@@ -574,8 +587,8 @@ window.__viewer = viewer;
 
 // Shared handle for add-ons loaded after this file (tours.js, lap.js).
 window.MC3D = {
-  viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode, setTourQuality,
+  viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode, setTourQuality, setTourSpeed,
   // The Google tileset while the photoreal view is shown, else null.
   getGoogle: () => (google && google.show ? google : null),
-  tourDetail: () => (tourQ ? tourQ.sse : null),
+  tourDetail: () => (tourQ && google ? google.maximumScreenSpaceError : null),
 };
