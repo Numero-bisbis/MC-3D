@@ -34,6 +34,16 @@
     .hint { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%);
       background: var(--panel); color: var(--text); font-size: 12px; padding: 7px 12px; border-radius: 8px;
       max-width: calc(100% - 180px); text-align: center; transition: opacity .6s; }
+    .loading { position: absolute; left: 50%; top: 16px; transform: translateX(-50%);
+      background: var(--panel); color: var(--text); font-size: 13px; padding: 8px 14px;
+      border-radius: 20px; display: flex; align-items: center; gap: 8px; pointer-events: none; z-index: 6;
+      white-space: nowrap; }
+    @media (max-width: 600px) { .loading { top: 50%; } }
+    body.touring .loading { top: 12px; bottom: auto; }
+    .loading[hidden] { display: none; }
+    .loading .spin { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.25);
+      border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .hint.gone { opacity: 0; pointer-events: none; }
     @media (max-width: 600px) {
       .panel h1 { font-size: 15px; }
@@ -52,7 +62,10 @@
     .credit a { color: var(--muted); }
     .cesium-viewer-bottom { display: none; }
     /* Google's attribution must stay visible while its tiles are shown. */
-    body.photoreal .cesium-viewer-bottom { display: block; bottom: 30px; }
+    body.photoreal .cesium-viewer-bottom { display: block; bottom: 4px; left: 8px; }
+    /* In the photoreal view only Google's data shows, and its logo and
+       attribution must stay visible, so our own credit line steps aside. */
+    body.photoreal .credit { display: none; }
     @media (max-width: 600px) {
       .panel { left: 8px; right: 8px; top: 8px; max-width: none; padding: 10px 12px; }
       .panel p { display: none; }
@@ -105,6 +118,7 @@
     <button id="nav-home" class="wide" style="grid-column: span 2" title="Back to the overview of Monaco">Reset view</button>
   </div>
   <div class="hint" id="hint"></div>
+  <div class="loading" id="loading" hidden role="status"><span class="spin"></span>Loading Monaco…</div>
   <div class="credit">
     LiDAR &amp; orthophoto © <a href="https://geoservices.ign.fr/lidarhd" target="_blank">IGN</a> (Etalab 2.0) ·
     Sentinel-2 cloudless © <a href="https://s2maps.eu" target="_blank">EOX</a> ·
