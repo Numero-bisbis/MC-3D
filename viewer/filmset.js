@@ -56,6 +56,27 @@
         float kind = floor(a255 / 16.0);
         if (kind < 0.5) {               // ground: the painted map
           material.roughness = 0.95;
+          {
+            // Close up, the 37 cm map gets fine detail of its own: grain
+            // and patches everywhere, paving joints on the pale stone of
+            // pavements and squares. It fades out with distance.
+            vec2 gp = fsInput.attributes.positionMC.xz;
+            float px = length(fwidth(gp));
+            float near = 1.0 - smoothstep(0.08, 0.5, px);
+            if (near > 0.0) {
+              vec3 d = material.diffuse;
+              float grain = mix(0.94, 1.05, vnoise(gp * 1.7)) * mix(0.97, 1.03, vnoise(gp * 9.0));
+              float lum = dot(d, vec3(0.3, 0.59, 0.11));
+              float sat = max(max(d.r, d.g), d.b) - min(min(d.r, d.g), d.b);
+              float paleStone = smoothstep(0.30, 0.45, lum) * (1.0 - smoothstep(0.10, 0.22, sat));
+              vec2 pv = fract(gp / vec2(0.6, 0.4) + vec2(0.5 * step(0.5, fract(gp.y / 0.8)), 0.0));
+              vec2 pw = fwidth(gp / vec2(0.6, 0.4)) * 1.2;
+              float joint = 1.0 - box(pv, vec2(0.04), vec2(0.96), pw);
+              d *= grain;
+              d *= 1.0 - 0.12 * joint * paleStone * (1.0 - smoothstep(0.03, 0.08, px));
+              material.diffuse = mix(material.diffuse, d, near);
+            }
+          }
           if (u_night > 0.0) {
             float L = texture(u_lights, fsInput.attributes.texCoord_0).r;
             material.emissive = material.diffuse * vec3(1.0, 0.78, 0.5) * L * 2.4 * u_night;
@@ -274,6 +295,49 @@
             if (gnd) col = mix(base * 0.8, glass * 1.3, box(f, vec2(0.08, 0.08), vec2(0.92, 0.85), aa));
             shine = win * (1.0 - rail);
             farCol = mix(base, base * 0.6, 0.35);
+          }
+          if (gnd && uv.y >= 0.0 && !(style > 1.5 && style < 3.5) && !(style > 5.5 && style < 6.5)) {   // not the Casino's arcades, villas or glass towers
+            // Street level: every ground floor is a row of shops, as along
+            // the circuit. Stone plinth, display windows with a lit
+            // interior, a door every few bays, a painted sign band per
+            // shop and striped awnings.
+            float shopId = floor(cell.x / 2.0);
+            float hs = hash12(vec2(shopId, vr * 53.0));
+            vec3 signC = hs < 0.2 ? vec3(0.06, 0.20, 0.14) : hs < 0.4 ? vec3(0.05, 0.08, 0.20)
+                       : hs < 0.6 ? vec3(0.32, 0.05, 0.07) : hs < 0.8 ? vec3(0.04, 0.04, 0.04) : vec3(0.55, 0.42, 0.16);
+            vec3 stoneC = mix(base, vec3(0.80, 0.76, 0.68), 0.6);
+            bool door = hash12(cell * 1.9 + 4.2) < 0.28;
+            float plinth = 1.0 - step(0.07, f.y);
+            vec2 wlo = door ? vec2(0.32, 0.07) : vec2(0.08, 0.10), whi = door ? vec2(0.68, 0.72) : vec2(0.92, 0.70);
+            float win = box(f, wlo, whi, aa);
+            float frameM = box(f, wlo - 0.03, whi + 0.03, aa);
+            // Inside: warm light, shelves, a darker back.
+            float shelves = mix(0.9, 0.8 + 0.2 * step(0.5, fract((f.y - wlo.y) * 6.0)), fine);
+            vec3 inside = mix(vec3(0.20, 0.17, 0.13), vec3(0.55, 0.46, 0.34), smoothstep(wlo.y, whi.y, f.y) * 0.6) * shelves;
+            inside = mix(inside, vec3(0.30, 0.34, 0.38), 0.35);          // reflection of the street
+            vec3 sc = stoneC;
+            sc = mix(sc, stoneC * 0.62, plinth);
+            sc = mix(sc, mix(signC, vec3(0.12), 0.2), frameM);
+            sc = mix(sc, door ? vec3(0.10, 0.08, 0.07) : inside, win);
+            if (!door) sc = mix(sc, signC * 0.6, win * box(f, vec2(0.495, wlo.y), vec2(0.505, whi.y), aa));   // mullion
+            // Sign band with a row of gold letters.
+            float band = box(f, vec2(0.0, 0.76), vec2(1.0, 0.90), aa);
+            float letters = step(0.5, fract(f.x * 9.0 + 0.25)) * box(f, vec2(0.2, 0.795), vec2(0.8, 0.865), aa)
+                          * step(0.35, hash12(floor(vec2(f.x * 9.0, shopId * 3.0 + vr * 9.0)))) * fine;
+            sc = mix(sc, signC, band);
+            sc = mix(sc, vec3(0.86, 0.74, 0.44), letters * 0.9);
+            // Awnings over about half the shops, in one colour per shop.
+            if (hs > 0.45) {
+              vec3 awC = hs < 0.6 ? vec3(0.62, 0.12, 0.10) : hs < 0.75 ? vec3(0.12, 0.30, 0.22) : hs < 0.9 ? vec3(0.80, 0.74, 0.62) : vec3(0.10, 0.16, 0.32);
+              float stripes = mix(0.94, 0.80 + 0.2 * step(0.5, fract(f.x * 5.0)), fine);
+              float aw = box(f, vec2(0.02, 0.62), vec2(0.98, 0.76), aa);
+              sc *= 1.0 - 0.35 * box(f, vec2(0.04, 0.48), vec2(0.96, 0.62), aa) * win;      // its shade on the glass
+              sc = mix(sc, awC * stripes, aw);
+              sc = mix(sc, awC * 0.6, box(f, vec2(0.02, 0.62), vec2(0.98, 0.64), aa));    // valance edge
+            }
+            col = sc;
+            shine = win * (door ? 0.3 : 1.0);
+            farCol = mix(stoneC, signC, 0.25);
           }
           if (style < 5.5 || style > 6.5) {
             // Weathering, kept subtle: plaster that varies in patches and
