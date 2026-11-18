@@ -149,6 +149,26 @@
   });
 
   let model = null, loading = null, active = false, meta = null;
+
+  // Film grade: a touch more colour, warm highlights, cool shadows and a soft
+  // vignette, in one cheap full-screen pass.
+  const grade = scene.postProcessStages.add(new Cesium.PostProcessStage({
+    fragmentShader: `
+      uniform sampler2D colorTexture;
+      in vec2 v_textureCoordinates;
+      void main() {
+        vec4 c = texture(colorTexture, v_textureCoordinates);
+        vec3 col = c.rgb;
+        float l = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(vec3(l), col, 1.14);
+        col *= mix(vec3(0.97, 0.99, 1.04), vec3(1.04, 1.0, 0.94), smoothstep(0.15, 0.8, l));
+        col = col * 1.03 + 0.012;
+        vec2 d = v_textureCoordinates - 0.5;
+        col *= 1.0 - dot(d, d) * 0.45;
+        out_FragColor = vec4(clamp(col, 0.0, 1.0), c.a);
+      }`,
+  }));
+  grade.enabled = false;
   let clip = null;
   const saved = {};
 
@@ -240,6 +260,7 @@
       // and warm light on the façades that face the harbour.
       viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T06:15:00Z");
       saved.light = scene.light;
+      grade.enabled = true;
       scene.light = new Cesium.SunLight({ color: new Cesium.Color(1.0, 0.93, 0.82), intensity: 2.6 });
       viewer.shadows = true;
       viewer.shadowMap.size = MOBILE ? 2048 : 4096;
@@ -273,6 +294,7 @@
       if (saved.time) {
         viewer.clock.currentTime = saved.time;
         scene.light = saved.light;
+        grade.enabled = false;
         viewer.shadows = saved.shadows;
         scene.screenSpaceCameraController.minimumZoomDistance = saved.minZoom;
         scene.fog.density = saved.fog;
