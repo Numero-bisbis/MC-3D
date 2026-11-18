@@ -45,8 +45,8 @@ replaced by a clean modelled track (asphalt, kerbs, barriers) and a modelled
 tunnel, so the scan's parked cars and roadworks disappear (`viewer/clean-track.js`;
 add `?clean=0` to see the raw scan). In the Surface view the ground model is
 pressed down under the whole circuit, so distant, coarse terrain tiles cannot
-fold the hillside over the road. The inside of the Nouvelle Chicane has no
-barrier (the escape road runs straight on); the harbour side keeps its rail.
+fold the hillside over the road. The Nouvelle Chicane has no barrier on
+the right as the cars arrive from the tunnel; the left side keeps its rail.
 
 **Street View stops**: in the lap tours, the pegman button pauses the lap and
 opens Google's own 360° Street View panorama of the corner you are at; ‹ and ›
