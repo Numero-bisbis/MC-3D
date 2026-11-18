@@ -365,6 +365,32 @@ def ground_mesh(mnt, sea):
             kd = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]]))
             _, j = kd.query(np.column_stack([X[near], Y[near]]))
             Z[near] = np.minimum(Z[near], TUNNEL["z"][j])
+    if TRACK is not None:
+        # The track: ground just under the modelled road, below the barrier
+        # tops for one more grid diagonal (so no ground triangle reaches
+        # over a barrier), then rising at most 1.5 m per metre: slopes
+        # never spill over the track's edges.
+        d = track_dist(X.ravel(), Y.ravel()).reshape(X.shape)
+        band = d < TRACK_HALF + 15
+        if TUNNEL is not None:
+            band &= ~contains_xy(TUNNEL["ground"].buffer(3), X, Y) & ~contains_xy(TUNNEL["approach"], X, Y)
+        if band.any():
+            _, j = TRACK["kd"].query(np.column_stack([X[band], Y[band]]))
+            zt = TRACK["z"][j]
+            zb = Z[band]
+            # Flat under the road and one grid step past the barriers (a
+            # ground triangle from there cannot poke up through the road).
+            inner = d[band] < TRACK_HALF + 3.2
+            cap = zt + 0.6 + 1.5 * np.maximum(0, d[band] - (TRACK_HALF + 6.5))
+            Z[band] = np.where(inner, zt - 0.15, np.minimum(zb, cap))
+    if TUNNEL is not None and "open_ground" in TUNNEL:
+        # Outside the gallery the ground stays below the road, so the view
+        # through the pillars is open to the shore.
+        og = contains_xy(TUNNEL["open_ground"], X, Y) & (track_dist(X.ravel(), Y.ravel()).reshape(X.shape) < TUBE_HALF + 14)
+        if og.any():
+            from scipy.spatial import cKDTree
+            _, j = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]])).query(np.column_stack([X[og], Y[og]]))
+            Z[og] = np.minimum(Z[og], TUNNEL["z"][j] - 1.2)
     land = valid[r, c] > 0.5
     Z = np.where(land, Z, SEA_FLOOR)
     P = enu_fast(X.ravel(), Y.ravel(), Z.ravel())
@@ -911,6 +937,14 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             poly = orient(poly.simplify(0.35), 1.0)
             if not isinstance(poly, Polygon) or poly.is_empty:
                 continue
+            if TRACK is not None and poly.intersects(TRACK["keep_out"]) and not (
+                    TUNNEL is not None and poly.intersects(TUNNEL["bld"])):
+                # Outlines that reach onto the track (arcades, kiosks,
+                # misaligned footprints) stop at its edge.
+                rest = [q for q in to_polys(poly.difference(TRACK["keep_out"])) if q.area >= 10]
+                if not rest:
+                    continue
+                poly = orient(max(rest, key=lambda q: q.area), 1.0)
             key = f["properties"].get("cleabs") or poly.wkt[:60]
             rnd = rng_for(key)
             # Ground: lowest terrain along the outline.
@@ -1171,6 +1205,41 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
 # so the tours' own lit tunnel (viewer/clean-track.js) fits inside.
 TUNNEL = None
 TUBE_HALF, TUBE_H = 6.7, 6.5
+# The Grand Prix track the tours and Drive run on (viewer/clean-track.js
+# models it 5 m either side of the centre line, barriers at 5.35 m). Nothing
+# of the set may stand on it, and the ground may not rise over its edges.
+TRACK_HALF = 5.0
+TRACK = None
+
+
+def load_track():
+    f = ROOT / "viewer" / "lap-route.js"
+    if not f.exists():
+        return None
+    txt = f.read_text()
+    d = json.loads(txt[txt.index("{"):txt.rindex("}") + 1])
+    P = np.array(d["points"])
+    tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    x, y = tl.transform(P[:, 0], P[:, 1])
+    x = ndimage.gaussian_filter1d(np.asarray(x), 2, mode="wrap")
+    y = ndimage.gaussian_filter1d(np.asarray(y), 2, mode="wrap")
+    z = ndimage.gaussian_filter1d(P[:, 2] - GEOID_N, 3, mode="wrap")
+    line = LineString(np.column_stack([np.append(x, x[0]), np.append(y, y[0])]))
+    from scipy.spatial import cKDTree
+    return {"x": x, "y": y, "z": z, "line": line, "kd": cKDTree(np.column_stack([x, y])),
+            "keep_out": line.buffer(TRACK_HALF + 0.8)}
+
+
+def track_dist(x, y):
+    """Distance from the track centre line (inf without a track)."""
+    x, y = np.atleast_1d(x), np.atleast_1d(y)
+    if TRACK is None:
+        return np.full(len(x), np.inf)
+    return shapely.distance(TRACK["line"], shapely.points(x, y))
+
+
+def off_track(x, y, margin=0.0):
+    return bool(track_dist(x, y)[0] > TRACK_HALF + 0.8 + margin)
 
 
 def load_tunnel():
@@ -1217,25 +1286,85 @@ def tunnel_frame(s_):
     return x, y, z, dx / l, dy / l          # left = (-dy, dx)
 
 
+def tunnel_side_band(a, b, w0, w1):
+    """Polygon on the tunnel's left (sea) side, w0..w1 m from the centre
+    line, between track positions a and b."""
+    ss = np.arange(a, b + 0.01, 1.0)
+    x, y, _, fx, fy = tunnel_frame(ss)
+    lx, ly = -fy, fx
+    inner = np.column_stack([x + lx * w0, y + ly * w0])
+    outer = np.column_stack([x + lx * w1, y + ly * w1])
+    return Polygon(np.vstack([inner, outer[::-1]])).buffer(0)
+
+
+def tunnel_open(sea):
+    """The Monaco tunnel is open on its sea side, behind a row of pillars,
+    where it runs along the shore under the hotel. Where the sea lies within
+    35 m on the left, the set opens that wall too."""
+    t = TUNNEL
+    ss = np.arange(t["ta"] + 6, t["tb"] - 6, 1.5)
+    x, y, _, fx, fy = tunnel_frame(ss)
+    lx, ly = -fy, fx
+    near = np.zeros(len(ss), bool)
+    for d in np.arange(8, 36, 2.0):
+        r = np.clip(((Y1 - (y + ly * d)) / RES).astype(int), 0, sea.shape[0] - 1)
+        c = np.clip((((x + lx * d) - X0) / RES).astype(int), 0, sea.shape[1] - 1)
+        near |= sea[r, c]
+    near = ndimage.binary_closing(near, iterations=4)
+    lab, n = ndimage.label(near)
+    if not n:
+        return
+    k = np.argmax(ndimage.sum(near, lab, np.arange(1, n + 1))) + 1
+    run = ss[lab == k]
+    if run[-1] - run[0] < 20:
+        return
+    t["open"] = (float(run[0]), float(run[-1]))
+    # Buildings in this band (the hotel stands on stilts over the shore)
+    # start above the vault; the ground there stays below the road.
+    t["open_band"] = tunnel_side_band(run[0] - 2, run[-1] + 2, TUBE_HALF - 0.3, TUBE_HALF + 30)
+    t["open_ground"] = tunnel_side_band(run[0], run[-1], TUBE_HALF + 0.9, TUBE_HALF + 30)
+    t["ground"] = t["ground"].difference(t["open_ground"])
+
+
 def tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
-    """Building parts to build as usual; the part over the tunnel starts
-    above the vault."""
+    """Building parts to build as usual; the part over the tunnel (and over
+    its open sea side) starts above the vault."""
     parts = to_polys(region)
     if TUNNEL is None:
         return parts
+    lift = TUNNEL["bld"]
+    if "open_band" in TUNNEL:
+        lift = lift.union(TUNNEL["open_band"])
     out = []
     for part in parts:
-        if not part.intersects(TUNNEL["bld"]):
+        if not part.intersects(lift):
             out.append(part)
             continue
         top = TUNNEL["top"]
         if zt > top + 1:
-            for q in to_polys(part.intersection(TUNNEL["bld"])):
+            for q in to_polys(part.intersection(lift)):
                 if q.area > 2:
                     q = orient(q, 1.0)
                     add_walls(m, q, max(zb, top), zt, base, fh, col, kind, style=style)
                     add_roof(m, q, zt, rcol, False)
-        out += [orient(q, 1.0) for q in to_polys(part.difference(TUNNEL["bld"]).buffer(0)) if q.area > 2]
+                    # The underside, and stilts down to the ground where
+                    # the building stands over the open side.
+                    if "open_band" in TUNNEL and q.intersects(TUNNEL["open_band"]) and zb < top:
+                        t_ = triangulate(q)
+                        if t_ is not None:
+                            v_, tri_ = t_
+                            P_ = enu_fast(v_[:, 0], v_[:, 1], np.full(len(v_), top))
+                            m.tri(P_[tri_[:, 0]], P_[tri_[:, 2]], P_[tri_[:, 1]], np.asarray(col) * 0.8, PLAIN)
+                        inner = q.buffer(-1.2)
+                        bx0, by0, bx1, by1 = q.bounds
+                        for gx_ in np.arange(bx0 + 3, bx1, 7.5):
+                            for gy_ in np.arange(by0 + 3, by1, 7.5):
+                                if inner.contains(shapely.Point(gx_, gy_)) and \
+                                        TUNNEL["open_ground"].contains(shapely.Point(gx_, gy_)) and \
+                                        track_dist(gx_, gy_)[0] > TUBE_HALF + 2.5:
+                                    add_walls(m, box(gx_ - 0.45, gy_ - 0.45, gx_ + 0.45, gy_ + 0.45),
+                                              zb - 3, top, zb, 10, np.asarray(col) * 0.92, PLAIN)
+        out += [orient(q, 1.0) for q in to_polys(part.difference(lift).buffer(0)) if q.area > 2]
     return out
 
 
@@ -1261,12 +1390,17 @@ def tunnel_tube(m):
     R = np.array([[enu_fast(x + lx * w, y + ly * w, z + h) for w, h in prof]])[0]   # (len(prof), n, 3)
     axis = enu_fast(x, y, z + 2.8)
     wall, ceil = np.array(hexrgb("#d8d4c8")), np.array(hexrgb("#55534f"))
+    oa, ob = t.get("open", (1e9, -1e9))
+    gallery = (ss[:-1] >= oa) & (ss[1:] <= ob)
     for j in range(len(prof) - 1):
         a, b, c, d = R[j, :-1], R[j + 1, :-1], R[j, 1:], R[j + 1, 1:]
         ax = axis[:-1]
         col = ceil if prof[j][1] > 5 and prof[j + 1][1] > 5 else wall
-        tri_facing(m, a, b, c, ax, col, PLAIN, TUBE_LIT)
-        tri_facing(m, b, d, c, ax, col, PLAIN, TUBE_LIT)
+        keep = ~gallery if j == len(prof) - 2 else np.ones(len(ax), bool)
+        tri_facing(m, a[keep], b[keep], c[keep], ax[keep], col, PLAIN, TUBE_LIT)
+        tri_facing(m, b[keep], d[keep], c[keep], ax[keep], col, PLAIN, TUBE_LIT)
+    if gallery.any():
+        tunnel_gallery(m, oa, ob, t)
     # Two rows of lamps along the ceiling.
     for w in (-2.4, 2.4):
         for k in range(0, len(ss) - 1, 2):
@@ -1295,6 +1429,49 @@ def tunnel_tube(m):
         for w0, w1, h0, h1 in ((-9.5, 9.5, Hh - 0.2, top), (-9.5, -W, -0.5, Hh), (W, 9.5, -0.5, Hh)):
             A, B, C, D = q(w0, h0), q(w1, h0), q(w0, h1), q(w1, h1)
             tri_facing(m, np.array([A, B]), np.array([B, D]), np.array([C, C]), np.array([front, front]), stone, PLAIN)
+
+
+def tunnel_gallery(m, oa, ob, t):
+    """The open sea side: a low parapet, square pillars every 7.5 m and a
+    lintel under the deck, with daylight (and the sea) between them."""
+    W, D = TUBE_HALF, 0.8                       # wall line, wall thickness
+    stone_in, stone_out = np.array(hexrgb("#d8d4c8")), np.array(hexrgb("#e2d9c6"))
+
+    def P(s_, w, h):
+        x, y, z, fx, fy = (float(v[0]) for v in tunnel_frame(np.array([float(s_)])))
+        return enu_fast(np.array([x - fy * w]), np.array([y + fx * w]), np.array([z + h]))[0]
+
+    def quad(s0, s1, w0, w1, h0, h1, toward, col, style):
+        """A face between two track positions; w or h may vary, not both."""
+        if w0 == w1:
+            A, B, C, D_ = P(s0, w0, h0), P(s1, w0, h0), P(s0, w0, h1), P(s1, w0, h1)
+        else:
+            A, B, C, D_ = P(s0, w0, h0), P(s1, w0, h0), P(s0, w1, h1), P(s1, w1, h1)
+        T = np.array([toward(s0), toward(s1)])
+        tri_facing(m, np.array([A, B]), np.array([B, D_]), np.array([C, C]), T, col, PLAIN, style)
+
+    inside = lambda s_: P(s_, 0, 2.8)
+    outside = lambda s_: P(s_, W + 30, 2.0)
+    up = lambda s_: P(s_, W + D / 2, 20)
+    down = lambda s_: P(s_, W + D / 2, -20)
+    deck = t["top"] - float(np.interp((oa + ob) / 2, t["s"], t["z"]))
+    step = 1.5
+    for s0 in np.arange(oa, ob - 0.01, step):
+        s1 = min(s0 + step, ob)
+        quad(s0, s1, W, W, -0.3, 1.0, inside, stone_in, TUBE_LIT)              # parapet, inside
+        quad(s0, s1, W, W + D, 1.0, 1.0, up, stone_in, TUBE_LIT)               # parapet top
+        quad(s0, s1, W + D, W + D, -7.0, 1.0, outside, stone_out, None)        # parapet, outside
+        quad(s0, s1, W, W + D, 4.6, 4.6, down, stone_in, TUBE_LIT)             # lintel soffit
+        quad(s0, s1, W + D, W + D, 4.6, deck, outside, stone_out, None)        # fascia up to the deck
+    pw = 1.2
+    for sp in np.arange(oa, ob + 0.01, 7.5):
+        a, b = sp - pw / 2, sp + pw / 2
+        quad(a, b, W, W, 1.0, 4.6, inside, stone_in, TUBE_LIT)
+        quad(a, b, W + D, W + D, 1.0, 4.6, outside, stone_out, None)
+        for e, sgn in ((a, -1), (b, 1)):
+            A, B, C, D_ = P(e, W, 1.0), P(e, W + D, 1.0), P(e, W, 4.6), P(e, W + D, 4.6)
+            T = P(e + sgn * 5, W + D / 2, 2.8)
+            tri_facing(m, np.array([A, B]), np.array([B, D_]), np.array([C, C]), np.array([T, T]), stone_in, PLAIN, TUBE_LIT)
 
 
 # ------------------------------------------------------------------ trees ----
@@ -1404,6 +1581,8 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         x, y = cell_xy(r, c)
         z = mnt[r, c] if np.isfinite(mnt[r, c]) else 0
         rad *= 0.85                     # leave the streets some air
+        if not off_track(x, y, 0.5 * rad):
+            continue
         if h > 14 and rad > 4.5 and rnd.random() < 0.6:
             kind = "pine"
         elif h > 8 and rad < 2.0:
@@ -1421,6 +1600,8 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         if t.get("natural") != "tree" or not (X0 < x < X1 and Y0 < y < Y1):
             continue
         if len(placed) and np.min(np.hypot(placed[:, 0] - x, placed[:, 1] - y)) < 4:
+            continue
+        if not off_track(x, y, 1.5):
             continue
         z = float(mntR.sample(np.array([x]), np.array([y]))[0])
         if not np.isfinite(z):
@@ -1676,6 +1857,8 @@ def street_lamps(m, ways, gz, bmask, sea):
                 continue
             if TUNNEL is not None and TUNNEL["ground"].contains(shapely.Point(x, y)):
                 continue
+            if not off_track(x, y, -0.5):
+                continue
             if any(abs(px - x) < 12 and abs(py - y) < 12 for px, py in placed[-60:]):
                 continue
             placed.append((x, y))
@@ -1768,6 +1951,12 @@ def main():
     mnt_f = np.where(sea, np.nan, mnt)
     global TUNNEL
     TUNNEL = load_tunnel()
+    if TUNNEL is not None:
+        tunnel_open(sea)
+        if "open" in TUNNEL:
+            print("tunnel open on the sea side from", TUNNEL["open"])
+    global TRACK
+    TRACK = load_track()
     mnt_ground = mnt_f
     if TUNNEL is not None:
         timg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
