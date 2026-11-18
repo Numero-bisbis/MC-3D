@@ -68,7 +68,7 @@ RES = 0.5
 ORIGIN = (7.4280, 43.7395)          # Casino square: the model's 0,0
 GEOID_N = 48.9                      # same as viewer/main.js
 GRID = 3.0                          # ground mesh spacing, m
-TEX = 2048                          # ground map size, px
+TEX = 4096                          # ground map size, px (street-level sharpness)
 SEA_FLOOR = -4.0
 
 WMS = "https://data.geopf.fr/wms-r"
@@ -290,7 +290,7 @@ def ground_mesh(mnt, sea):
 
 
 def paint_ground(ways, mnt, sea, bmask, canopy, ortho):
-    S = 4096
+    S = 6144
     px = S / (X1 - X0)
     img = Image.new("RGB", (S, S), tuple(hexrgb("#d3c6ae")))
     d = ImageDraw.Draw(img)
@@ -367,7 +367,7 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho):
             poly(pts, "#45bfd0")
     # Soft shade at the foot of buildings (baked ambient occlusion).
     bm = Image.fromarray((bmask * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
-    ao = bm.filter(ImageFilter.GaussianBlur(14))
+    ao = bm.filter(ImageFilter.GaussianBlur(int(4.5 * px)))
     arr = np.asarray(img).astype(np.float32)
     aof = np.asarray(ao).astype(np.float32) / 255
     arr *= (1 - 0.32 * aof)[..., None]
@@ -440,8 +440,8 @@ def triangulate(poly, area=None):
     return t["vertices"], t["triangles"]
 
 
-def add_walls(m, poly, z0, z1, base, fh, col, kind):
-    poly = orient(poly, 1.0)
+def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False):
+    poly = orient(poly, -1.0 if inward else 1.0)
     for ring in [poly.exterior] + list(poly.interiors):
         pts = np.asarray(ring.coords)[:, :2]
         a, b = pts[:-1], pts[1:]
@@ -586,8 +586,22 @@ def buildings(m, feats, mns, mnt, ortho, stats):
             hrel = sub[ins] - base
             top = float(np.percentile(hrel, 92))
             props = f["properties"]
-            if top < 2.5:
-                top = float(props.get("hauteur") or 3.0)
+            # The LiDAR was flown in 2021; BD TOPO is current. A building
+            # the scan does not see is either newer (Mareterra and its
+            # neighbours, 2022 onwards: keep it, at its BD TOPO height, in a
+            # modern style) or something that no longer stands, a shed or a
+            # canopy (drop it: these were the stray blocks).
+            built = float(np.mean(hrel > 2.5))
+            recent = (props.get("date_creation") or "") >= "2022"
+            post_scan = False
+            if built < 0.35:
+                if not (recent and props.get("hauteur")):
+                    stats["dropped"] += 1
+                    continue
+                post_scan = True
+                top = float(props["hauteur"])
+                if props.get("altitude_minimale_sol") is not None:
+                    base = float(props["altitude_minimale_sol"])
             if top < 2.5:
                 continue
             cx = ((gx[ins] - X0) / RES).astype(int); cy = ((Y1 - gy[ins]) / RES).astype(int)
@@ -597,7 +611,9 @@ def buildings(m, feats, mns, mnt, ortho, stats):
             rcol = roof_colour(rgb)
             # Steps: podium / body / tower from the spread of roof heights.
             levels = [(poly, top)]
-            if poly.area > 150 and np.percentile(hrel, 95) - np.percentile(hrel, 15) > 6 and not tiled:
+            if post_scan:
+                rk, tiled, rcol = "flat", False, np.array(hexrgb("#d9d6cf"))
+            if not post_scan and poly.area > 150 and np.percentile(hrel, 95) - np.percentile(hrel, 15) > 6 and not tiled:
                 k = 3 if poly.area > 1500 else 2
                 cen, lab = kmeans1d(hrel, k)
                 keep = [0]
@@ -636,8 +652,11 @@ def buildings(m, feats, mns, mnt, ortho, stats):
             if hero:
                 rk, tiled = "copper", False
                 rcol = np.array(hexrgb(hero["roof"]))
-            grand = rk == "copper" or (not tiled and H < 30 and poly.area > 500 and rnd.random() < 0.35)
-            if tiled or grand or (H < 20 and rnd.random() < 0.7):
+            grand = not post_scan and (rk == "copper" or (not tiled and H < 30 and poly.area > 500
+                                                          and rnd.random() < 0.35))
+            if post_scan:
+                kind = WALL_GLASS if H > 30 else WALL_NEW
+            elif tiled or grand or (H < 20 and rnd.random() < 0.7):
                 kind = WALL_OLD
             elif H > 45 or rnd.random() < 0.18:
                 kind = WALL_GLASS
@@ -670,9 +689,42 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                     else:
                         add_walls(m, part, zb, zt, base, fh, col, kind)
                         add_roof(m, part, zt, rcol, False)
+                        if part.area > 40:
+                            # Parapet: a low wall round the roof edge, so
+                            # roofs read as terraces instead of lids.
+                            pc = np.asarray(col) * 0.97
+                            add_walls(m, part, zt, zt + 0.9, zt, 10, pc, PLAIN)
+                            add_walls(m, part, zt, zt + 0.9, zt, 10, pc * 0.85, PLAIN, inward=True)
+                            inner_top = part.buffer(-0.25, join_style=2)
+                            ring_ = part.difference(inner_top) if not inner_top.is_empty else part
+                            for rp in to_polys(ring_):
+                                add_roof(m, rp, zt + 0.9, pc * 1.05, False)
                 zb = zt
+            # Rooftop machinery rooms and stair towers seen by the LiDAR.
+            if not tiled and not grand and not post_scan and len(levels) == 1 and poly.area > 150:
+                grid = np.zeros(sub.shape, bool)
+                grid[ins] = (hrel > H + 1.6) & (hrel < H + 6)
+                lab_, n_ = ndimage.label(ndimage.binary_opening(grid, iterations=1))
+                for j in range(1, min(n_, 8) + 1):
+                    cells = lab_ == j
+                    a = cells.sum() * (2 * RES) ** 2
+                    if a < 6 or a > 150:
+                        continue
+                    hv = sub[cells] - base
+                    bp = cells_to_poly(cells, X0 + c0 * RES, Y1 - r0 * RES, 2 * RES)
+                    bp = bp.minimum_rotated_rectangle if not bp.is_empty else bp
+                    bp = bp.intersection(poly.buffer(-1.0))
+                    for q in to_polys(bp):
+                        if q.area < 4:
+                            continue
+                        q = orient(q, 1.0)
+                        zt2 = base + min(float(np.percentile(hv, 80)), H + 4.5)
+                        mc = np.array(hexrgb("#dcd8cf")) * (0.92 + 0.08 * rnd.random())
+                        add_walls(m, q, base + H, zt2, base + H, 10, mc, PLAIN)
+                        add_roof(m, q, zt2, mc * 0.9, False)
+                        stats["rooftop"] += 1
             # Towers and domes: small blobs that rise well above the roof.
-            if (grand or kind == WALL_OLD) and poly.area > 300:
+            if grand and poly.area > 300:
                 ref = np.percentile(hrel, 70)
                 grid = np.zeros(sub.shape, bool)
                 grid[ins] = hrel > ref + 5
@@ -689,6 +741,10 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                     tp = orient(tp.simplify(0.8), 1.0)
                     body = float(np.percentile(hv, 50))
                     peak = float(np.max(hv))
+                    # Thin, very tall blobs are cranes or masts, not towers.
+                    if peak - ref > 20 or peak - body > 2 * math.sqrt(a) + 3 \
+                            or tp.area / max(tp.minimum_rotated_rectangle.length ** 2 / 16, 1) < 0.35:
+                        continue
                     add_walls(m, tp, base + ref, base + body, base, fh, col, kind)
                     add_cap(m, tp, base + body, max(1.5, peak - body),
                             rcol if rk == "copper" else hexrgb("#6f8b84"), ROOF_TILE)
@@ -737,7 +793,16 @@ def add_tree(m, x, y, z, h, r, kind, rnd):
         if jitter:
             vv = vv + rnd.normal(0, jitter, vv.shape) * scale
         P = enu_fast(x + vv[:, 0], y + vv[:, 1], z + vv[:, 2])
-        m.tri(P[t[:, 0]], P[t[:, 1]], P[t[:, 2]], col, k)
+        if k != LEAF:
+            m.tri(P[t[:, 0]], P[t[:, 1]], P[t[:, 2]], col, k)
+            return
+        # Crowns: smooth normals (soft, rounded foliage) and darker
+        # underneath, as light gets inside a real crown less.
+        nrm = v / np.maximum(scale, 1e-3)
+        nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+        shade = 0.68 + 0.32 * (v[:, 2] + 1) / 2
+        cc = np.asarray(col, np.float32)[None] * shade[:, None]
+        m.add(P, nrm, cc, k, idx=t)
 
     trunk = hexrgb("#7a5a40")
     if kind == "pine":       # umbrella pine: tall bare trunk, wide flat crown
@@ -762,7 +827,8 @@ def add_tree(m, x, y, z, h, r, kind, rnd):
                 m.tri(P[[tri_[0]]], P[[tri_[1]]], P[[tri_[2]]], g, LEAF)
     else:                    # broadleaf: two or three lumps
         put(CONE_V, CONE_T, np.array([0.3, 0.3, h * 0.55]), np.array([0, 0, 0]), trunk, WOOD)
-        base_g = np.array(hexrgb(rnd.choice(["#5d8a40", "#6a9447", "#557f3c", "#739a4c"])))
+        base_g = np.array(hexrgb(rnd.choice(["#6a9a45", "#7aa64f", "#5f8f40", "#86ad55", "#6e9c58",
+                                             "#8aa848"])))
         cz = max(h - r * 0.9, r * 0.8)
         put(SPH_V, SPH_T, np.array([r, r, r * 0.85]), np.array([0, 0, cz]), base_g * (0.95 + 0.1 * rnd.random()), LEAF, 0.07)
         if r > 2.5:
@@ -795,7 +861,8 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         rad = float(np.clip(math.sqrt(win.sum() * RES * RES / math.pi), 1.5, 6.5))
         x, y = cell_xy(r, c)
         z = mnt[r, c] if np.isfinite(mnt[r, c]) else 0
-        if h > 11 and rad > 4:
+        rad *= 0.85                     # leave the streets some air
+        if h > 14 and rad > 4.5 and rnd.random() < 0.6:
             kind = "pine"
         elif h > 8 and rad < 2.0:
             kind = "cypress"
@@ -819,6 +886,61 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         kind = "pine" if t.get("leaf_type") == "needleleaved" else "broad"
         add_tree(m, x, y, z, 9 if kind == "pine" else 7, 3.0, kind, rnd)
         stats["trees"] += 1
+
+
+# ------------------------------------------------------------------- cars ----
+CAR_COLS = ["#f2f2f0", "#f2f2f0", "#1d1f22", "#1d1f22", "#9ea3a8", "#c2c5c9", "#2b3f66", "#8c1c1c",
+            "#d9cfb8", "#3d4a3f", "#b8862b"]
+LANE = {"primary": 10, "secondary": 8.5, "tertiary": 7.5, "residential": 6, "unclassified": 6,
+        "living_street": 5, "trunk": 11}
+
+
+def car_box(m, cx, cy, d, L, W, z0, z1, col, kind):
+    sd = np.array([-d[1], d[0]])
+    c = np.array([cx, cy])
+    pts = [c - d * L / 2 - sd * W / 2, c + d * L / 2 - sd * W / 2, c + d * L / 2 + sd * W / 2,
+           c - d * L / 2 + sd * W / 2]
+    q = orient(Polygon(pts), 1.0)
+    add_walls(m, q, z0, z1, z0, 10, col, kind)
+    add_roof(m, q, z1, col, False)
+
+
+def cars(m, ways, mnt, bmask, stats):
+    """Parked and passing cars along the streets: small, but they make the
+    streets read as streets at eye level."""
+    mntR = Raster(mnt)
+    rnd = np.random.default_rng(11)
+    for t, pts, closed in ways:
+        hw = t.get("highway")
+        if hw not in LANE or t.get("tunnel") or t.get("bridge") or t.get("layer", "0") != "0":
+            continue
+        ls = LineString(pts)
+        w = LANE[hw]
+        pos = rnd.uniform(3, 12)
+        while pos < ls.length - 3:
+            a = ls.interpolate(pos)
+            b = ls.interpolate(min(pos + 1.0, ls.length))
+            d = np.array([b.x - a.x, b.y - a.y])
+            n = np.linalg.norm(d)
+            if n < 1e-3:
+                break
+            d /= n
+            side = rnd.choice([-1, 1]) if t.get("oneway") != "yes" else 1
+            off = side * (w / 2 - 1.4)
+            x, y = a.x - d[1] * off, a.y + d[0] * off
+            c_ = int((x - X0) / RES); r_ = int((Y1 - y) / RES)
+            ok = 0 <= c_ < bmask.shape[1] and 0 <= r_ < bmask.shape[0] and not bmask[r_, c_]
+            z = float(mntR.sample(np.array([x]), np.array([y]))[0])
+            if ok and np.isfinite(z):
+                dd = d if side > 0 else -d
+                col = np.array(hexrgb(rnd.choice(CAR_COLS))) * (0.92 + 0.1 * rnd.random())
+                L = rnd.uniform(4.0, 4.9)
+                car_box(m, x, y, dd, L, 1.82, z + 0.2, z + 0.95, col, HULL)
+                cx, cy = x - dd[0] * 0.25, y - dd[1] * 0.25
+                car_box(m, cx, cy, dd, L * 0.52, 1.6, z + 0.95, z + 1.45, [38, 44, 52], HULL)
+                stats["cars"] += 1
+            # Busy streets: a car every 10-30 m.
+            pos += rnd.uniform(9, 30) if hw in ("residential", "unclassified", "living_street") else rnd.uniform(14, 45)
 
 
 # ---------------------------------------------------------------- harbour ----
@@ -897,14 +1019,17 @@ def piers(m, ways, sea):
 
 
 def sea_plane(m):
-    """A 9 km square of sea, centred on the district."""
-    s = 4500
-    P = np.array([[-s, -s, GEOID_N + 0.15], [s, -s, GEOID_N + 0.15], [s, s, GEOID_N + 0.15], [-s, s, GEOID_N + 0.15]])
-    # A flat tangent plane: towards its edges it rises above the curved
-    # sea of the globe (1.6 m at 4.5 km), so the globe's own sea never
-    # shows through it.
-    uv = P[:, :2] / 10.0
-    m.add(P, [0, 0, 1], hexrgb("#2d7a92"), WATER, uv=uv, idx=[0, 1, 2, 0, 2, 3])
+    """A 40 km square of sea out to the horizon, centred on the district,
+    bent to follow the earth's curve and kept 0.5 m above the globe's sea."""
+    n, s = 33, 20000
+    g = np.linspace(-s, s, n)
+    X, Y = np.meshgrid(g, g)
+    Z = GEOID_N + 0.5 - (X ** 2 + Y ** 2) / (2 * 6.371e6)
+    P = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+    ii = np.arange(n * n).reshape(n, n)
+    a, b, c, d = ii[:-1, :-1], ii[:-1, 1:], ii[1:, :-1], ii[1:, 1:]
+    idx = np.concatenate([np.stack([a, b, d], -1).reshape(-1, 3), np.stack([a, d, c], -1).reshape(-1, 3)])
+    m.add(P, [0, 0, 1], hexrgb("#2d7a92"), WATER, uv=P[:, :2] / 10.0, idx=idx)
 
 
 # --------------------------------------------------------------------- glb ----
@@ -997,7 +1122,7 @@ def main():
     mnt_f = np.where(sea, np.nan, mnt)
     ways, pts = load_osm()
     feats = json.load(open(RAW / "bdtopo.json"))["features"]
-    stats = {"buildings": 0, "levels": 0, "towers": 0, "trees": 0, "yachts": 0}
+    stats = {"buildings": 0, "dropped": 0, "rooftop": 0, "cars": 0, "levels": 0, "towers": 0, "trees": 0, "yachts": 0}
 
     print("buildings…")
     bm = Mesh()
@@ -1013,6 +1138,9 @@ def main():
     print("trees…")
     tm = Mesh()
     trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats)
+    print("cars…")
+    cm = Mesh()
+    cars(cm, ways, mnt_f, bgrow, stats)
     print("harbour…")
     hm = Mesh()
     yachts(hm, mns, sea, stats)
@@ -1029,7 +1157,7 @@ def main():
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho)
 
     raw = OUT / "monte-carlo.raw.glb"
-    write_glb(raw, [(gm, True), (bm, False), (tm, False), (hm, False), (sm, False)], jpg)
+    write_glb(raw, [(gm, True), (bm, False), (tm, False), (hm, False), (cm, False), (sm, False)], jpg)
     out = OUT / "monte-carlo.glb"
     if args.no_compress:
         raw.replace(out)
@@ -1040,7 +1168,7 @@ def main():
                         "--quantize-position", "16", "--quantize-texcoord", "14",
                         "--quantize-normal", "8"], check=True)
         raw.unlink()
-    tris = sum(len(np.concatenate(x.i)) // 3 for x in (gm, bm, tm, hm, sm) if x.i)
+    tris = sum(len(np.concatenate(x.i)) // 3 for x in (gm, bm, tm, hm, cm, sm) if x.i)
     meta = {
         "name": "Monte-Carlo film set",
         "origin": {"lon": ORIGIN[0], "lat": ORIGIN[1], "height": 0},

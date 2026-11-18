@@ -58,11 +58,15 @@ stylised model of Monte-Carlo, like a set for an animated film: Casino
 square, the Boulingrins gardens, the north side of Port Hercule and the slopes
 up to Beausoleil, 1.2 × 1.2 km. Nothing in it comes from Google: shapes come
 from IGN LiDAR HD and BD TOPO, streets and gardens from OpenStreetMap, and
-every colour and texture is authored by us. It is one 5 MB file
+every colour and texture is authored by us. It is one 6 MB file
 (`viewer/filmset/monte-carlo.glb`) that loads once and then runs from memory,
 so there is no tile streaming at all. Belle Époque buildings get shutters and
 mansard roofs, tiled roofs are hipped, towers get glass, trees and moored
-yachts are rebuilt from the LiDAR, and the sea moves. Rebuild it with
+yachts are rebuilt from the LiDAR, flat roofs get parapets and the
+machinery rooms the LiDAR sees, about 600 parked cars line the streets, and
+the sea moves out to the horizon under a light film colour grade. Buildings
+the 2021 scan does not see are dropped, except those IGN dates from 2022 on
+(Mareterra and its neighbours), which keep their BD TOPO height. Rebuild it with
 `python pipeline/build_filmset.py --fetch` (about 15 seconds after the 50 MB
 download; needs `npx` for the meshopt compression step).
 

@@ -29,10 +29,13 @@
    43.745304
   ]
  ],
- "triangles": 457693,
- "buildings": 878,
- "levels": 879,
- "towers": 25,
+ "triangles": 632901,
+ "buildings": 877,
+ "dropped": 5,
+ "rooftop": 52,
+ "cars": 608,
+ "levels": 878,
+ "towers": 7,
  "trees": 2176,
  "yachts": 132,
  "sources": [
