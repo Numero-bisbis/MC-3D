@@ -82,6 +82,7 @@
  ],
  "bridges": 19,
  "lamps": 996,
+ "track_clear": true,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",

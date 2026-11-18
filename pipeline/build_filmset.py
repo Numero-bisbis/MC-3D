@@ -377,14 +377,24 @@ def ground_mesh(mnt, sea):
         if TUNNEL is not None:
             band &= ~contains_xy(TUNNEL["ground"].buffer(3), X, Y) & ~contains_xy(TUNNEL["approach"], X, Y)
         if band.any():
-            _, j = TRACK["kd"].query(np.column_stack([X[band], Y[band]]))
-            zt = TRACK["z"][j]
+            # Every stretch of the lap within reach counts, not only the
+            # nearest: below the hairpin two legs run 14 m apart and 6 m
+            # apart in height, and the upper one must not lift the ground
+            # beside the lower one.
+            dk, jk = TRACK["kd"].query(np.column_stack([X[band], Y[band]]), k=16,
+                                       distance_upper_bound=TRACK_HALF + 16)
+            ok = np.isfinite(dk)
+            jk = np.where(ok, jk, 0)
+            zk = TRACK["z"][jk]
             zb = Z[band]
             # Flat under the road and one grid step past the barriers (a
             # ground triangle from there cannot poke up through the road).
-            inner = d[band] < TRACK_HALF + 3.2
-            cap = zt + 0.6 + 1.5 * np.maximum(0, d[band] - (TRACK_HALF + 6.5))
-            Z[band] = np.where(inner, zt - 0.15, np.minimum(zb, cap))
+            inner_k = ok & (dk < TRACK_HALF + 3.2)
+            cap_k = np.where(ok, zk + 0.6 + 1.5 * np.maximum(0, dk - (TRACK_HALF + 6.5)), np.inf)
+            flat = np.where(inner_k, zk - 0.15, np.inf).min(1)
+            inner = np.isfinite(flat)
+            cap = cap_k.min(1)
+            Z[band] = np.where(inner, np.minimum(flat, cap), np.minimum(zb, cap))
     if TUNNEL is not None and "open_ground" in TUNNEL:
         # Outside the gallery the ground stays below the road, so the view
         # through the pillars is open to the shore.
@@ -1320,6 +1330,101 @@ def off_track(x, y, margin=0.0):
     return bool(track_dist(x, y)[0] > TRACK_HALF + 0.8 + margin)
 
 
+def track_audit(named, half=TRACK_HALF - 0.2, lift=0.1, tol=0.08, over=4.5):
+    """Look along the whole lap for anything of the film set standing on the
+    modelled road (5 m either side of the centre line, 10 cm above the
+    terrain): ground, roofs, trees or boats poking up through the tarmac.
+    Vertical rays every metre along the lap, every 40 cm across it, plus
+    every vertex inside the corridor (walls have no area seen from above).
+    Anything higher than `over` is a bridge the cars pass under.
+    Returns a list of (s, offset, height above the road, mesh name)."""
+    if TRACK is None:
+        return []
+    from scipy.spatial import cKDTree
+    tx, ty, tz = TRACK["x"], TRACK["y"], TRACK["z"]
+    seg = np.hypot(np.diff(np.append(tx, tx[0])), np.diff(np.append(ty, ty[0])))
+    s0 = np.concatenate([[0], np.cumsum(seg)])
+    L = s0[-1]
+    sq = np.arange(0, L, 0.5)
+    X = np.interp(sq, s0, np.append(tx, tx[0])); Y = np.interp(sq, s0, np.append(ty, ty[0]))
+    Z = np.interp(sq, s0, np.append(tz, tz[0]))
+    dx, dy = np.gradient(X), np.gradient(Y)
+    ln = np.hypot(dx, dy) + 1e-9
+    nx, ny = -dy / ln, dx / ln
+    C = enu_fast(X, Y, Z)
+    kd = cKDTree(C[:, :2])
+    tun = None
+    if TUNNEL is not None:
+        tun = (TUNNEL["ta"] - 3, TUNNEL["tb"] + 3)
+    hits = []
+
+    def keep(s, h):
+        ok = (h > lift + tol) & (h < over)
+        if tun is not None:
+            ok &= ~((s > tun[0]) & (s < tun[1]))
+        return ok
+
+    # Ray samples across the road.
+    offs = np.arange(-half, half + 1e-6, 0.4)
+    sel = np.arange(0, len(sq), 2)
+    RX = (X[sel, None] + nx[sel, None] * offs).ravel(); RY = (Y[sel, None] + ny[sel, None] * offs).ravel()
+    R = enu_fast(RX, RY, np.repeat(Z[sel], len(offs)))
+    rs = np.repeat(sq[sel], len(offs)); ro = np.tile(offs, len(sel))
+    for name, m in named:
+        a = m.arrays()
+        if a is None:
+            continue
+        P, I = a[0].astype(np.float64), a[4].reshape(-1, 3)
+        # Vertices inside the corridor.
+        d, j = kd.query(P[:, :2], distance_upper_bound=half)
+        ins = np.isfinite(d)
+        if ins.any():
+            h = P[ins, 2] - C[j[ins], 2]
+            ok = keep(sq[j[ins]], h)
+            for k in np.nonzero(ok)[0]:
+                hits.append((float(sq[j[ins]][k]), float(d[ins][k]), float(h[k]), name + " vertex"))
+        # Triangles over the corridor, bucketed on a 2 m grid.
+        T = P[I]
+        cen = T[:, :, :2].mean(1)
+        rad = np.max(np.linalg.norm(T[:, :, :2] - cen[:, None], axis=2), 1)
+        dc, _ = kd.query(cen, distance_upper_bound=60)
+        near = np.isfinite(dc) & (dc < rad + half + 0.5)
+        T = T[near]
+        if not len(T):
+            continue
+        lo = np.floor(T[:, :, :2].min(1) / 2).astype(int); hi = np.floor(T[:, :, :2].max(1) / 2).astype(int)
+        buckets = {}
+        for k in range(len(T)):
+            if (hi[k] - lo[k]).max() > 40:
+                continue
+            for bx in range(lo[k, 0], hi[k, 0] + 1):
+                for by in range(lo[k, 1], hi[k, 1] + 1):
+                    buckets.setdefault((bx, by), []).append(k)
+        cell = np.floor(R[:, :2] / 2).astype(int)
+        for q in range(len(R)):
+            ks = buckets.get((cell[q, 0], cell[q, 1]))
+            if not ks:
+                continue
+            tt = T[ks]
+            a0, a1, a2 = tt[:, 0], tt[:, 1], tt[:, 2]
+            v0, v1 = a1[:, :2] - a0[:, :2], a2[:, :2] - a0[:, :2]
+            w = R[q, :2] - a0[:, :2]
+            den = v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
+            good = np.abs(den) > 1e-9
+            den = np.where(good, den, 1)
+            u = (w[:, 0] * v1[:, 1] - w[:, 1] * v1[:, 0]) / den
+            v = (v0[:, 0] * w[:, 1] - v0[:, 1] * w[:, 0]) / den
+            inside = good & (u >= 0) & (v >= 0) & (u + v <= 1)
+            if not inside.any():
+                continue
+            z = (a0[:, 2] + u * (a1[:, 2] - a0[:, 2]) + v * (a2[:, 2] - a0[:, 2]))[inside]
+            h = z - R[q, 2]
+            ok = keep(np.full(len(h), rs[q]), h)
+            if ok.any():
+                hits.append((float(rs[q]), float(ro[q]), float(h[ok].max()), name))
+    return hits
+
+
 def load_tunnel():
     f = ROOT / "viewer" / "lap-route.js"
     if not f.exists():
@@ -2222,6 +2327,19 @@ def main():
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))
 
+    hits = track_audit([("ground", gm), ("buildings", bm), ("trees", tm), ("harbour", hm)])
+    stats["track_clear"] = not hits
+    if hits:
+        print(f"track audit: {len(hits)} spots stand on the road")
+        rep = {}
+        for s, o, h, nm in hits:
+            key = (int(s // 10) * 10, nm)
+            if key not in rep or h > rep[key][1]:
+                rep[key] = (round(o, 1), round(h, 2))
+        for (s, nm), (o, h) in sorted(rep.items()):
+            print(f"  s {s:5d} m  {nm:18s} offset {o:+5.1f} m  {h:+.2f} m above the road")
+    else:
+        print("track audit: the road is clear all the way round")
     if tun_m.p:
         tiny = io.BytesIO()
         Image.new("RGB", (4, 4), (128, 128, 128)).save(tiny, "JPEG")
