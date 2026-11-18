@@ -26,7 +26,9 @@ geoid offset handled by the viewer) and viewer/filmset/monte-carlo.json.
 
 Inputs (downloaded by --fetch into data/raw/filmset/):
   mnt.tif, mns.tif   IGN LiDAR HD 50 cm via Géoplateforme WMS
-  ortho.jpg          IGN orthophoto 50 cm (only used to classify roofs/trees)
+  ortho.jpg          IGN orthophoto 50 cm (classifies roofs, trees, yachts)
+  ortho20_XY.jpg     IGN orthophoto 20 cm, four tiles: the real roofs (each
+                     roof's patch is shifted back by the photo's lean)
   bdtopo.json        IGN BD TOPO building outlines
   osm.xml            OpenStreetMap extract (api.openstreetmap.org /map)
 
@@ -105,6 +107,14 @@ def fetch():
         # Dated places around the square (year built, style, floors).
         "wikidata.json": "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(WD_QUERY),
     }
+    # The roofs, at 20 cm: four 600 m tiles of 3072 px.
+    for i in (0, 1):
+        for j in (0, 1):
+            bx, by = X0 + 600 * i, Y0 + 600 * j
+            urls[f"ortho20_{i}{j}.jpg"] = (
+                f"{WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ORTHOIMAGERY.ORTHOPHOTOS"
+                f"&STYLES=&FORMAT=image/jpeg&CRS=EPSG:2154&BBOX={bx},{by},{bx + 600},{by + 600}"
+                f"&WIDTH=3072&HEIGHT=3072")
     for name, url in urls.items():
         out = RAW / name
         if out.exists() and out.stat().st_size > 1000:
@@ -113,6 +123,18 @@ def fetch():
         req = urllib.request.Request(url, headers={"User-Agent": "MC-3D film set builder"})
         out.write_bytes(urllib.request.urlopen(req, timeout=300).read())
         time.sleep(1.2)
+
+
+def load_ortho_hi():
+    """The four 20 cm photo tiles as one 6144 px image (north up), or None."""
+    tiles = [[RAW / f"ortho20_{i}{j}.jpg" for j in (0, 1)] for i in (0, 1)]
+    if not all(t.exists() for row in tiles for t in row):
+        return None
+    im = Image.new("RGB", (6144, 6144))
+    for i in (0, 1):
+        for j in (0, 1):
+            im.paste(Image.open(tiles[i][j]).convert("RGB"), (3072 * i, 3072 * (1 - j)))
+    return im
 
 
 # ----------------------------------------------------------- coordinates ----
@@ -369,7 +391,7 @@ def ground_mesh(mnt, sea):
     return m, Z
 
 
-def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None):
+def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     S = 6144
     px = S / (X1 - X0)
     img = Image.new("RGB", (S, S), tuple(hexrgb("#d3c6ae")))
@@ -464,6 +486,35 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None):
     g = np.random.default_rng(3).normal(0, 4, (S // 4, S // 4))
     g = np.asarray(Image.fromarray(g.astype(np.float32)).resize((S, S), Image.BILINEAR))
     arr += g[..., None]
+    # Real roofs: the 20 cm aerial photo inside the outlines of the roofs
+    # that use it (a little crisper and warmer than the raw photo).
+    if roofs is not None and roofs[0] is not None and roofs[1]:
+        hi, polys = roofs
+        hi = hi.resize((S, S), Image.LANCZOS) if hi.size != (S, S) else hi
+        mk = Image.new("L", (S, S), 0)
+        canvas = Image.new("RGB", (S, S))
+        # Lowest roofs first, so a taller neighbour wins along shared edges.
+        for pg, (sx, sy), _z in sorted(polys, key=lambda t: t[2]):
+            for q in to_polys(pg.buffer(0.6, join_style=2)):
+                bx0, by0, bx1, by1 = q.bounds
+                a0, b0 = int((bx0 - X0) * px) - 1, int((Y1 - by1) * px) - 1
+                a1, b1 = int((bx1 - X0) * px) + 2, int((Y1 - by0) * px) + 2
+                ox, oy = int(round(sx * px)), int(round(-sy * px))
+                patch = hi.crop((a0 + ox, b0 + oy, a1 + ox, b1 + oy))
+                pm = Image.new("L", (a1 - a0, b1 - b0), 0)
+                dpm = ImageDraw.Draw(pm)
+                dpm.polygon([(X - a0, Y - b0) for X, Y in xy(q.exterior.coords)], fill=255)
+                for hole in q.interiors:
+                    dpm.polygon([(X - a0, Y - b0) for X, Y in xy(hole.coords)], fill=0)
+                canvas.paste(patch, (a0, b0), pm)
+                mk.paste(255, (a0, b0, a1, b1), pm)
+        mkf = np.asarray(mk).astype(np.float32)[..., None] / 255
+        ph = np.asarray(canvas).astype(np.float32)
+        gray = ph.mean(2, keepdims=True)
+        ph = gray + (ph - gray) * 1.12
+        ph = (ph - 118) * 1.1 + 126
+        ph *= np.array([1.03, 1.0, 0.96], np.float32)
+        arr = arr * (1 - mkf) + ph * mkf
     img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).resize((TEX, TEX), Image.LANCZOS)
     b = io.BytesIO()
     img.save(b, "JPEG", quality=86)
@@ -551,7 +602,92 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None):
         m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style)
 
 
-def add_roof(m, poly, z, col, tiled, cap=None):
+# Roofs are painted with the aerial photo itself: real tiles, skylights,
+# terraces. The IGN photo is not a true orthophoto, so a roof shows up
+# shifted from its outline by its height times a lean (estimate_lean). The
+# build copies each roof's patch of photo, shifted back, into the ground
+# map under the building's own outline (ground nobody sees), and the roof
+# samples the ground map there.
+PHOTO_ROOF = 1                      # ROOF_FLAT style: diffuse from the ground map
+
+
+def photo_edges(hi):
+    """Edge strength of the 20 cm photo on the 50 cm grid."""
+    n = int((X1 - X0) / RES)
+    g = np.asarray(hi.convert("L").resize((n, n), Image.LANCZOS)).astype(np.float32)
+    G = np.hypot(ndimage.sobel(g, 0), ndimage.sobel(g, 1))
+    return G / (ndimage.uniform_filter(G, 15) + 10)
+
+
+def outline_score(G, poly, R):
+    """Mean photo edge strength along the outline, for every shift of up
+    to R cells: (2R+1, 2R+1) array, rows = north shift down."""
+    x0, y0, x1, y1 = poly.bounds
+    c0, r0 = int((x0 - X0) / RES), int((Y1 - y1) / RES)
+    w, h = int((x1 - X0) / RES) + 1 - c0, int((Y1 - y0) / RES) + 1 - r0
+    im = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(im).polygon([((x - X0) / RES - c0, (Y1 - y) / RES - r0) for x, y in poly.exterior.coords], fill=1)
+    m = np.asarray(im).astype(bool)
+    ys, xs = np.nonzero(m ^ ndimage.binary_erosion(m))
+    sc = np.zeros((2 * R + 1, 2 * R + 1), np.float32)
+    if not len(ys):
+        return sc
+    n = G.shape[0]
+    for dy in range(-R, R + 1):
+        yy = ys + r0 + dy
+        for dx in range(-R, R + 1):
+            xx = xs + c0 + dx
+            ok = (yy >= 0) & (yy < n) & (xx >= 0) & (xx < n)
+            sc[dy + R, dx + R] = G[yy[ok], xx[ok]].mean() if ok.any() else 0
+    return sc
+
+
+def estimate_lean(G, feats, mns, mnt):
+    """Roof shift per metre of height (east, north): the one that best
+    lines up the outlines of the taller buildings with edges in the photo."""
+    R = 30
+    hs, maps = [], []
+    for f in feats:
+        for p in to_polys(shapely.force_2d(shape(f["geometry"])).buffer(0)):
+            x0, y0, x1, y1 = p.bounds
+            if p.area < 200 or x0 < X0 + 20 or x1 > X1 - 20 or y0 < Y0 + 20 or y1 > Y1 - 20:
+                continue
+            c0, c1 = int((x0 - X0) / RES), int((x1 - X0) / RES) + 1
+            r0, r1 = int((Y1 - y1) / RES), int((Y1 - y0) / RES) + 1
+            gx, gy = cell_xy(np.arange(r0, r1)[:, None] + 0.5, np.arange(c0, c1)[None] + 0.5)
+            ins = contains_xy(p, *np.broadcast_arrays(gx, gy))
+            top, gnd = mns[r0:r1, c0:c1][ins], mnt[r0:r1, c0:c1][ins]
+            if ins.sum() < 50 or not np.isfinite(gnd).any() or not np.isfinite(top).any():
+                continue
+            H = float(np.nanpercentile(top, 92) - np.nanmin(gnd))
+            if H < 12:
+                continue
+            sc = outline_score(G, p, R)
+            hs.append(H)
+            maps.append((sc - np.median(sc)) / (sc.std() + 1e-6))
+    if len(hs) < 20:
+        return (0.0, 0.0)
+    hs, maps = np.array(hs), np.array(maps)
+    vs = np.arange(-0.4, 0.401, 0.01)
+    best, lean = -1e9, (0.0, 0.0)
+    k = np.arange(len(hs))
+    for vx in vs:
+        ix = np.clip(np.round(hs * vx / RES).astype(int) + R, 0, 2 * R)
+        for vy in vs:
+            iy = np.clip(np.round(-hs * vy / RES).astype(int) + R, 0, 2 * R)
+            t = maps[k, iy, ix].sum()
+            if t > best:
+                best, lean = t, (float(vx), float(vy))
+    return lean
+
+
+def photo_uv(x, y):
+    return np.column_stack([(x - X0) / (X1 - X0), (Y1 - y) / (Y1 - Y0)])
+
+
+def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
+    """photo: a dict {"mesh", "polys"}; the roof goes into that textured
+    mesh, mapped onto the aerial photo painted into the ground map."""
     if tiled:
         t = triangulate(poly, area=4)
     else:
@@ -567,6 +703,12 @@ def add_roof(m, poly, z, col, tiled, cap=None):
     else:
         zz = np.full(len(v), z)
     P = enu_fast(v[:, 0], v[:, 1], zz)
+    if photo is not None:
+        uv = photo_uv(v[:, 0], v[:, 1])
+        photo["mesh"].tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], [255, 255, 255], ROOF_FLAT,
+                          uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
+        photo["polys"].append((poly, photo["shift"], z))
+        return
     m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, ROOF_TILE if tiled else ROOF_FLAT)
 
 
@@ -757,7 +899,7 @@ def add_cap(m, poly, z, h, col, kind):
     m.tri(mid[j], mid[jn], np.repeat(top[None], k, 0), col, kind)
 
 
-def buildings(m, feats, mns, mnt, ortho, stats, facades):
+def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
     mntR = Raster(mnt)
     extent = box(X0, Y0, X1, Y1)
     footprint = []
@@ -893,10 +1035,25 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades):
                 stats["real_floors"] += 1
             elif len(levels) == 1:
                 fh = hwall / max(1, round(hwall / fh))
+            # Fine-tune this building's photo shift by up to a metre.
+            adj = (0.0, 0.0)
+            if photo is not None and photo.get("edges") is not None and poly.area > 80:
+                lx, ly = photo["lean"]
+                sc = outline_score(photo["edges"], poly, 2 + int(round(abs(H * lx) / RES + abs(H * ly) / RES)))
+                R_ = (sc.shape[0] - 1) // 2
+                px_, py_ = int(round(H * lx / RES)), int(round(-H * ly / RES))
+                win = sc[R_ + py_ - 2:R_ + py_ + 3, R_ + px_ - 2:R_ + px_ + 3]
+                if win.shape == (5, 5) and win.max() > win[2, 2] * 1.06:
+                    iy_, ix_ = np.unravel_index(np.argmax(win), win.shape)
+                    adj = ((ix_ - 2) * RES, -(iy_ - 2) * RES)
             zb = base - 1.0
             for li, (region, hz) in enumerate(levels):
                 zt = base + hz
                 last = li == len(levels) - 1
+                ph = None
+                if photo is not None and not hero and not post_scan:
+                    lx, ly = photo["lean"]
+                    ph = dict(photo, shift=(hz * lx + adj[0], hz * ly + adj[1]))
                 for part in tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
                     if kind == WALL_OLD and part.area > 60:
                         # Stone cornice under the roof line: a moulding
@@ -912,7 +1069,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades):
                     if tiled:
                         eave = base + max(2.5, float(np.percentile(hrel, 40)))
                         add_walls(m, part, zb, eave, base, fh, col, kind, style=style)
-                        add_roof(m, part, eave, rcol, True, max(1.0, base + top - eave))
+                        add_roof(m, part, eave, rcol, True, max(1.0, base + top - eave), photo=ph)
                     elif grand and last and part.area > 120 and hz > 8:
                         sk = min(3.4, hz * 0.25)
                         add_walls(m, part, zb, zt - sk, base, fh, col, kind, style=style)
@@ -920,7 +1077,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades):
                                     ROOF_TILE, sk, 2.2)
                     else:
                         add_walls(m, part, zb, zt, base, fh, col, kind, style=style)
-                        add_roof(m, part, zt, rcol, False)
+                        add_roof(m, part, zt, rcol, False, photo=ph)
                         if part.area > 40:
                             # Parapet: a low wall round the roof edge, so
                             # roofs read as terraces instead of lids.
@@ -1594,6 +1751,7 @@ def main():
     t0 = time.time()
     mnt, mns = load_raster("mnt.tif"), load_raster("mns.tif")
     ortho = np.asarray(Image.open(RAW / "ortho.jpg").convert("RGB"))
+    ortho_hi = load_ortho_hi()
     # Sea: no terrain in the LiDAR, or ground at sea level.
     # Moored yachts and pontoons show up as small islands of "ground" in the
     # LiDAR terrain model; anything smaller than 0.2 ha surrounded by water
@@ -1623,7 +1781,15 @@ def main():
 
     print("buildings…")
     bm = Mesh()
-    fps = buildings(bm, feats, mns, mnt_f, ortho, stats, FacadeData(ways))
+    photo = None
+    if ortho_hi is not None:
+        edges = photo_edges(ortho_hi)
+        lean = estimate_lean(edges, feats, mns, mnt)
+        print("photo lean per metre of height (east, north):", lean)
+        photo = {"mesh": Mesh(), "polys": [], "lean": lean, "edges": edges}
+    fps = buildings(bm, feats, mns, mnt_f, ortho, stats, FacadeData(ways), photo)
+    stats["photo_roofs"] = len(photo["polys"]) if photo else 0
+    stats["photo_lean"] = photo["lean"] if photo else None
     # Building mask at 50 cm for trees and the ground shade.
     mimg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
     dd = ImageDraw.Draw(mimg)
@@ -1656,14 +1822,17 @@ def main():
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
-                       sun_shadows(mns, sea))
+                       sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))
 
     if tun_m.p:
         tiny = io.BytesIO()
         Image.new("RGB", (4, 4), (128, 128, 128)).save(tiny, "JPEG")
         write_glb(OUT / "monte-carlo-tunnel.glb", [(tun_m, False)], tiny.getvalue())
     raw = OUT / "monte-carlo.raw.glb"
-    write_glb(raw, [(gm, True), (bm, False), (tm, False), (hm, False), (sm, False)], jpg)
+    prims = [(gm, True), (bm, False), (tm, False), (hm, False), (sm, False)]
+    if photo and photo["mesh"].p:
+        prims.append((photo["mesh"], True))
+    write_glb(raw, prims, jpg)
     out = OUT / "monte-carlo.glb"
     if args.no_compress:
         raw.replace(out)
@@ -1674,7 +1843,7 @@ def main():
                         "--quantize-position", "16", "--quantize-texcoord", "14",
                         "--quantize-normal", "8"], check=True)
         raw.unlink()
-    tris = sum(len(np.concatenate(x.i)) // 3 for x in (gm, bm, tm, hm, sm) if x.i)
+    tris = sum(len(np.concatenate(x[0].i)) // 3 for x in prims if x[0].i)
     meta = {
         "name": "Monte-Carlo film set",
         "origin": {"lon": ORIGIN[0], "lat": ORIGIN[1], "height": 0},
@@ -1686,7 +1855,7 @@ def main():
         "drive": drive,
         **stats,
         "sources": ["IGN LiDAR HD MNT/MNS (Etalab 2.0)", "IGN BD TOPO (Etalab 2.0)",
-                    "IGN BD ORTHO, classification only (Etalab 2.0)", "OpenStreetMap contributors (ODbL)",
+                    "IGN BD ORTHO 20 cm, roofs (Etalab 2.0)", "OpenStreetMap contributors (ODbL)",
                     "Wikidata (CC0)"],
     }
     (OUT / "monte-carlo.json").write_text(json.dumps(meta, indent=1))

@@ -32,6 +32,12 @@
         p3 += dot(p3, p3.yzx + 33.33);
         return fract((p3.x + p3.y) * p3.z);
       }
+      float vnoise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
       float box(vec2 f, vec2 lo, vec2 hi, vec2 aa) {
         vec2 a = smoothstep(lo - aa, lo + aa, f) * (1.0 - smoothstep(hi - aa, hi + aa, f));
         return a.x * a.y;
@@ -269,6 +275,18 @@
             shine = win * (1.0 - rail);
             farCol = mix(base, base * 0.6, 0.35);
           }
+          if (style < 5.5 || style > 6.5) {
+            // Weathering, kept subtle: plaster that varies in patches and
+            // floor by floor, and rain streaks under the sills.
+            vec3 pm = fsInput.attributes.positionMC;
+            float patchN = vnoise(pm.xz * 0.35 + pm.y * 0.21) * 0.6 + vnoise(pm.xy * 1.3 + pm.zy * 0.7) * 0.4;
+            float wall = 1.0 - shine;
+            float floorTint = 0.97 + 0.055 * hash12(vec2(floor(uv.y), vr * 31.0));
+            float streak = box(f, vec2(0.40, 0.0), vec2(0.60, 0.15), aa) * (0.5 + 0.5 * hash12(cell * 3.3 + 0.7))
+                           * smoothstep(0.0, 0.15, f.y) * fine;
+            float w = mix(0.90, 1.05, patchN) * floorTint * (1.0 - 0.14 * streak);
+            col *= mix(1.0, w, wall * mix(0.55, 1.0, detail));
+          }
           col = mix(farCol, col, detail);
           material.roughness = mix(0.85, 0.22, shine * detail);
           material.specular = mix(vec3(0.03), vec3(0.07), shine * detail);
@@ -284,6 +302,11 @@
             material.emissive = wc * u_night * mix(0.16, shine * lit * 1.1, detail);
           }
         } else if (kind < 3.5) {        // flat roofs
+          if (a255 - kind * 16.0 < 1.5) {
+            // A real roof: its 20 cm aerial photo, kept from the ground map.
+            material.roughness = 0.8;
+            return;
+          }
           material.diffuse = base * (0.95 + 0.08 * hash12(floor(fsInput.attributes.positionMC.xz * 0.5)));
         } else if (kind < 4.5) {        // tiled roofs: rows of tiles
           float rows = fract(fsInput.attributes.positionMC.y * 3.0);
