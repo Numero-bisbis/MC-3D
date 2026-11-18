@@ -758,6 +758,45 @@ HEROES = {
 }
 
 
+# The Casino's front on the square: two corner towers with tall copper caps
+# and a raised centre with its clock, as on Garnier's façade.
+CASINO_FRONT = "BATIMENT0000000074070299"
+CASINO_SQUARE = (1056553.0, 6303373.0)      # the Casino fountain on the square, L93
+
+
+def casino_front(m, poly, base, H, fh, col, kind, style, rcol):
+    import shapely
+    sq = shapely.Point(*CASINO_SQUARE)
+    rect = np.asarray(poly.minimum_rotated_rectangle.exterior.coords)[:4]
+    sides = [(rect[i], rect[(i + 1) % 4]) for i in range(4)]
+    a, b = min(sides, key=lambda e: shapely.Point((e[0] + e[1]) / 2).distance(sq))
+    u = (b - a) / np.linalg.norm(b - a)
+    n = np.array([-u[1], u[0]])
+    mid = (a + b) / 2
+    if np.dot(n, np.asarray(CASINO_SQUARE) - mid) > 0:
+        n = -n                                  # n points into the building
+    L = float(np.linalg.norm(b - a))
+    zt = base + H
+    copper = np.asarray(rcol)
+
+    def block(c, w, d, z0, z1):
+        pts = [c + u * w / 2 + n * d / 2, c - u * w / 2 + n * d / 2, c - u * w / 2 - n * d / 2, c + u * w / 2 - n * d / 2]
+        return orient(Polygon(pts), 1.0)
+    for t_ in (0.12, 0.88):
+        c = a + u * L * t_ + n * 3.6           # flush with the façade
+        tp = block(c, 7.5, 7.5, zt - 2, zt + 7)
+        add_walls(m, tp, zt - 2, zt + 7, base, fh, col, kind, style=style)
+        add_walls(m, tp.buffer(0.35, join_style=2), zt + 6.6, zt + 7.3, zt, 10, np.asarray(col) * 1.05, PLAIN)
+        add_cap(m, tp, zt + 7.3, 7.5, copper, ROOF_TILE)
+        add_cap(m, block(c, 1.2, 1.2, 0, 0), zt + 14.4, 2.2, hexrgb("#d9b75e"), PLAIN)   # gilded finial
+    c = mid + n * 2.9
+    cp = block(c, 14, 6, zt - 2, zt + 5)
+    add_walls(m, cp, zt - 2, zt + 5, base, fh, col, kind, style=style)
+    add_cap(m, cp, zt + 5, 3.5, copper, ROOF_TILE)
+    clock = block(mid - n * 0.05, 2.6, 0.3, 0, 0)
+    add_walls(m, clock, zt + 1.2, zt + 3.8, zt, 10, hexrgb("#f4efe2"), PLAIN)
+
+
 # Façade styles, read by the viewer's shader from the low bits of the colour
 # alpha (kind * 16 + style). Each one is a real type of Monaco building.
 (S_SHUTTER, S_BELLE, S_ARCH, S_VILLA, S_LOGGIA, S_RIBBON, S_GLASS, S_MODERN, S_DECO) = range(9)
@@ -1200,6 +1239,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     add_cap(m, tp, base + body, max(1.5, peak - body),
                             rcol if rk == "copper" else hexrgb("#6f8b84"), ROOF_TILE)
                     stats["towers"] += 1
+            if props.get("cleabs") == CASINO_FRONT:
+                casino_front(m, poly, base, H, fh, col, kind, style, rcol)
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
@@ -1732,7 +1773,16 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         if not np.isfinite(z):
             continue
         kind = "pine" if t.get("leaf_type") == "needleleaved" else "broad"
-        add_tree(m, x, y, z, 9 if kind == "pine" else 7, 3.0, kind, rnd)
+        # Size from the LiDAR canopy over the mapped trunk (the plane trees
+        # along the boulevards are 10-14 m), crowns may lean over the
+        # pavement but stop at the barriers.
+        r_, c_ = int((Y1 - y) / RES), int((x - X0) / RES)
+        hh = float(np.nanmax(chm[max(0, r_ - 3):r_ + 4, max(0, c_ - 3):c_ + 4])) if 0 <= r_ < chm.shape[0] and 0 <= c_ < chm.shape[1] else 0
+        h_ = float(np.clip(hh, 6, 16)) if np.isfinite(hh) and hh > 4 else (9 if kind == "pine" else 7)
+        rad_ = float(np.clip(0.33 * h_, 2.5, 5.0))
+        if TRACK is not None:
+            rad_ = float(min(rad_, max(2.0, track_dist(x, y)[0] - (TRACK_HALF + 0.5))))
+        add_tree(m, x, y, z, h_, rad_, kind, rnd)
         stats["trees"] += 1
 
 
@@ -1750,7 +1800,7 @@ def hull_outline(L, W):
     return pts + right
 
 
-def yachts(m, ortho, sea, stats):
+def yachts(m, ortho, sea, stats, ways=()):
     """Moored yachts traced from the white shapes on the water in the IGN
     photo (newer than the LiDAR), rebuilt as clean stylised yachts: white
     hull with a dark boot stripe, decks and stepped superstructures with
@@ -1763,6 +1813,17 @@ def yachts(m, ortho, sea, stats):
     boat = sea & (lum > 135) & (sat < 70)
     boat = ndimage.binary_opening(boat, iterations=1)
     boat = ndimage.binary_closing(boat, iterations=1)
+    # Piers and pontoons (built as decks by piers()): white shapes on them
+    # are tents, kiosks and roofs, never boats.
+    pim = Image.new("L", (sea.shape[1], sea.shape[0]), 0)
+    dpi = ImageDraw.Draw(pim)
+    for t, pts_, closed in ways:
+        if t.get("man_made") not in ("pier", "breakwater", "quay") and t.get("floating") != "yes":
+            continue
+        g = Polygon(pts_) if closed and len(pts_) > 3 else LineString(pts_).buffer(1.25, cap_style=2)
+        for q in to_polys(g.buffer(1.0)):
+            dpi.polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in q.exterior.coords], fill=255)
+    on_pier = np.asarray(pim) > 0
     lab, n = ndimage.label(boat)
     rnd = np.random.default_rng(5)
     for i, sl in enumerate(ndimage.find_objects(lab), 1):
@@ -1772,6 +1833,8 @@ def yachts(m, ortho, sea, stats):
         if len(rr) < 40 or len(rr) > 60000:
             continue
         rr = rr + sl[0].start; cc = cc + sl[1].start
+        if on_pier[rr, cc].mean() > 0.15:
+            continue
         x, y = cell_xy(rr, cc)
         pts = np.column_stack([x, y])
         cen = pts.mean(0)
@@ -1784,6 +1847,8 @@ def yachts(m, ortho, sea, stats):
         fill = len(rr) * RES * RES / max(L * Wr, 1)
         if L < 5 or Wr < 1.8 or fill < 0.45 or L / Wr > 7 or L > 140:
             continue                     # wakes, glints, foam
+        if fill > 0.9 and L > 12:
+            continue                     # a crisp rectangle: a tent or roof on a quay, not a hull
         W = min(Wr, L / 2.6)
         mid = cen + ax * (proj.max() + proj.min()) / 2
 
@@ -1878,7 +1943,12 @@ def sea_plane(m):
     ii = np.arange(n * n).reshape(n, n)
     a, b, c, d = ii[:-1, :-1], ii[:-1, 1:], ii[1:, :-1], ii[1:, 1:]
     idx = np.concatenate([np.stack([a, b, d], -1).reshape(-1, 3), np.stack([a, d, c], -1).reshape(-1, 3)])
-    m.add(P, [0, 0, 1], hexrgb("#2d7a92"), WATER, uv=P[:, :2] / 10.0, idx=idx)
+    # UV: the district's map space (as the ground map), for the shore
+    # foam in the night/shore texture; outside the district it clamps.
+    Ainv = np.linalg.lstsq(np.column_stack([AFF[0, :2], AFF[1, :2]]).T, np.eye(2), rcond=None)[0]
+    lxy = (P[:, :2] - AFF[2, :2]) @ Ainv
+    uv = np.column_stack([lxy[:, 0] / (X1 - X0), 1 - lxy[:, 1] / (Y1 - Y0)])
+    m.add(P, [0, 0, 1], hexrgb("#2d7a92"), WATER, uv=uv, idx=idx)
 
 
 # --------------------------------------------------------------------- glb ----
@@ -1956,6 +2026,9 @@ LAMP_ROADS = {"primary": 10, "secondary": 8.5, "tertiary": 7.5, "residential": 6
 
 
 def street_lamps(m, ways, gz, bmask, sea):
+    """Lamps along the streets; writes monte-carlo-night.jpg: R = pools of
+    lamp light, G = distance from the shore over the sea (0-20 m), for the
+    foam along quays and beaches."""
     def ground(x, y):
         return float(ndimage.map_coordinates(gz, [[(Y1 - y) / GRID], [(x - X0) / GRID]], order=1, mode="nearest")[0])
     placed = []
@@ -2003,8 +2076,12 @@ def street_lamps(m, ways, gz, bmask, sea):
         g[int((Y1 - y) / (Y1 - Y0) * S), int((x - X0) / (X1 - X0) * S)] += 1
     g = ndimage.gaussian_filter(g, 5.5 / ((X1 - X0) / S))
     g = np.clip(g / g.max() * 1.4, 0, 1) ** 0.8
-    im = Image.fromarray((g * 255).astype(np.uint8), "L")
-    im.save(OUT / "monte-carlo-night.jpg", quality=85)
+    seaS = np.asarray(Image.fromarray((sea * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)) > 127
+    dist = ndimage.distance_transform_edt(seaS) * ((X1 - X0) / S)
+    shore = np.clip(dist / 20.0, 0, 1)
+    rgb = np.dstack([g, shore, np.zeros_like(g)])
+    im = Image.fromarray((rgb * 255).astype(np.uint8), "RGB")
+    im.save(OUT / "monte-carlo-night.jpg", quality=88, subsampling=0)
     return len(placed)
 
 
@@ -2128,7 +2205,7 @@ def main():
     trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats)
     print("harbour…")
     hm = Mesh()
-    yachts(hm, ortho, sea, stats)
+    yachts(hm, ortho, sea, stats, ways)
     piers(hm, ways, sea)
     stats["bridges"] = bridges(bm, ways, mns, mnt)
     sm = Mesh()

@@ -101,7 +101,12 @@ below the barrier tops, so no slope spills over its edges. The tunnel is open
 on its sea side where it runs along the shore: a parapet, pillars every 7.5 m
 and the sea between them, with the hotel above on stilts. Ground floors along the streets are rows of shops (display windows lit
 from inside, doors, painted sign bands with gold lettering, striped awnings),
-and close up the ground map gains fine grain and paving joints. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
+and close up the ground map gains fine grain and paving joints. The Casino gets its twin corner towers with copper caps and gilded finials
+and a raised centre with its clock on the square. Along the shore the sea
+turns lighter, with a line of foam and small waves lapping at the quays.
+Mapped street trees are sized from the LiDAR canopy (the plane trees of the
+boulevards), and white shapes on piers and quays are no longer taken for
+boats. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
 streaks under the sills). Trees and moored
 yachts are rebuilt from the LiDAR, flat roofs get parapets and the
 machinery rooms the LiDAR sees and plants where the IGN photo shows roof

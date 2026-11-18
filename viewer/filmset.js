@@ -404,6 +404,23 @@
           material.diffuse = mix(base, base * vec3(0.8, 0.95, 1.05), far) * 0.55 * mix(1.0, 0.4, u_night);
           material.roughness = 0.08;
           material.specular = vec3(0.04);
+          // Along the shore: clearer, lighter water, a line of foam where
+          // it meets the quays and rocks, and small waves lapping in.
+          vec2 suv = fsInput.attributes.texCoord_0;
+          if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0) {
+            float d = texture(u_lights, suv).g * 20.0;           // metres from the shore
+            if (d < 19.0) {
+              float shallow = 1.0 - smoothstep(2.0, 16.0, d);
+              material.diffuse = mix(material.diffuse, material.diffuse * vec3(1.15, 1.45, 1.35) + vec3(0.0, 0.03, 0.03), shallow * 0.6);
+              float br = vnoise(q * 0.9 + vec2(t * 0.15, -t * 0.1));
+              float line = (1.0 - smoothstep(0.4, 1.8 + 0.8 * br, d));
+              float lap = smoothstep(0.75, 0.95, 0.5 + 0.5 * sin(d * 1.3 - t * 1.6 + br * 2.0))
+                        * (1.0 - smoothstep(1.5, 7.0, d)) * smoothstep(0.35, 0.65, vnoise(q * 1.7 - t * 0.2));
+              float foam = clamp(line * (0.55 + 0.45 * vnoise(q * 3.0 + t * 0.4)) + lap * 0.55, 0.0, 1.0) * near;
+              material.diffuse = mix(material.diffuse, vec3(0.80, 0.86, 0.88) * mix(1.0, 0.25, u_night), foam * 0.85);
+              material.roughness = mix(material.roughness, 0.7, foam);
+            }
+          }
         } else {
           float st = a255 - kind * 16.0;
           if (st > 0.5 && st < 2.5) {
