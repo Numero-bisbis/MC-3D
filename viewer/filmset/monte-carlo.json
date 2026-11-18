@@ -29,15 +29,15 @@
    43.745304
   ]
  ],
- "triangles": 632901,
- "buildings": 877,
+ "triangles": 788251,
+ "buildings": 876,
  "dropped": 5,
  "rooftop": 52,
- "cars": 608,
- "levels": 878,
+ "roof_plants": 901,
+ "levels": 877,
  "towers": 7,
- "trees": 2176,
- "yachts": 132,
+ "trees": 2121,
+ "yachts": 203,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",

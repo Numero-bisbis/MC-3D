@@ -256,6 +256,58 @@ def rng_for(key):
     return np.random.default_rng(int(hashlib.md5(str(key).encode()).hexdigest()[:8], 16))
 
 
+# ------------------------------------------------------------ sun shadows ----
+SUN_TIME = (2026, 6, 21, 6, 15)     # UTC; viewer/filmset.js uses the same moment
+
+
+def sun_position(lon, lat, when=SUN_TIME):
+    """Solar azimuth (degrees from north, clockwise) and elevation (NOAA)."""
+    import datetime
+    t = datetime.datetime(*when, tzinfo=datetime.timezone.utc)
+    jd = t.timestamp() / 86400 + 2440587.5
+    jc = (jd - 2451545) / 36525
+    l0 = (280.46646 + jc * (36000.76983 + jc * 0.0003032)) % 360
+    m_ = 357.52911 + jc * (35999.05029 - 0.0001537 * jc)
+    e = 0.016708634 - jc * (0.000042037 + 0.0000001267 * jc)
+    c = (math.sin(math.radians(m_)) * (1.914602 - jc * (0.004817 + 0.000014 * jc))
+         + math.sin(math.radians(2 * m_)) * (0.019993 - 0.000101 * jc) + math.sin(math.radians(3 * m_)) * 0.000289)
+    lam = l0 + c - 0.00569 - 0.00478 * math.sin(math.radians(125.04 - 1934.136 * jc))
+    eps = 23 + (26 + (21.448 - jc * (46.815 + jc * (0.00059 - jc * 0.001813))) / 60) / 60
+    eps += 0.00256 * math.cos(math.radians(125.04 - 1934.136 * jc))
+    dec = math.degrees(math.asin(math.sin(math.radians(eps)) * math.sin(math.radians(lam))))
+    y = math.tan(math.radians(eps / 2)) ** 2
+    eot = 4 * math.degrees(y * math.sin(2 * math.radians(l0)) - 2 * e * math.sin(math.radians(m_))
+                           + 4 * e * y * math.sin(math.radians(m_)) * math.cos(2 * math.radians(l0))
+                           - 0.5 * y * y * math.sin(4 * math.radians(l0)) - 1.25 * e * e * math.sin(2 * math.radians(m_)))
+    tst = (t.hour * 60 + t.minute + eot + 4 * lon) % 1440
+    ha = tst / 4 - 180
+    la, d_, h_ = math.radians(lat), math.radians(dec), math.radians(ha)
+    zen = math.acos(math.sin(la) * math.sin(d_) + math.cos(la) * math.cos(d_) * math.cos(h_))
+    az = math.degrees(math.atan2(math.sin(h_), math.cos(h_) * math.sin(la) - math.tan(d_) * math.cos(la))) + 180
+    return az % 360, 90 - math.degrees(zen)
+
+
+def sun_shadows(mns, sea):
+    """Cast shadows of buildings, trees and hills on the ground at 1 m, from
+    the LiDAR surface model and the same sun as the viewer. Painted into the
+    ground map, so the streets have shadows even where the device cannot
+    afford real-time ones."""
+    az, el = sun_position(*ORIGIN)
+    surf = np.where(np.isnan(mns), -5.0, mns)
+    surf = surf.reshape(surf.shape[0] // 2, 2, surf.shape[1] // 2, 2).max(axis=(1, 3))
+    n = surf.shape[0]
+    rows, cols = np.mgrid[0:n, 0:n]
+    shade = np.zeros(surf.shape, bool)
+    tan_e = math.tan(math.radians(el))
+    dr, dc = -math.cos(math.radians(az)), math.sin(math.radians(az))
+    for k in range(1, int(min(250, 120 / max(tan_e, 0.05)))):
+        r = np.clip(np.round(rows + dr * k).astype(int), 0, n - 1)
+        c = np.clip(np.round(cols + dc * k).astype(int), 0, n - 1)
+        shade |= surf[r, c] > surf + k * tan_e + 0.4
+    print(f"sun az {az:.0f} el {el:.0f}, {shade.mean():.0%} in shade")
+    return shade.astype(np.float32)
+
+
 # ----------------------------------------------------------------- ground ----
 def ground_mesh(mnt, sea):
     nx = int((X1 - X0) / GRID) + 1
@@ -289,7 +341,7 @@ def ground_mesh(mnt, sea):
     return m, Z
 
 
-def paint_ground(ways, mnt, sea, bmask, canopy, ortho):
+def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None):
     S = 6144
     px = S / (X1 - X0)
     img = Image.new("RGB", (S, S), tuple(hexrgb("#d3c6ae")))
@@ -371,6 +423,12 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho):
     arr = np.asarray(img).astype(np.float32)
     aof = np.asarray(ao).astype(np.float32) / 255
     arr *= (1 - 0.32 * aof)[..., None]
+    # Sun shadows of buildings and trees, soft-edged and a little blue.
+    if shadow is not None:
+        sh = Image.fromarray((shadow * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
+        sh = np.asarray(sh.filter(ImageFilter.GaussianBlur(int(0.5 * px)))).astype(np.float32) / 255
+        tint = np.array([0.60, 0.64, 0.74], np.float32)
+        arr *= 1 - sh[..., None] * (1 - tint[None, None])
     # Shore: wet stone colour where the ground drops into the sea.
     seai = np.asarray(Image.fromarray((sea * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)) / 255
     arr = arr * (1 - seai[..., None]) + np.array(hexrgb("#2f6f86"))[None, None] * seai[..., None]
@@ -677,6 +735,17 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                 zt = base + hz
                 last = li == len(levels) - 1
                 for part in to_polys(region):
+                    if kind == WALL_OLD and part.area > 60:
+                        # Stone cornice under the roof line: a moulding
+                        # that juts out and catches the light.
+                        ztop = (base + max(2.5, float(np.percentile(hrel, 40)))) if tiled else \
+                            (zt - min(3.4, hz * 0.25) if grand and last and part.area > 120 and hz > 8 else zt)
+                        cor = part.buffer(0.4, join_style=2)
+                        if isinstance(cor, Polygon):
+                            cc_ = np.minimum(np.asarray(col) * 1.08 + 8, 250)
+                            add_walls(m, cor, ztop - 0.6, ztop, ztop, 10, cc_, PLAIN)
+                            for rp in to_polys(cor.difference(part)):
+                                add_roof(m, orient(rp, 1.0), ztop, cc_, False)
                     if tiled:
                         eave = base + max(2.5, float(np.percentile(hrel, 40)))
                         add_walls(m, part, zb, eave, base, fh, col, kind)
@@ -700,6 +769,24 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                             for rp in to_polys(ring_):
                                 add_roof(m, rp, zt + 0.9, pc * 1.05, False)
                 zb = zt
+            # Roof gardens: where the IGN photo shows green on a flat roof,
+            # plant shrubs (Monaco has many planted terraces).
+            if not tiled and not grand and not post_scan:
+                cell_rgb = ortho[np.clip(cy, 0, ortho.shape[0] - 1), np.clip(cx, 0, ortho.shape[1] - 1)].astype(float)
+                exg = 2 * cell_rgb[:, 1] - cell_rgb[:, 0] - cell_rgb[:, 2]
+                green = np.nonzero((exg > 18) & (np.abs(hrel - H) < 2.5))[0]
+                if len(green) >= 6:
+                    gxy = np.column_stack([gx[ins][green], gy[ins][green]])
+                    picked = []
+                    for k_ in rnd.permutation(len(gxy)):
+                        if len(picked) >= 14:
+                            break
+                        if all(np.hypot(*(gxy[k_] - q_)) > 2.6 for q_ in picked):
+                            picked.append(gxy[k_])
+                    for q_ in picked:
+                        add_tree(m, q_[0], q_[1], base + H, rnd.uniform(1.4, 2.6), rnd.uniform(0.8, 1.4),
+                                 "broad", rnd)
+                        stats["roof_plants"] += 1
             # Rooftop machinery rooms and stair towers seen by the LiDAR.
             if not tiled and not grand and not post_scan and len(levels) == 1 and poly.area > 150:
                 grid = np.zeros(sub.shape, bool)
@@ -888,118 +975,119 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         stats["trees"] += 1
 
 
-# ------------------------------------------------------------------- cars ----
-CAR_COLS = ["#f2f2f0", "#f2f2f0", "#1d1f22", "#1d1f22", "#9ea3a8", "#c2c5c9", "#2b3f66", "#8c1c1c",
-            "#d9cfb8", "#3d4a3f", "#b8862b"]
-LANE = {"primary": 10, "secondary": 8.5, "tertiary": 7.5, "residential": 6, "unclassified": 6,
-        "living_street": 5, "trunk": 11}
-
-
-def car_box(m, cx, cy, d, L, W, z0, z1, col, kind):
-    sd = np.array([-d[1], d[0]])
-    c = np.array([cx, cy])
-    pts = [c - d * L / 2 - sd * W / 2, c + d * L / 2 - sd * W / 2, c + d * L / 2 + sd * W / 2,
-           c - d * L / 2 + sd * W / 2]
-    q = orient(Polygon(pts), 1.0)
-    add_walls(m, q, z0, z1, z0, 10, col, kind)
-    add_roof(m, q, z1, col, False)
-
-
-def cars(m, ways, mnt, bmask, stats):
-    """Parked and passing cars along the streets: small, but they make the
-    streets read as streets at eye level."""
-    mntR = Raster(mnt)
-    rnd = np.random.default_rng(11)
-    for t, pts, closed in ways:
-        hw = t.get("highway")
-        if hw not in LANE or t.get("tunnel") or t.get("bridge") or t.get("layer", "0") != "0":
-            continue
-        ls = LineString(pts)
-        w = LANE[hw]
-        pos = rnd.uniform(3, 12)
-        while pos < ls.length - 3:
-            a = ls.interpolate(pos)
-            b = ls.interpolate(min(pos + 1.0, ls.length))
-            d = np.array([b.x - a.x, b.y - a.y])
-            n = np.linalg.norm(d)
-            if n < 1e-3:
-                break
-            d /= n
-            side = rnd.choice([-1, 1]) if t.get("oneway") != "yes" else 1
-            off = side * (w / 2 - 1.4)
-            x, y = a.x - d[1] * off, a.y + d[0] * off
-            c_ = int((x - X0) / RES); r_ = int((Y1 - y) / RES)
-            ok = 0 <= c_ < bmask.shape[1] and 0 <= r_ < bmask.shape[0] and not bmask[r_, c_]
-            z = float(mntR.sample(np.array([x]), np.array([y]))[0])
-            if ok and np.isfinite(z):
-                dd = d if side > 0 else -d
-                col = np.array(hexrgb(rnd.choice(CAR_COLS))) * (0.92 + 0.1 * rnd.random())
-                L = rnd.uniform(4.0, 4.9)
-                car_box(m, x, y, dd, L, 1.82, z + 0.2, z + 0.95, col, HULL)
-                cx, cy = x - dd[0] * 0.25, y - dd[1] * 0.25
-                car_box(m, cx, cy, dd, L * 0.52, 1.6, z + 0.95, z + 1.45, [38, 44, 52], HULL)
-                stats["cars"] += 1
-            # Busy streets: a car every 10-30 m.
-            pos += rnd.uniform(9, 30) if hw in ("residential", "unclassified", "living_street") else rnd.uniform(14, 45)
-
-
 # ---------------------------------------------------------------- harbour ----
-def yachts(m, mns, sea, stats):
+def hull_outline(L, W):
+    """Yacht plan in (along, across) metres: square stern, parallel sides,
+    a rounded bow coming to a point."""
+    pts = []
+    for u in np.linspace(0, 0.62, 4):
+        pts.append((u * L, -W / 2 * (0.92 + 0.08 * min(u / 0.12, 1))))
+    for k in np.linspace(0, 1, 8)[1:]:
+        u = 0.62 + 0.38 * k
+        pts.append((u * L, -W / 2 * math.sqrt(max(0.0, 1 - k ** 1.6))))
+    right = [(u, -v) for u, v in reversed(pts[:-1])]
+    return pts + right
+
+
+def yachts(m, ortho, sea, stats):
+    """Moored yachts traced from the white shapes on the water in the IGN
+    photo (newer than the LiDAR), rebuilt as clean stylised yachts: white
+    hull with a dark boot stripe, decks and stepped superstructures with
+    dark window bands, bow pointing away from the quay."""
     land = ~sea
     dist_land = ndimage.distance_transform_edt(~land) * RES
-    boat = sea & np.nan_to_num(mns > 0.9, nan=False) & (dist_land > 1.0)
+    o = ortho.astype(np.float32)
+    lum = o.mean(-1)
+    sat = o.max(-1) - o.min(-1)
+    boat = sea & (lum > 135) & (sat < 70)
     boat = ndimage.binary_opening(boat, iterations=1)
+    boat = ndimage.binary_closing(boat, iterations=1)
     lab, n = ndimage.label(boat)
+    rnd = np.random.default_rng(5)
     for i, sl in enumerate(ndimage.find_objects(lab), 1):
         if sl is None:
             continue
         rr, cc = np.nonzero(lab[sl] == i)
-        if len(rr) < 24 or len(rr) > 40000:
+        if len(rr) < 40 or len(rr) > 60000:
             continue
         rr = rr + sl[0].start; cc = cc + sl[1].start
         x, y = cell_xy(rr, cc)
         pts = np.column_stack([x, y])
         cen = pts.mean(0)
-        cov = np.cov((pts - cen).T)
-        w, v = np.linalg.eigh(cov)
+        w, v = np.linalg.eigh(np.cov((pts - cen).T))
         ax = v[:, 1]
         proj = (pts - cen) @ ax
         perp = (pts - cen) @ v[:, 0]
         L = proj.max() - proj.min() + RES
-        W = min(perp.max() - perp.min() + RES, L * 0.45)
-        if L < 4 or W < 1.5:
-            continue
+        Wr = perp.max() - perp.min() + RES
+        fill = len(rr) * RES * RES / max(L * Wr, 1)
+        if L < 5 or Wr < 1.8 or fill < 0.45 or L / Wr > 7 or L > 140:
+            continue                     # wakes, glints, foam
+        W = min(Wr, L / 2.6)
         mid = cen + ax * (proj.max() + proj.min()) / 2
-        # Bow points away from land (yachts moor stern-to the quay).
+
         def dl(p):
             c_ = int((p[0] - X0) / RES); r_ = int((Y1 - p[1]) / RES)
             return dist_land[np.clip(r_, 0, sea.shape[0] - 1), np.clip(c_, 0, sea.shape[1] - 1)]
         if dl(mid + ax * L / 2) < dl(mid - ax * L / 2):
             ax = -ax
         side = np.array([-ax[1], ax[0]])
-        top = float(np.nanpercentile(mns[rr, cc], 90))
-        hh = float(np.clip(top, 1.5, 12))
-        hull_h = min(1.4 + W * 0.12, hh)
-        # Hull: stern rectangle to a pointed bow, deck at hull_h.
-        s0, s1 = mid - ax * L / 2, mid + ax * L / 2
-        outline = [s0 - side * W / 2, mid + ax * L * 0.18 - side * W / 2, s1, mid + ax * L * 0.18 + side * W / 2,
-                   s0 + side * W / 2]
-        poly = Polygon(outline)
-        white = hexrgb("#f4f2ee")
-        add_walls(m, poly, -0.3, hull_h, -0.3, 10, white, HULL)
-        add_roof(m, poly, hull_h, hexrgb("#c9a77a"), False)  # teak deck
-        if hh > hull_h + 1.2 and L > 9:
-            cab = Polygon([mid - ax * L * 0.3 - side * W * 0.33, mid + ax * L * 0.12 - side * W * 0.33,
-                           mid + ax * L * 0.12 + side * W * 0.33, mid - ax * L * 0.3 + side * W * 0.33])
-            ch = min(hh, hull_h + 2.4)
-            add_walls(m, cab, hull_h, ch, hull_h, 1.2, white, HULL)
-            add_roof(m, cab, ch, white, False)
-            if hh > ch + 1.5 and L > 20:
-                cab2 = cab.buffer(-W * 0.08)
-                if not cab2.is_empty and isinstance(cab2, Polygon):
-                    add_walls(m, cab2, ch, min(hh, ch + 2.3), ch, 1.2, white, HULL)
-                    add_roof(m, cab2, min(hh, ch + 2.3), white, False)
+        stern = mid - ax * L / 2
+
+        def plan(along0, along1, half):
+            q = [(stern + ax * a + side * s) for a, s in
+                 [(along0, -half), (along1, -half), (along1, half), (along0, half)]]
+            return orient(Polygon(q), 1.0)
+
+        hull = orient(Polygon([stern + ax * u + side * s for u, s in hull_outline(L, W)]), 1.0)
+        if not hull.is_valid:
+            hull = hull.buffer(0)
+        if not isinstance(hull, Polygon):
+            continue
+        hull_h = min(0.8 + 0.045 * L, 4.5)
+        white = np.array(hexrgb("#f6f5f1"))
+        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#f6f5f1", "#6d7780", "#0e3a5c"])))
+        add_walls(m, hull, -0.4, 0.35, -0.4, 100, stripe * 0.9, HULL)
+        add_walls(m, hull, 0.35, hull_h, -0.4, 100, white, HULL)
+        deck = hull.buffer(-0.25)
+        add_roof(m, hull, hull_h, white * 0.97, False)
+        if L > 9 and not deck.is_empty:
+            aft = plan(0.03 * L, 0.2 * L, W * 0.42).intersection(deck)
+            for q in to_polys(aft):
+                add_roof(m, orient(q, 1.0), hull_h + 0.03, hexrgb("#b88a5c"), False)   # teak
+        tiers = 1 if L < 14 else 2 if L < 30 else 3 if L < 55 else 4
+        z = hull_h
+        for t in range(tiers):
+            a0, a1 = (0.2 + 0.05 * t) * L, (0.66 - 0.07 * t) * L
+            half = W / 2 * (0.8 - 0.1 * t)
+            if a1 - a0 < 2 or half < 0.6:
+                break
+            th = 2.4 if L > 14 else 1.5
+            q = plan(a0, a1, half)
+            add_walls(m, q, z, z + th, z, th, white, HULL)
+            add_roof(m, q, z + th, white * 0.95, False)
+            z += th
         stats["yachts"] += 1
+
+
+def coast_land(ways, sea):
+    """Raster (50 cm) of the land side of the OpenStreetMap coastline."""
+    from shapely.ops import polygonize
+    lines = [LineString(p) for t, p, c in ways if t.get("natural") == "coastline"]
+    n = sea.shape[0]
+    if not lines:
+        return np.ones_like(sea)
+    bb = box(X0 - 5, Y0 - 5, X1 + 5, Y1 + 5)
+    img = Image.new("L", (n, n), 0)
+    d = ImageDraw.Draw(img)
+    for p in polygonize(unary_union([ln.intersection(bb) for ln in lines] + [bb.exterior])):
+        ring = [((x - X0) / RES, (Y1 - y) / RES) for x, y in p.exterior.coords]
+        mk = Image.new("L", (n, n), 0)
+        ImageDraw.Draw(mk).polygon(ring, fill=1)
+        mm = np.asarray(mk).astype(bool)
+        if mm.any() and (~sea[mm]).mean() > 0.5:      # mostly land in the LiDAR too
+            d.polygon(ring, fill=255)
+    return np.asarray(img) > 0
 
 
 def piers(m, ways, sea):
@@ -1119,10 +1207,13 @@ def main():
     sizes = ndimage.sum(~sea, lab, np.arange(1, n + 1))
     sea |= np.isin(lab, np.nonzero(sizes < 8000)[0] + 1)
     sea = ndimage.binary_opening(sea, iterations=2)
-    mnt_f = np.where(sea, np.nan, mnt)
     ways, pts = load_osm()
+    # Yachts moored against a quay merge with it in the LiDAR terrain. The
+    # OpenStreetMap coastline follows the quays, so anything outside it is sea.
+    sea |= ~coast_land(ways, sea)
+    mnt_f = np.where(sea, np.nan, mnt)
     feats = json.load(open(RAW / "bdtopo.json"))["features"]
-    stats = {"buildings": 0, "dropped": 0, "rooftop": 0, "cars": 0, "levels": 0, "towers": 0, "trees": 0, "yachts": 0}
+    stats = {"buildings": 0, "dropped": 0, "rooftop": 0, "roof_plants": 0, "levels": 0, "towers": 0, "trees": 0, "yachts": 0}
 
     print("buildings…")
     bm = Mesh()
@@ -1138,12 +1229,9 @@ def main():
     print("trees…")
     tm = Mesh()
     trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats)
-    print("cars…")
-    cm = Mesh()
-    cars(cm, ways, mnt_f, bgrow, stats)
     print("harbour…")
     hm = Mesh()
-    yachts(hm, mns, sea, stats)
+    yachts(hm, ortho, sea, stats)
     piers(hm, ways, sea)
     sm = Mesh()
     sea_plane(sm)
@@ -1154,10 +1242,11 @@ def main():
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     gm, _ = ground_mesh(mnt_f, sea)
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
-                       ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho)
+                       ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
+                       sun_shadows(mns, sea))
 
     raw = OUT / "monte-carlo.raw.glb"
-    write_glb(raw, [(gm, True), (bm, False), (tm, False), (hm, False), (cm, False), (sm, False)], jpg)
+    write_glb(raw, [(gm, True), (bm, False), (tm, False), (hm, False), (sm, False)], jpg)
     out = OUT / "monte-carlo.glb"
     if args.no_compress:
         raw.replace(out)
@@ -1168,7 +1257,7 @@ def main():
                         "--quantize-position", "16", "--quantize-texcoord", "14",
                         "--quantize-normal", "8"], check=True)
         raw.unlink()
-    tris = sum(len(np.concatenate(x.i)) // 3 for x in (gm, bm, tm, hm, cm, sm) if x.i)
+    tris = sum(len(np.concatenate(x.i)) // 3 for x in (gm, bm, tm, hm, sm) if x.i)
     meta = {
         "name": "Monte-Carlo film set",
         "origin": {"lon": ORIGIN[0], "lat": ORIGIN[1], "height": 0},
