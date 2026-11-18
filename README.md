@@ -39,7 +39,7 @@ away. Tours register themselves with `MC3D.tours.register` (see `viewer/tours.js
 three fastest Monaco laps of each decade since the 1950s (official pole laps
 and race fastest laps). Each replay takes exactly the real lap time; the speed
 in each corner is estimated from the shape of the road. A camera button
-switches between the chase view and an onboard view. Add `?tour=legends` to
+switches between the chase view and an onboard view. The car drives a real racing line rather than the middle of the road: a minimum-curvature line across the modelled track, outside on the way in, kerb at the apex, outside on the way out (add `?line=middle` to compare). Add `?tour=legends` to
 open the picker, or `?tour=legends&legend=1985-senna` to start one lap. During the laps the photoreal road is
 replaced by a clean modelled track (asphalt, kerbs, barriers) and a modelled
 tunnel, so the scan's parked cars and roadworks disappear (`viewer/clean-track.js`;
