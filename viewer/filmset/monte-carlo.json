@@ -75,11 +75,16 @@
   57,
   129
  ],
+ "photo_roofs": 842,
+ "photo_lean": [
+  0.060000000000000386,
+  3.3306690738754696e-16
+ ],
  "lamps": 613,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
-  "IGN BD ORTHO, classification only (Etalab 2.0)",
+  "IGN BD ORTHO 20 cm, roofs (Etalab 2.0)",
   "OpenStreetMap contributors (ODbL)",
   "Wikidata (CC0)"
  ]

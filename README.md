@@ -86,7 +86,13 @@ balcony bands, contemporary glass and fins, glass tower), chosen from its
 year built (OpenStreetMap, Wikidata), its name and a short list of landmarks
 around the square, and as many rows of windows as its real number of floors
 (OpenStreetMap, Wikidata, BD TOPO) where open data has it. Mansard
-roofs top the palaces, tiled roofs are hipped, trees and moored
+roofs top the palaces, tiled roofs are hipped, and most roofs (about 840)
+wear the real 20 cm IGN aerial photo of themselves: tiles, skylights, rooftop
+pools and terraces. The photo is not a true orthophoto, so taller roofs show
+up shifted east by about 6 cm per metre of height; the build measures that
+lean from the photo's edges and shifts each roof's patch back onto its
+outline. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
+streaks under the sills). Trees and moored
 yachts are rebuilt from the LiDAR, flat roofs get parapets and the
 machinery rooms the LiDAR sees and plants where the IGN photo shows roof
 gardens, Belle Époque buildings get stone cornices, the streets carry the
