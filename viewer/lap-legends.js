@@ -90,13 +90,72 @@
   // ---- Route geometry -------------------------------------------------
   const P = K.P;
   const X = K.X, Y = K.Y;
-  const CX = smooth(X, 2), CY = smooth(Y, 2);          // the car's line
-  const QX = smooth(X, 6), QY = smooth(Y, 6);          // the camera's, calmer
+  // The middle of the modelled track (clean-track.js draws it 10 m wide
+  // around this same line).
+  const MX = smooth(X, 2), MY = smooth(Y, 2);
   const CZ = smooth(ZG, 3);
-  const HEAD = new Float64Array(N);
-  for (let i = 0; i < N; i++) HEAD[i] = Math.atan2(CX[wrap(i + 1)] - CX[wrap(i - 1)], CY[wrap(i + 1)] - CY[wrap(i - 1)]);
+
+  // ---- Racing line ----------------------------------------------------
+  // Drivers don't follow the middle of the road: they use its whole width
+  // to make each corner as open as possible, from the outside on the way
+  // in, to the kerb at the apex, and back out to the edge on the way out.
+  // That is the "minimum curvature" line: the path inside the track whose
+  // bends are as gentle as possible overall. It is found by moving each
+  // point sideways (n, metres, + = left) within the track and relaxing the
+  // whole loop until the sum of squared bends is smallest.
+  const HALF_TRACK = 5.0;                 // clean-track.js HALF
+  const EDGE = HALF_TRACK - 1.2;          // car centre to edge: wheels just on the kerbs
+  const LX = new Float64Array(N), LY = new Float64Array(N);   // left normal of the middle line
+  for (let i = 0; i < N; i++) {
+    const dx = MX[wrap(i + 1)] - MX[wrap(i - 1)], dy = MY[wrap(i + 1)] - MY[wrap(i - 1)], l = Math.hypot(dx, dy) || 1;
+    LX[i] = -dy / l; LY[i] = dx / l;
+  }
+  function racingOffsets() {
+    // Solved on every 4th point (about 8 m apart), which is plenty for a
+    // racing line and converges quickly, then brought back to every point.
+    const STEP = 4, M = Math.floor(N / STEP);
+    const at = (k) => ((k % M) + M) % M;
+    const cx = new Float64Array(M), cy = new Float64Array(M), lx = new Float64Array(M), ly = new Float64Array(M);
+    for (let k = 0; k < M; k++) { const i = k * STEP; cx[k] = MX[i]; cy[k] = MY[i]; lx[k] = LX[i]; ly[k] = LY[i]; }
+    const n = new Float64Array(M), px = cx.slice(), py = cy.slice();
+    for (let sweep = 0; sweep < 4000; sweep++) {
+      let moved = 0;
+      for (let k = 0; k < M; k++) {
+        // Bends at k-1, k and k+1 involve point k with weights 1, -2, 1.
+        // The best sideways shift of point k for the sum of their squares
+        // is a one-line least-squares step; then keep it on the track.
+        const a2 = at(k - 2), a1 = at(k - 1), b1 = at(k + 1), b2 = at(k + 2);
+        // Sum of (weight x bend) along the normal, without point k's own share.
+        const gx = (px[a2] - 2 * px[a1]) - 2 * (px[a1] + px[b1]) + (px[b2] - 2 * px[b1]);
+        const gy = (py[a2] - 2 * py[a1]) - 2 * (py[a1] + py[b1]) + (py[b2] - 2 * py[b1]);
+        // Point k contributes (1 + 4 + 1) x its position; solve for n.
+        const best = -((gx + 6 * cx[k]) * lx[k] + (gy + 6 * cy[k]) * ly[k]) / 6;
+        const nk = Math.max(-EDGE, Math.min(EDGE, n[k] + 1.6 * (best - n[k])));   // over-relaxed
+        moved = Math.max(moved, Math.abs(nk - n[k]));
+        n[k] = nk; px[k] = cx[k] + nk * lx[k]; py[k] = cy[k] + nk * ly[k];
+      }
+      if (moved < 1e-4) break;
+    }
+    const out = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      const k = Math.floor(i / STEP), f = i / STEP - k;
+      out[i] = n[at(k)] * (1 - f) + n[at(k + 1)] * f;
+    }
+    const sm = smooth(out, 2);
+    for (let i = 0; i < N; i++) sm[i] = Math.max(-EDGE, Math.min(EDGE, sm[i]));
+    return sm;
+  }
+  const RACE_OFF = new URLSearchParams(location.search).get("line") === "middle" ? new Float64Array(N) : racingOffsets();
+  const CX = new Float64Array(N), CY = new Float64Array(N);          // the car's line
+  for (let i = 0; i < N; i++) { CX[i] = MX[i] + RACE_OFF[i] * LX[i]; CY[i] = MY[i] + RACE_OFF[i] * LY[i]; }
+  const QX = smooth(CX, 6), QY = smooth(CY, 6);          // the camera's, calmer
+  const HEAD = new Float64Array(N), SEG = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    HEAD[i] = Math.atan2(CX[wrap(i + 1)] - CX[wrap(i - 1)], CY[wrap(i + 1)] - CY[wrap(i - 1)]);
+    SEG[i] = Math.hypot(CX[wrap(i + 1)] - CX[i], CY[wrap(i + 1)] - CY[i]);
+  }
   let KAPPA = new Float64Array(N);
-  for (let i = 0; i < N; i++) KAPPA[i] = Math.abs(Cesium.Math.negativePiToPi(HEAD[wrap(i + 1)] - HEAD[wrap(i - 1)])) / (2 * DS);
+  for (let i = 0; i < N; i++) KAPPA[i] = Math.abs(Cesium.Math.negativePiToPi(HEAD[wrap(i + 1)] - HEAD[wrap(i - 1)])) / (SEG[wrap(i - 1)] + SEG[i]);
   KAPPA = smooth(KAPPA, 1.5);
 
   // ---- Speed along the lap, for one lap -------------------------------
@@ -110,14 +169,14 @@
     for (let p = 0; p < 2; p++) {        // twice round: the lap is a loop
       for (let i = 0; i < N; i++) {
         const a = wrap(i - 1), push = acc * Math.max(0.15, 1 - V[a] / (vmax * 1.08));
-        V[i] = Math.min(V[i], Math.sqrt(V[a] ** 2 + 2 * push * DS));
+        V[i] = Math.min(V[i], Math.sqrt(V[a] ** 2 + 2 * push * SEG[a]));
       }
     }
     for (let p = 0; p < 2; p++) {
-      for (let i = N - 1; i >= 0; i--) V[i] = Math.min(V[i], Math.sqrt(V[wrap(i + 1)] ** 2 + 2 * brk * DS));
+      for (let i = N - 1; i >= 0; i--) V[i] = Math.min(V[i], Math.sqrt(V[wrap(i + 1)] ** 2 + 2 * brk * SEG[i]));
     }
     const T = new Float64Array(N + 1);
-    for (let i = 0; i < N; i++) T[i + 1] = T[i] + DS / ((V[i] + V[wrap(i + 1)]) / 2);
+    for (let i = 0; i < N; i++) T[i + 1] = T[i] + SEG[i] / ((V[i] + V[wrap(i + 1)]) / 2);
     return { V, T };
   }
   function bake(lap) {
@@ -679,8 +738,7 @@
       if (mine !== run) break;
       const u = stops[k];
       cam.setView(cameraFor(u, lap.V[wrap(Math.round(u))]));
-      const t0 = performance.now();
-      let frames = 0;
+          let frames = 0;
       while (!skip && mine === run) {
         await frameDone();
         frames++;
@@ -741,7 +799,7 @@
   M.tours.register({ id: "legends", label: "Legendary laps", start, stop });
   // For checks from the browser console.
   M.legends = {
-    LAPS, choose, seek, bake,
+    LAPS, choose, seek, bake, racingLine: RACE_OFF,
     get state() { return state; }, get clock() { return tl; }, get lap() { return lap; },
     set view(v) { if (v !== view && VIEWS.includes(v)) switchView(v); },
   };
