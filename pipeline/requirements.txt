@@ -4,3 +4,5 @@ pyproj==3.8.0
 Pillow>=10.0
 shapely>=2.0
 triangle>=20230923
+scipy>=1.11
+tifffile>=2024.1

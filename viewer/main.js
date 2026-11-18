@@ -249,7 +249,7 @@ function loadPoints() {
   }).then((ts) => {
     tileset = ts;
     watchLoading(ts);
-    ts.show = mode === "points" && !document.body.classList.contains("photoreal");
+    ts.show = mode === "points" && !document.body.classList.contains("photoreal") && !openHidden;
     scene.primitives.add(ts);
     const active = document.querySelector("[data-style].on");
     if (active) ts.style = STYLES[active.dataset.style];
@@ -418,7 +418,7 @@ Cesium.Cesium3DTileset.fromUrl("buildings/tileset.json", {
 }).then((ts) => {
   buildings = ts;
   watchLoading(ts);
-  ts.show = mode === "surface" && !document.body.classList.contains("photoreal");
+  ts.show = mode === "surface" && !document.body.classList.contains("photoreal") && !openHidden;
   scene.primitives.add(ts);
 }).catch((e) => console.error("buildings failed", e));
 
@@ -430,6 +430,7 @@ const pointsTerrain = viewer.terrainProvider;
 let surfaceTerrain;
 async function setMode(m) {
   mode = m;
+  if (openHidden) return;
   document.querySelectorAll("[data-mode]").forEach((o) => o.classList.toggle("on", o.dataset.mode === m));
   document.getElementById("colour-group").hidden = m !== "points";
   if (m === "surface") {
@@ -445,6 +446,19 @@ async function setMode(m) {
   const photoOn = document.body.classList.contains("photoreal");
   if (tileset) tileset.show = m === "points" && !photoOn;
   if (buildings) buildings.show = m === "surface" && !photoOn;
+}
+// The film set (filmset.js) hides the open-data layers and keeps only the
+// smooth wide terrain and imagery around its own model.
+let openHidden = false;
+function hideOpenData(h) {
+  openHidden = h;
+  if (h) {
+    scene.terrainProvider = pointsTerrain;
+    if (tileset) tileset.show = false;
+    if (buildings) buildings.show = false;
+  } else {
+    setMode(mode);
+  }
 }
 document.querySelectorAll("[data-mode]").forEach((b) => {
   b.onclick = async () => {
@@ -588,6 +602,8 @@ window.__viewer = viewer;
 // Shared handle for add-ons loaded after this file (tours.js, lap.js).
 window.MC3D = {
   viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode, setTourQuality, setTourSpeed,
+  hideOpenData,
+  setPhotorealOff: () => (document.body.classList.contains("photoreal") ? choosePhotoreal(false) : null),
   // The Google tileset while the photoreal view is shown, else null.
   getGoogle: () => (google && google.show ? google : null),
   tourDetail: () => (tourQ && google ? google.maximumScreenSpaceError : null),
