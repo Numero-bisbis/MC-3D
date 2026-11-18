@@ -74,8 +74,8 @@ phones).
 
 **Film set** (`?mode=film`, or the "Film set" button in View) is our own
 stylised model of Monte-Carlo, like a set for an animated film: Casino
-square, the Boulingrins gardens, the north side of Port Hercule and the slopes
-up to Beausoleil, 1.2 × 1.2 km. Nothing in it comes from Google: shapes come
+square, the Boulingrins gardens, Port Hercule, La Condamine and the slopes
+up to Beausoleil: the whole Grand Prix circuit, 1.5 × 1.5 km. Nothing in it comes from Google: shapes come
 from IGN LiDAR HD and BD TOPO, streets and gardens from OpenStreetMap, and
 every colour and texture is authored by us. It is one 7 MB file
 (`viewer/filmset/monte-carlo.glb`) that loads once and then runs from memory,
@@ -91,7 +91,11 @@ wear the real 20 cm IGN aerial photo of themselves: tiles, skylights, rooftop
 pools and terraces. The photo is not a true orthophoto, so taller roofs show
 up shifted east by about 6 cm per metre of height; the build measures that
 lean from the photo's edges and shifts each roof's patch back onto its
-outline. Nothing of the set stands on the Grand Prix track: trees, lamps and
+outline. Bridges are built from OpenStreetMap as decks at their LiDAR surface height,
+with pavements, parapets and piers. Along the harbour the quays are kept flat
+(the 2021 scan caught the Grand Prix grandstands as humps of ground). Roof
+gardens are planted only where the photo shows green and the LiDAR sees
+something standing on the roof. Nothing of the set stands on the Grand Prix track: trees, lamps and
 building edges stop at its barriers, and the ground stays under the road and
 below the barrier tops, so no slope spills over its edges. The tunnel is open
 on its sea side where it runs along the shore: a parapet, pillars every 7.5 m

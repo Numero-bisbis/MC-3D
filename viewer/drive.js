@@ -274,6 +274,7 @@
     }
     // The longest run outside the set: leave it at gapA, come back at gapB.
     let best = 0;
+    gapA = gapB = -1;                  // none: the whole circuit is on the set
     for (let i = 0; i < N; i++) {
       if (!out[i] || out[(i - 1 + N) % N]) continue;
       let j = i;
@@ -317,6 +318,7 @@
     camYaw = S.yaw;
   }
   function inGap(i) {
+    if (gapA < 0) return false;
     return gapA < gapB ? i > gapA && i < gapB : i > gapA || i < gapB;
   }
 

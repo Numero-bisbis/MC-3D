@@ -64,9 +64,9 @@ ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / "filmset"
 OUT = ROOT / "viewer" / "filmset"
 
-# District: Monte-Carlo, Casino square, the north side of Port Hercule and
-# the Larvotto edge. Lambert-93 metres.
-X0, Y0, X1, Y1 = 1056000, 6302800, 1057200, 6304000
+# District: Monte-Carlo, Casino square, Port Hercule and the Larvotto edge:
+# the whole Grand Prix circuit. Lambert-93 metres (a square).
+X0, Y0, X1, Y1 = 1055700, 6302500, 1057200, 6304000
 RES = 0.5
 ORIGIN = (7.4280, 43.7395)          # Casino square: the model's 0,0
 GEOID_N = 48.9                      # same as viewer/main.js
@@ -107,14 +107,15 @@ def fetch():
         # Dated places around the square (year built, style, floors).
         "wikidata.json": "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(WD_QUERY),
     }
-    # The roofs, at 20 cm: four 600 m tiles of 3072 px.
+    # The roofs, at about 20 cm: four tiles of 3840 px.
+    half = (X1 - X0) / 2
     for i in (0, 1):
         for j in (0, 1):
-            bx, by = X0 + 600 * i, Y0 + 600 * j
+            bx, by = X0 + half * i, Y0 + half * j
             urls[f"ortho20_{i}{j}.jpg"] = (
                 f"{WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ORTHOIMAGERY.ORTHOPHOTOS"
-                f"&STYLES=&FORMAT=image/jpeg&CRS=EPSG:2154&BBOX={bx},{by},{bx + 600},{by + 600}"
-                f"&WIDTH=3072&HEIGHT=3072")
+                f"&STYLES=&FORMAT=image/jpeg&CRS=EPSG:2154&BBOX={bx},{by},{bx + half},{by + half}"
+                f"&WIDTH=3840&HEIGHT=3840")
     for name, url in urls.items():
         out = RAW / name
         if out.exists() and out.stat().st_size > 1000:
@@ -126,14 +127,15 @@ def fetch():
 
 
 def load_ortho_hi():
-    """The four 20 cm photo tiles as one 6144 px image (north up), or None."""
+    """The four 20 cm photo tiles as one image (north up), or None."""
     tiles = [[RAW / f"ortho20_{i}{j}.jpg" for j in (0, 1)] for i in (0, 1)]
     if not all(t.exists() for row in tiles for t in row):
         return None
-    im = Image.new("RGB", (6144, 6144))
+    k = Image.open(tiles[0][0]).size[0]
+    im = Image.new("RGB", (2 * k, 2 * k))
     for i in (0, 1):
         for j in (0, 1):
-            im.paste(Image.open(tiles[i][j]).convert("RGB"), (3072 * i, 3072 * (1 - j)))
+            im.paste(Image.open(tiles[i][j]).convert("RGB"), (k * i, k * (1 - j)))
     return im
 
 
@@ -467,7 +469,8 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
              "primary_link": 6, "secondary_link": 6, "tertiary_link": 5, "raceway": 9}
     roads = [(t, pts) for t, pts, closed in ways
              if t.get("highway") in WIDTH and t.get("tunnel") not in ("yes", "building_passage")
-             and t.get("area") != "yes" and t.get("layer", "0") not in ("-1", "-2", "-3")]
+             and t.get("area") != "yes" and t.get("layer", "0") not in ("-1", "-2", "-3")
+             and not t.get("bridge")]          # bridges get decks of their own
     for t, pts in roads:
         line(pts, "#e2d7c4", WIDTH[t["highway"]] + 4.5)
     for t, pts in roads:
@@ -1126,14 +1129,21 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             # Roof gardens: where the IGN photo shows green on a flat roof,
             # plant shrubs (Monaco has many planted terraces).
             if not tiled and not grand and not post_scan:
-                cell_rgb = ortho[np.clip(cy, 0, ortho.shape[0] - 1), np.clip(cx, 0, ortho.shape[1] - 1)].astype(float)
+                # Only where the photo (shifted by its lean, so a street
+                # tree beside a tall building does not count) shows clear
+                # green AND the LiDAR sees something standing on the roof.
+                lx_, ly_ = photo["lean"] if photo is not None else (0.0, 0.0)
+                cx2 = ((gx[ins] + H * lx_ - X0) / RES).astype(int)
+                cy2 = ((Y1 - gy[ins] - H * ly_) / RES).astype(int)
+                cell_rgb = ortho[np.clip(cy2, 0, ortho.shape[0] - 1), np.clip(cx2, 0, ortho.shape[1] - 1)].astype(float)
                 exg = 2 * cell_rgb[:, 1] - cell_rgb[:, 0] - cell_rgb[:, 2]
-                green = np.nonzero((exg > 18) & (np.abs(hrel - H) < 2.5))[0]
-                if len(green) >= 6:
+                roof_z = float(np.percentile(hrel, 50))
+                green = np.nonzero((exg > 30) & (hrel > roof_z + 0.8) & (hrel < H + 6))[0]
+                if len(green) >= 10:
                     gxy = np.column_stack([gx[ins][green], gy[ins][green]])
                     picked = []
                     for k_ in rnd.permutation(len(gxy)):
-                        if len(picked) >= 14:
+                        if len(picked) >= min(10, len(green) // 8):
                             break
                         if all(np.hypot(*(gxy[k_] - q_)) > 2.6 for q_ in picked):
                             picked.append(gxy[k_])
@@ -1228,6 +1238,33 @@ def load_track():
     from scipy.spatial import cKDTree
     return {"x": x, "y": y, "z": z, "line": line, "kd": cKDTree(np.column_stack([x, y])),
             "keep_out": line.buffer(TRACK_HALF + 0.8)}
+
+
+def flatten_harbour(mnt):
+    """Along the harbour stretch of the circuit (below 8 m, after the
+    tunnel) the quays are flat; the LiDAR, flown in spring 2021, caught the
+    Grand Prix grandstands there as humps of "ground". Within 45 m of that
+    stretch the ground may rise no more than 3 cm per metre above the track."""
+    t = TRACK
+    n = len(t["x"])
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    s_ = np.arange(n) * step
+    tb = TUNNEL["tb"] if TUNNEL is not None else -1
+    sel = (t["z"] < 8.0) & (s_ > tb + 30)
+    if sel.sum() < 10:
+        return mnt
+    from scipy.spatial import cKDTree
+    kd = cKDTree(np.column_stack([t["x"][sel], t["y"][sel]]))
+    zt_all = t["z"][sel]
+    rows, cols = np.nonzero(np.isfinite(mnt))
+    cx, cy = cell_xy(rows, cols)
+    d, j = kd.query(np.column_stack([cx, cy]), distance_upper_bound=45)
+    near = np.isfinite(d)
+    out = mnt.copy()
+    zr, zc = rows[near], cols[near]
+    cap = zt_all[j[near]] + 0.5 + 0.03 * np.maximum(0, d[near] - 6)
+    out[zr, zc] = np.minimum(out[zr, zc], cap)
+    return out
 
 
 def track_dist(x, y):
@@ -1472,6 +1509,94 @@ def tunnel_gallery(m, oa, ob, t):
             A, B, C, D_ = P(e, W, 1.0), P(e, W + D, 1.0), P(e, W, 4.6), P(e, W + D, 4.6)
             T = P(e + sgn * 5, W + D / 2, 2.8)
             tri_facing(m, np.array([A, B]), np.array([B, D_]), np.array([C, C]), np.array([T, T]), stone_in, PLAIN, TUBE_LIT)
+
+
+# ---------------------------------------------------------------- bridges ----
+# The LiDAR ground model leaves bridges out (it shows the ravine below), so
+# the set builds each OpenStreetMap bridge as a deck at the height of its
+# surface in the LiDAR surface model, with pavements, parapets and piers.
+BRIDGE_W = {"primary": 10, "primary_link": 7, "secondary": 8.5, "tertiary": 7.5, "residential": 6,
+            "unclassified": 6, "service": 4.5, "living_street": 5, "pedestrian": 4, "footway": 2.6,
+            "steps": 2.6, "cycleway": 2.6, "path": 2.4}
+
+
+def bridges(m, ways, mns, mnt):
+    mnsR, mntR = Raster(mns), Raster(mnt)
+    n_ = 0
+    asph, walk, stone = np.array(hexrgb("#55585e")), np.array(hexrgb("#d9cfbd")), np.array(hexrgb("#e4dccb"))
+    for t, pts, closed in ways:
+        w = BRIDGE_W.get(t.get("highway"))
+        if not w or not t.get("bridge") or closed:
+            continue
+        ls = LineString(pts)
+        if ls.length < 4 or not box(X0, Y0, X1, Y1).buffer(-2).intersects(ls):
+            continue
+        ss = np.linspace(0, ls.length, max(3, int(ls.length / 1.5) + 1))
+        q = shapely.line_interpolate_point(ls, ss)
+        x, y = shapely.get_x(q), shapely.get_y(q)
+        ok = (x > X0 + 1) & (x < X1 - 1) & (y > Y0 + 1) & (y < Y1 - 1)
+        if ok.sum() < 3:
+            continue
+        x, y = x[ok], y[ok]
+        top = mnsR.sample(x, y)
+        gnd = mntR.sample(x, y)
+        if np.all(np.isnan(top)):
+            continue
+        top = np.where(np.isfinite(top), top, np.nanmedian(top))
+        # The deck surface: the LiDAR surface along the way, without cars,
+        # lamp posts or trees leaning over it, and with no sudden steps.
+        z = ndimage.median_filter(top, size=7, mode="nearest")
+        z = ndimage.gaussian_filter1d(z, 3, mode="nearest")
+        gnd = np.where(np.isfinite(gnd), gnd, z - 10)
+        if np.nanmax(z - gnd) < 2.0:
+            continue                  # a bridge over nothing much: the ground carries the street
+        dx, dy = np.gradient(x), np.gradient(y)
+        l = np.maximum(np.hypot(dx, dy), 1e-6)
+        lx, ly = -dy / l, dx / l
+        def at(off, dz=0.0):
+            return enu_fast(x + lx * off, y + ly * off, z + dz)
+        up = at(0, 30)
+        hw = w / 2
+        foot = t.get("highway") in ("footway", "steps", "cycleway", "path", "pedestrian")
+        bands = [(-hw, hw, walk if foot else asph, 0.0)] if foot else \
+                [(-hw + 1.4, hw - 1.4, asph, 0.0), (-hw, -hw + 1.4, walk, 0.15), (hw - 1.4, hw, walk, 0.15)]
+        for o0, o1, col, dz in bands:
+            A, B = at(o0, dz), at(o1, dz)
+            tri_facing(m, A[:-1], B[:-1], A[1:], up[:-1], col, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], up[:-1], col, PLAIN)
+        # Deck edges, the underside, and parapets.
+        for side in (-1, 1):
+            o = side * hw
+            out_ = at(side * (hw + 20))
+            for (h0, h1), col in (((-1.3, 0.15), stone), ((0.15, 1.15), stone)):
+                A, B = at(o, h0), at(o, h1)
+                tri_facing(m, A[:-1], B[:-1], A[1:], out_[:-1], col, PLAIN)
+                tri_facing(m, B[:-1], B[1:], A[1:], out_[:-1], col, PLAIN)
+            inn = at(0, 0.6)
+            A, B = at(o - side * 0.3, 0.15), at(o - side * 0.3, 1.15)
+            tri_facing(m, A[:-1], B[:-1], A[1:], inn[:-1], col * 0.95, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], inn[:-1], col * 0.95, PLAIN)
+            A, B = at(o - side * 0.3, 1.15), at(o, 1.15)
+            tri_facing(m, A[:-1], B[:-1], A[1:], up[:-1], stone * 1.03, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], up[:-1], stone * 1.03, PLAIN)
+        A, B = at(-hw, -1.3), at(hw, -1.3)
+        dn = at(0, -30)
+        tri_facing(m, A[:-1], B[:-1], A[1:], dn[:-1], stone * 0.7, PLAIN)
+        tri_facing(m, B[:-1], B[1:], A[1:], dn[:-1], stone * 0.7, PLAIN)
+        # Piers where the deck stands well clear of the ground.
+        cum = np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+        for sp in np.arange(12, cum[-1] - 6, 18.0):
+            i = int(np.searchsorted(cum, sp))
+            if z[i] - gnd[i] < 4 or (TRACK is not None and track_dist(x[i], y[i])[0] < TRACK_HALF + 1.5):
+                continue
+            for o in (-hw * 0.55, hw * 0.55):
+                px_, py_ = x[i] + lx[i] * o, y[i] + ly[i] * o
+                if TRACK is not None and track_dist(px_, py_)[0] < TRACK_HALF + 1.5:
+                    continue
+                add_walls(m, box(px_ - 0.6, py_ - 0.6, px_ + 0.6, py_ + 0.6), gnd[i] - 1, z[i] - 1.3, gnd[i], 10,
+                          stone * 0.9, PLAIN)
+        n_ += 1
+    return n_
 
 
 # ------------------------------------------------------------------ trees ----
@@ -1838,7 +1963,7 @@ def street_lamps(m, ways, gz, bmask, sea):
     for t, pts, closed in ways:
         w = LAMP_ROADS.get(t.get("highway"))
         if not w or t.get("tunnel") in ("yes", "building_passage") or t.get("area") == "yes" \
-                or t.get("layer", "0") not in ("0", "1"):
+                or t.get("layer", "0") not in ("0", "1") or t.get("bridge"):
             continue
         ls = LineString(pts)
         side = 1
@@ -1957,6 +2082,12 @@ def main():
             print("tunnel open on the sea side from", TUNNEL["open"])
     global TRACK
     TRACK = load_track()
+    if TRACK is not None:
+        flat = flatten_harbour(mnt_f)
+        # Lower the surface model by as much, so what stands there keeps
+        # its height (and the humps do not turn into trees).
+        mns = mns - np.nan_to_num(mnt_f - flat, nan=0.0)
+        mnt_f = flat
     mnt_ground = mnt_f
     if TUNNEL is not None:
         timg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
@@ -1999,6 +2130,7 @@ def main():
     hm = Mesh()
     yachts(hm, ortho, sea, stats)
     piers(hm, ways, sea)
+    stats["bridges"] = bridges(bm, ways, mns, mnt)
     sm = Mesh()
     sea_plane(sm)
 
