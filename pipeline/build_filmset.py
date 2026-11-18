@@ -42,6 +42,7 @@ import math
 import struct
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -75,6 +76,13 @@ WMS = "https://data.geopf.fr/wms-r"
 
 
 # ---------------------------------------------------------------- fetch ----
+WD_QUERY = """SELECT ?item ?itemLabel ?coord ?inc ?styleLabel ?floors WHERE {
+  SERVICE wikibase:around { ?item wdt:P625 ?coord . bd:serviceParam wikibase:center "Point(7.4282 43.7393)"^^geo:wktLiteral .
+    bd:serviceParam wikibase:radius "0.9" . }
+  OPTIONAL { ?item wdt:P571 ?inc } OPTIONAL { ?item wdt:P149 ?style } OPTIONAL { ?item wdt:P1101 ?floors }
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en,fr". } }"""
+
+
 def fetch():
     RAW.mkdir(parents=True, exist_ok=True)
     b = f"{X0},{Y0},{X1},{Y1}"
@@ -94,6 +102,8 @@ def fetch():
                         f"&COUNT=5000&BBOX={b},EPSG:2154"),
         "osm.xml": ("https://api.openstreetmap.org/api/0.6/map?bbox="
                     f"{lon0[0]:.4f},{lat0[0]:.4f},{lon1[0]:.4f},{lat1[0]:.4f}"),
+        # Dated places around the square (year built, style, floors).
+        "wikidata.json": "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(WD_QUERY),
     }
     for name, url in urls.items():
         out = RAW / name
@@ -216,19 +226,19 @@ class Mesh:
         self.p, self.n, self.c, self.uv, self.i = [], [], [], [], []
         self.count = 0
 
-    def add(self, pos, nrm, col, kind, uv=None, idx=None):
+    def add(self, pos, nrm, col, kind, uv=None, idx=None, style=None):
         pos = np.asarray(pos, np.float32)
         k = len(pos)
         nrm = np.broadcast_to(np.asarray(nrm, np.float32), (k, 3))
         col = np.broadcast_to(np.asarray(col, np.float32), (k, 3))
-        rgba = np.column_stack([np.clip(col, 0, 255), np.full(k, kind * 16 + 8)]).astype(np.uint8)
+        rgba = np.column_stack([np.clip(col, 0, 255), np.full(k, kind * 16 + (8 if style is None else style))]).astype(np.uint8)
         uv = np.zeros((k, 2), np.float32) if uv is None else np.asarray(uv, np.float32)
         idx = np.arange(k) if idx is None else np.asarray(idx)
         self.p.append(pos); self.n.append(nrm); self.c.append(rgba); self.uv.append(uv)
         self.i.append(idx.astype(np.uint32).ravel() + self.count)
         self.count += k
 
-    def tri(self, a, b, c, col, kind, uv=None):
+    def tri(self, a, b, c, col, kind, uv=None, style=None):
         """Flat triangles; a, b, c: (k, 3) arrays."""
         a, b, c = (np.asarray(v, np.float32) for v in (a, b, c))
         nrm = np.cross(b - a, c - a)
@@ -238,7 +248,7 @@ class Mesh:
         nn = np.repeat(nrm, 3, 0)
         col = np.asarray(col, np.float32)
         col = np.repeat(col, 3, 0) if col.ndim == 2 else col
-        self.add(pos, nn, col, kind, uv=None if uv is None else np.asarray(uv).reshape(-1, 2))
+        self.add(pos, nn, col, kind, uv=None if uv is None else np.asarray(uv).reshape(-1, 2), style=style)
 
     def arrays(self):
         if not self.p:
@@ -322,6 +332,17 @@ def ground_mesh(mnt, sea):
     r = np.clip(((Y1 - Y) / RES).astype(int), 0, mnt.shape[0] - 1)
     c = np.clip(((X - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
     Z = hm[r, c]
+    if TUNNEL is not None:
+        # The deck over the tunnel, node by node (no smoothing into the mouths).
+        Z = np.where(contains_xy(TUNNEL["ground"], X, Y), np.maximum(Z, TUNNEL["top"]), Z)
+        # The road up to each mouth runs between retaining walls: keep the
+        # 3 m ground grid from ramping up over it.
+        from scipy.spatial import cKDTree
+        near = contains_xy(TUNNEL["approach"], X, Y)
+        if near.any():
+            kd = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]]))
+            _, j = kd.query(np.column_stack([X[near], Y[near]]))
+            Z[near] = np.minimum(Z[near], TUNNEL["z"][j])
     land = valid[r, c] > 0.5
     Z = np.where(land, Z, SEA_FLOOR)
     P = enu_fast(X.ravel(), Y.ravel(), Z.ravel())
@@ -335,6 +356,13 @@ def ground_mesh(mnt, sea):
     # Drop quads that are entirely sea floor (the sea plane covers them).
     seaq = (~land[:-1, :-1]) & (~land[:-1, 1:]) & (~land[1:, :-1]) & (~land[1:, 1:])
     keep = ~seaq
+    if TUNNEL is not None:
+        # The slope from the deck over the tunnel down to the road outside
+        # would hang like a curtain across each mouth: leave it out.
+        ins = contains_xy(TUNNEL["ground"], X, Y)
+        endz = contains_xy(TUNNEL["ends"], X, Y) & ~ins
+        anyq = lambda a_: a_[:-1, :-1] | a_[:-1, 1:] | a_[1:, :-1] | a_[1:, 1:]
+        keep &= ~(anyq(ins) & anyq(endz))
     tris = np.concatenate([np.stack([a, cc, b], -1)[keep], np.stack([b, cc, d], -1)[keep]])
     m = Mesh()
     m.add(P, N, [255, 255, 255], GROUND, uv=uv, idx=tris)
@@ -498,7 +526,7 @@ def triangulate(poly, area=None):
     return t["vertices"], t["triangles"]
 
 
-def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False):
+def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None):
     poly = orient(poly, -1.0 if inward else 1.0)
     for ring in [poly.exterior] + list(poly.interiors):
         pts = np.asarray(ring.coords)[:, :2]
@@ -509,7 +537,7 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False):
         if not len(a):
             continue
         k = len(a)
-        bay = {WALL_OLD: 3.2, WALL_NEW: 3.4, WALL_GLASS: 2.2}.get(kind, 3.0)
+        bay = STYLE_BAY[style] if style is not None else {WALL_OLD: 3.2, WALL_NEW: 3.4, WALL_GLASS: 2.2}.get(kind, 3.0)
         nb = np.maximum(1, np.round(L / bay))
         P = enu_fast(np.column_stack([a[:, 0], b[:, 0], b[:, 0], a[:, 0]]).ravel(),
                      np.column_stack([a[:, 1], b[:, 1], b[:, 1], a[:, 1]]).ravel(),
@@ -520,7 +548,7 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False):
         uv = np.stack([np.column_stack([np.zeros(k), nb, nb, np.zeros(k)]),
                        np.column_stack([np.full(k, v0), np.full(k, v0), np.full(k, v1), np.full(k, v1)])], -1)
         idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
-        m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx)
+        m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style)
 
 
 def add_roof(m, poly, z, col, tiled, cap=None):
@@ -557,6 +585,131 @@ HEROES = {
     "BATIMENT0000000074070294": {"wall": "#f3e4c4", "roof": "#6fa596"},
     "BATIMENT0000000074070299": {"wall": "#f3e4c4", "roof": "#6fa596"},
 }
+
+
+# Façade styles, read by the viewer's shader from the low bits of the colour
+# alpha (kind * 16 + style). Each one is a real type of Monaco building.
+(S_SHUTTER, S_BELLE, S_ARCH, S_VILLA, S_LOGGIA, S_RIBBON, S_GLASS, S_MODERN, S_DECO) = range(9)
+STYLE_KIND = {S_SHUTTER: WALL_OLD, S_BELLE: WALL_OLD, S_ARCH: WALL_OLD, S_VILLA: WALL_OLD, S_DECO: WALL_OLD,
+              S_LOGGIA: WALL_NEW, S_RIBBON: WALL_NEW, S_MODERN: WALL_NEW, S_GLASS: WALL_GLASS}
+# Bay width and storey height, m.
+STYLE_BAY = {S_SHUTTER: 3.1, S_BELLE: 3.5, S_ARCH: 4.6, S_VILLA: 3.0, S_LOGGIA: 3.4, S_RIBBON: 3.6,
+             S_GLASS: 2.2, S_MODERN: 3.0, S_DECO: 3.4}
+STYLE_FH = {S_SHUTTER: 3.3, S_BELLE: 3.8, S_ARCH: 5.2, S_VILLA: 3.1, S_LOGGIA: 3.0, S_RIBBON: 2.95,
+            S_GLASS: 3.4, S_MODERN: 3.3, S_DECO: 3.2}
+
+# Landmarks around the square, by a point (Lambert-93) inside or next to
+# their outline: style and the colour of the real façade.
+LANDMARKS = [
+    ("Hôtel de Paris", (1056550, 6303330), S_BELLE, "#f5eedf"),
+    ("Hôtel de Paris", (1056523, 6303375), S_BELLE, "#f5eedf"),
+    ("Hôtel Hermitage", (1056432, 6303262), S_BELLE, "#f2d9bd"),
+    ("Café de Paris", (1056577, 6303396), S_ARCH, "#f6f0e4"),
+    ("Hôtel Métropole", (1056574, 6303546), S_BELLE, "#f1dcc0"),
+    ("One Monte-Carlo", (1056448, 6303367), S_MODERN, "#eeede8"),
+    ("One Monte-Carlo", (1056433, 6303407), S_MODERN, "#eeede8"),
+    ("Fairmont", (1056743, 6303450), S_RIBBON, "#eee8dc"),
+    ("Théâtre Princesse Grace", (1056443, 6303173), S_DECO, "#efe2c8"),
+    ("Yacht Club de Monaco", (1056540, 6303156), S_MODERN, "#f2f2ee"),
+    ("Église Saint-Charles", (1056513, 6303731), S_ARCH, "#e9dcc4"),
+]
+
+
+def style_for_year(y, H):
+    if y < 1925:
+        return S_BELLE if H > 14 else S_VILLA
+    if y < 1950:
+        return S_DECO
+    if y < 1995:
+        return S_RIBBON if H > 30 else S_LOGGIA
+    return S_GLASS if H > 60 else S_MODERN
+
+
+class FacadeData:
+    """What open data says about each building: floors (OpenStreetMap,
+    Wikidata, BD TOPO), year built (OpenStreetMap, Wikidata), name."""
+
+    def __init__(self, ways):
+        from shapely.strtree import STRtree
+        self.osm = []
+        for t, pts, closed in ways:
+            if closed and len(pts) > 3 and ("building" in t or "building:part" in t):
+                try:
+                    g = Polygon(pts).buffer(0)
+                except Exception:
+                    continue
+                if g.area > 8:
+                    self.osm.append((g, t))
+        self.tree = STRtree([g for g, _ in self.osm])
+        self.wd = []
+        f = RAW / "wikidata.json"
+        tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+        if f.exists():
+            for b in json.load(open(f))["results"]["bindings"]:
+                g = lambda k: b.get(k, {}).get("value", "")
+                lon, lat = map(float, g("coord")[6:-1].split())
+                x, y = tl.transform(lon, lat)
+                self.wd.append((shapely.Point(x, y), g("itemLabel"), g("inc")[:4], g("styleLabel"), g("floors")))
+        self.marks = [(shapely.Point(*xy), name, st, colour) for name, xy, st, colour in LANDMARKS]
+
+    def get(self, poly, props):
+        out = {"levels": None, "year": None, "name": None, "style": None, "colour": None}
+        for i in self.tree.query(poly):
+            g, t = self.osm[i]
+            inter = g.intersection(poly).area
+            if inter < 0.5 * min(g.area, poly.area):
+                continue
+            lv = t.get("building:levels", "")
+            if lv.replace(".", "").isdigit() and not out["levels"]:
+                out["levels"] = float(lv)
+            sd = t.get("start_date", "")[:4]
+            if sd.isdigit() and not out["year"]:
+                out["year"] = int(sd)
+            out["name"] = out["name"] or t.get("name")
+        big = poly.buffer(4)
+        for pt, label, inc, st, fl in self.wd:
+            if not big.contains(pt):
+                continue
+            if inc.isdigit() and not out["year"] and 1850 < int(inc) < 2030 and "Festival" not in label:
+                out["year"] = int(inc)
+            if fl.isdigit() and not out["levels"]:
+                out["levels"] = float(fl)
+            if st in ("Belle Époque", "Beaux-Arts"):
+                out["style"] = S_BELLE
+        if not out["levels"] and props.get("nombre_d_etages"):
+            out["levels"] = float(props["nombre_d_etages"]) + 1   # BD TOPO counts floors above the ground floor
+        if not out["year"] and (props.get("date_d_apparition") or "")[:4].isdigit():
+            out["year"] = int(props["date_d_apparition"][:4])
+        for pt, name, st, colour in self.marks:
+            if poly.buffer(3).contains(pt):
+                out.update(style=st, colour=colour, name=name)
+        return out
+
+
+def pick_style(info, H, tiled, grand, post_scan, rnd):
+    """Real data first, then what the building looks like from above."""
+    if info["style"] is not None:
+        return info["style"]
+    if post_scan:
+        return S_MODERN
+    if info["year"]:
+        return style_for_year(info["year"], H)
+    name = (info["name"] or "").lower()
+    lv = info["levels"] or H / 3.0
+    if name.startswith(("villa", "maison", "castel", "casa")) and lv <= 7:
+        return S_VILLA
+    if any(w in name for w in ("palais", "palace", "château", "chateau")) and lv <= 10:
+        return S_BELLE
+    if grand:
+        return S_BELLE
+    if tiled:
+        return S_VILLA if H < 13 else S_SHUTTER
+    r = rnd.random()
+    if H > 40:          # the 1960s-80s towers: balconies all round
+        return S_RIBBON if r < 0.8 else S_LOGGIA
+    if H > 20:
+        return S_LOGGIA if r < 0.5 else (S_RIBBON if r < 0.75 else S_SHUTTER)
+    return S_SHUTTER if r < 0.45 else (S_VILLA if r < 0.62 else (S_DECO if r < 0.77 else S_LOGGIA))
 
 
 def roof_colour(rgb):
@@ -604,7 +757,7 @@ def add_cap(m, poly, z, h, col, kind):
     m.tri(mid[j], mid[jn], np.repeat(top[None], k, 0), col, kind)
 
 
-def buildings(m, feats, mns, mnt, ortho, stats):
+def buildings(m, feats, mns, mnt, ortho, stats, facades):
     mntR = Raster(mnt)
     extent = box(X0, Y0, X1, Y1)
     footprint = []
@@ -712,29 +865,39 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                 rcol = np.array(hexrgb(hero["roof"]))
             grand = not post_scan and (rk == "copper" or (not tiled and H < 30 and poly.area > 500
                                                           and rnd.random() < 0.35))
-            if post_scan:
-                kind = WALL_GLASS if H > 30 else WALL_NEW
-            elif tiled or grand or (H < 20 and rnd.random() < 0.7):
-                kind = WALL_OLD
-            elif H > 45 or rnd.random() < 0.18:
-                kind = WALL_GLASS
-            else:
-                kind = WALL_NEW
-            pal = {WALL_OLD: WALL_OLD_COLS, WALL_NEW: WALL_NEW_COLS, WALL_GLASS: WALL_NEW_COLS}[kind]
+            info = facades.get(poly, props)
+            style = S_ARCH if hero else pick_style(info, H, tiled, grand, post_scan, rnd)
+            if info["style"] == S_BELLE and not tiled and not post_scan and poly.area > 200:
+                grand = True        # a real palace: stone, mansard roof
+            if style not in (S_BELLE, S_ARCH):
+                grand = False
+            kind = STYLE_KIND[style]
+            stats["styles"][style] += 1
+            pal = {S_BELLE: ["#f2e3c2", "#efd9b0", "#f4e8cf", "#f3e6d0", "#f0d8bc"],
+                   S_ARCH: ["#f3e4c4"],
+                   S_VILLA: ["#e8ad62", "#eb9d7a", "#f0aa98", "#f3d77f", "#dc7f58", "#f0c27b", "#f2cf9a"],
+                   S_DECO: ["#f1e6cf", "#ead9b8", "#f4efe4", "#e6d2b5", "#f0dcc4"],
+                   S_RIBBON: ["#efe9dd", "#e6dccb", "#f3f0ea", "#dcd2bf", "#e9e0d0"],
+                   }.get(style, WALL_OLD_COLS if kind == WALL_OLD else WALL_NEW_COLS)
             col = np.array(hexrgb(rnd.choice(pal))) * (0.95 + 0.07 * rnd.random())
-            if grand:
-                # Belle Époque palaces: cream stone.
-                col = np.array(hexrgb(rnd.choice(["#f2e3c2", "#efd9b0", "#f4e8cf", "#f3e6d0"])))
+            if info["colour"]:
+                col = np.array(hexrgb(info["colour"]))
             if hero:
                 col = np.array(hexrgb(hero["wall"]))
-            fh = 3.4 if kind == WALL_OLD else 3.0
-            if len(levels) == 1:
-                fh = H / max(1, round(H / fh))
+            # Storeys: the real count where open data has it, so each
+            # building gets its own number of rows of windows.
+            hwall = max(2.5, float(np.percentile(hrel, 40))) if tiled else H
+            fh = STYLE_FH[style]
+            if info["levels"] and 2.5 <= hwall / info["levels"] <= 5.8:
+                fh = hwall / info["levels"]
+                stats["real_floors"] += 1
+            elif len(levels) == 1:
+                fh = hwall / max(1, round(hwall / fh))
             zb = base - 1.0
             for li, (region, hz) in enumerate(levels):
                 zt = base + hz
                 last = li == len(levels) - 1
-                for part in to_polys(region):
+                for part in tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
                     if kind == WALL_OLD and part.area > 60:
                         # Stone cornice under the roof line: a moulding
                         # that juts out and catches the light.
@@ -748,15 +911,15 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                                 add_roof(m, orient(rp, 1.0), ztop, cc_, False)
                     if tiled:
                         eave = base + max(2.5, float(np.percentile(hrel, 40)))
-                        add_walls(m, part, zb, eave, base, fh, col, kind)
+                        add_walls(m, part, zb, eave, base, fh, col, kind, style=style)
                         add_roof(m, part, eave, rcol, True, max(1.0, base + top - eave))
                     elif grand and last and part.area > 120 and hz > 8:
                         sk = min(3.4, hz * 0.25)
-                        add_walls(m, part, zb, zt - sk, base, fh, col, kind)
+                        add_walls(m, part, zb, zt - sk, base, fh, col, kind, style=style)
                         add_mansard(m, part, zt - sk, rcol if rk == "copper" else hexrgb("#7d8a8f"),
                                     ROOF_TILE, sk, 2.2)
                     else:
-                        add_walls(m, part, zb, zt, base, fh, col, kind)
+                        add_walls(m, part, zb, zt, base, fh, col, kind, style=style)
                         add_roof(m, part, zt, rcol, False)
                         if part.area > 40:
                             # Parapet: a low wall round the roof edge, so
@@ -832,7 +995,7 @@ def buildings(m, feats, mns, mnt, ortho, stats):
                     if peak - ref > 20 or peak - body > 2 * math.sqrt(a) + 3 \
                             or tp.area / max(tp.minimum_rotated_rectangle.length ** 2 / 16, 1) < 0.35:
                         continue
-                    add_walls(m, tp, base + ref, base + body, base, fh, col, kind)
+                    add_walls(m, tp, base + ref, base + body, base, fh, col, kind, style=style)
                     add_cap(m, tp, base + body, max(1.5, peak - body),
                             rcol if rk == "copper" else hexrgb("#6f8b84"), ROOF_TILE)
                     stats["towers"] += 1
@@ -840,6 +1003,141 @@ def buildings(m, feats, mns, mnt, ortho, stats):
             stats["buildings"] += 1
             stats["levels"] += len(levels)
     return footprint
+
+
+# ----------------------------------------------------------------- tunnel ----
+# The Grand Prix tunnel runs under the Fairmont hotel. The LiDAR ground model
+# fills it in (the scan only sees its roof), so the set carves it out: the
+# ground over it is lifted to a deck above the vault, buildings start above
+# it, and an open tube with a road, walls and a ceiling is built inside.
+# The centre line and road height are the lap tours' (viewer/lap-route.js),
+# so the tours' own lit tunnel (viewer/clean-track.js) fits inside.
+TUNNEL = None
+TUBE_HALF, TUBE_H = 6.7, 6.5
+
+
+def load_tunnel():
+    f = ROOT / "viewer" / "lap-route.js"
+    if not f.exists():
+        return None
+    txt = f.read_text()
+    d = json.loads(txt[txt.index("{"):txt.rindex("}") + 1])
+    if not d.get("tunnels"):
+        return None
+    P = np.array(d["points"])
+    tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    x, y = tl.transform(P[:, 0], P[:, 1])
+    # Smoothed like the tours' track (clean-track.js: 2 and 3 samples).
+    x = ndimage.gaussian_filter1d(np.asarray(x), 2, mode="wrap")
+    y = ndimage.gaussian_filter1d(np.asarray(y), 2, mode="wrap")
+    z = ndimage.gaussian_filter1d(P[:, 2] - GEOID_N, 3, mode="wrap")
+    s = np.arange(len(P)) * d["step"]
+    ta, tb = d["tunnels"][0]
+
+    def line(a, b):
+        sel = (s >= a) & (s <= b)
+        return LineString(np.column_stack([x[sel], y[sel]]))
+    inside = (s >= ta - 1) & (s <= tb + 1)
+    t = {"ta": ta, "tb": tb, "x": x, "y": y, "z": z, "s": s,
+         "top": float(z[inside].max()) + TUBE_H + 0.4,
+         "ground": line(ta - 1, tb + 1).buffer(8.5, cap_style=2),
+         # Buildings over the road near the mouths (the hotel overhangs it)
+         # start above the vault too.
+         "bld": line(ta - 14, tb + 14).buffer(7.2, cap_style=2),
+         "approach": unary_union([line(ta - 16, ta + 1).buffer(6.2, cap_style=2),
+                                  line(tb - 1, tb + 16).buffer(6.2, cap_style=2)]),
+         "ends": unary_union([line(ta - 9, ta + 2).buffer(9.5, cap_style=2),
+                              line(tb - 2, tb + 9).buffer(9.5, cap_style=2)])}
+    return t
+
+
+def tunnel_frame(s_):
+    t = TUNNEL
+    x = np.interp(s_, t["s"], t["x"]); y = np.interp(s_, t["s"], t["y"]); z = np.interp(s_, t["s"], t["z"])
+    dx = np.interp(s_ + 1.5, t["s"], t["x"]) - np.interp(s_ - 1.5, t["s"], t["x"])
+    dy = np.interp(s_ + 1.5, t["s"], t["y"]) - np.interp(s_ - 1.5, t["s"], t["y"])
+    l = np.hypot(dx, dy)
+    return x, y, z, dx / l, dy / l          # left = (-dy, dx)
+
+
+def tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
+    """Building parts to build as usual; the part over the tunnel starts
+    above the vault."""
+    parts = to_polys(region)
+    if TUNNEL is None:
+        return parts
+    out = []
+    for part in parts:
+        if not part.intersects(TUNNEL["bld"]):
+            out.append(part)
+            continue
+        top = TUNNEL["top"]
+        if zt > top + 1:
+            for q in to_polys(part.intersection(TUNNEL["bld"])):
+                if q.area > 2:
+                    q = orient(q, 1.0)
+                    add_walls(m, q, max(zb, top), zt, base, fh, col, kind, style=style)
+                    add_roof(m, q, zt, rcol, False)
+        out += [orient(q, 1.0) for q in to_polys(part.difference(TUNNEL["bld"]).buffer(0)) if q.area > 2]
+    return out
+
+
+TUBE_LIT, TUBE_LAMP = 1, 2          # PLAIN styles: self-lit tunnel surfaces, lamps
+
+
+def tri_facing(m, a, b, c, toward, col, kind, style=None):
+    """Triangles whose front face looks toward the given points."""
+    n = np.cross(b - a, c - a)
+    flip = np.einsum("ij,ij->i", n, toward - a) < 0
+    b2, c2 = np.where(flip[:, None], c, b), np.where(flip[:, None], b, c)
+    m.tri(a, b2, c2, col, kind, style=style)
+
+
+def tunnel_tube(m):
+    t = TUNNEL
+    ta, tb = t["ta"], t["tb"]
+    W, Hh = TUBE_HALF, TUBE_H
+    prof = [(-W, -0.3), (-W, 4.6), (-W + 1.3, 5.7), (-2.8, 6.3), (0, Hh), (2.8, 6.3), (W - 1.3, 5.7), (W, 4.6), (W, -0.3)]
+    ss = np.arange(ta - 1, tb + 1.01, 1.5)
+    x, y, z, fx, fy = tunnel_frame(ss)
+    lx, ly = -fy, fx
+    R = np.array([[enu_fast(x + lx * w, y + ly * w, z + h) for w, h in prof]])[0]   # (len(prof), n, 3)
+    axis = enu_fast(x, y, z + 2.8)
+    wall, ceil = np.array(hexrgb("#d8d4c8")), np.array(hexrgb("#55534f"))
+    for j in range(len(prof) - 1):
+        a, b, c, d = R[j, :-1], R[j + 1, :-1], R[j, 1:], R[j + 1, 1:]
+        ax = axis[:-1]
+        col = ceil if prof[j][1] > 5 and prof[j + 1][1] > 5 else wall
+        tri_facing(m, a, b, c, ax, col, PLAIN, TUBE_LIT)
+        tri_facing(m, b, d, c, ax, col, PLAIN, TUBE_LIT)
+    # Two rows of lamps along the ceiling.
+    for w in (-2.4, 2.4):
+        for k in range(0, len(ss) - 1, 2):
+            s0 = np.array([ss[k], ss[k] + 1.1])
+            x_, y_, z_, fx_, fy_ = tunnel_frame(s0)
+            h = 6.3 - 0.06 + (Hh - 6.3) * (1 - abs(w) / 2.8)
+            p0 = enu_fast(x_ - fy_ * (w - 0.25), y_ + fx_ * (w - 0.25), z_ + h)
+            p1 = enu_fast(x_ - fy_ * (w + 0.25), y_ + fx_ * (w + 0.25), z_ + h)
+            dn = (p0 + p1) / 2 - np.array([0, 0, 3.0])
+            tri_facing(m, p0[:1], p1[:1], p0[1:], dn[:1], hexrgb("#fff1c8"), PLAIN, TUBE_LAMP)
+            tri_facing(m, p1[:1], p1[1:], p0[1:], dn[:1], hexrgb("#fff1c8"), PLAIN, TUBE_LAMP)
+    # Road and kerbs inside.
+    for w0, w1, colr, dz in [(-W, W, "#3d3e40", 0.02), (-W, -W + 0.9, "#b9b5ab", 0.2), (W - 0.9, W, "#b9b5ab", 0.2)]:
+        a, b = enu_fast(x + lx * w0, y + ly * w0, z + dz), enu_fast(x + lx * w1, y + ly * w1, z + dz)
+        up = (a + b) / 2 + np.array([0, 0, 5.0])
+        tri_facing(m, a[:-1], b[:-1], a[1:], up[:-1], hexrgb(colr), PLAIN, TUBE_LIT)
+        tri_facing(m, b[:-1], b[1:], a[1:], up[:-1], hexrgb(colr), PLAIN, TUBE_LIT)
+    # Mouths: a stone face from the vault up to the deck, and to the sides.
+    stone = np.array(hexrgb("#cdc3ae"))
+    for s0, out_ in ((ta - 1, -1), (tb + 1, 1)):
+        x0, y0, z0, fx0, fy0 = (float(v[0]) for v in tunnel_frame(np.array([s0])))
+        lx0, ly0 = -fy0, fx0
+        q = lambda w, h: enu_fast(np.array([x0 + lx0 * w]), np.array([y0 + ly0 * w]), np.array([z0 + h]))[0]
+        front = enu_fast(np.array([x0 + fx0 * out_ * 10]), np.array([y0 + fy0 * out_ * 10]), np.array([z0 + 3]))[0]
+        top = t["top"] - z0 + 0.3
+        for w0, w1, h0, h1 in ((-9.5, 9.5, Hh - 0.2, top), (-9.5, -W, -0.5, Hh), (W, 9.5, -0.5, Hh)):
+            A, B, C, D = q(w0, h0), q(w1, h0), q(w0, h1), q(w1, h1)
+            tri_facing(m, np.array([A, B]), np.array([B, D]), np.array([C, C]), np.array([front, front]), stone, PLAIN)
 
 
 # ------------------------------------------------------------------ trees ----
@@ -1212,12 +1510,22 @@ def main():
     # OpenStreetMap coastline follows the quays, so anything outside it is sea.
     sea |= ~coast_land(ways, sea)
     mnt_f = np.where(sea, np.nan, mnt)
+    global TUNNEL
+    TUNNEL = load_tunnel()
+    mnt_ground = mnt_f
+    if TUNNEL is not None:
+        timg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
+        ImageDraw.Draw(timg).polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in TUNNEL["ground"].exterior.coords],
+                                     fill=255)
+        tmask = np.asarray(timg) > 0
+        mnt_f = np.where(tmask & np.isfinite(mnt_f), np.maximum(mnt_f, TUNNEL["top"]), mnt_f)
     feats = json.load(open(RAW / "bdtopo.json"))["features"]
-    stats = {"buildings": 0, "dropped": 0, "rooftop": 0, "roof_plants": 0, "levels": 0, "towers": 0, "trees": 0, "yachts": 0}
+    stats = {"buildings": 0, "dropped": 0, "rooftop": 0, "roof_plants": 0, "levels": 0, "towers": 0, "trees": 0, "yachts": 0,
+             "real_floors": 0, "styles": [0] * 9}
 
     print("buildings…")
     bm = Mesh()
-    fps = buildings(bm, feats, mns, mnt_f, ortho, stats)
+    fps = buildings(bm, feats, mns, mnt_f, ortho, stats, FacadeData(ways))
     # Building mask at 50 cm for trees and the ground shade.
     mimg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
     dd = ImageDraw.Draw(mimg)
@@ -1226,6 +1534,11 @@ def main():
     bmask = np.asarray(mimg) > 0
     bgrow = ndimage.binary_dilation(bmask, iterations=3)
 
+    # The tunnel tube is a file of its own: the viewer loads it without
+    # shadows (a closed tube would only show shadow-map stairs inside).
+    tun_m = Mesh()
+    if TUNNEL is not None:
+        tunnel_tube(tun_m)
     print("trees…")
     tm = Mesh()
     trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats)
@@ -1240,11 +1553,15 @@ def main():
     chm = np.nan_to_num(mns - mnt_f, nan=0)
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
-    gm, _ = ground_mesh(mnt_f, sea)
+    gm, _ = ground_mesh(mnt_ground, sea)
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea))
 
+    if tun_m.p:
+        tiny = io.BytesIO()
+        Image.new("RGB", (4, 4), (128, 128, 128)).save(tiny, "JPEG")
+        write_glb(OUT / "monte-carlo-tunnel.glb", [(tun_m, False)], tiny.getvalue())
     raw = OUT / "monte-carlo.raw.glb"
     write_glb(raw, [(gm, True), (bm, False), (tm, False), (hm, False), (sm, False)], jpg)
     out = OUT / "monte-carlo.glb"
@@ -1265,9 +1582,11 @@ def main():
         "clip": [[round(float(v[0]), 7) for v in to_lonlat(np.array([x]), np.array([y]))]
                  for x, y in [(X0, Y0), (X1, Y0), (X1, Y1), (X0, Y1)]],
         "triangles": int(tris),
+        "tunnel": bool(tun_m.p),
         **stats,
         "sources": ["IGN LiDAR HD MNT/MNS (Etalab 2.0)", "IGN BD TOPO (Etalab 2.0)",
-                    "IGN BD ORTHO, classification only (Etalab 2.0)", "OpenStreetMap contributors (ODbL)"],
+                    "IGN BD ORTHO, classification only (Etalab 2.0)", "OpenStreetMap contributors (ODbL)",
+                    "Wikidata (CC0)"],
     }
     (OUT / "monte-carlo.json").write_text(json.dumps(meta, indent=1))
     print(json.dumps(meta), f"{time.time() - t0:.0f}s", f"{out.stat().st_size / 1e6:.1f} MB")

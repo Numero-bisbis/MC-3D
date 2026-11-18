@@ -60,8 +60,14 @@ up to Beausoleil, 1.2 × 1.2 km. Nothing in it comes from Google: shapes come
 from IGN LiDAR HD and BD TOPO, streets and gardens from OpenStreetMap, and
 every colour and texture is authored by us. It is one 7 MB file
 (`viewer/filmset/monte-carlo.glb`) that loads once and then runs from memory,
-so there is no tile streaming at all. Belle Époque buildings get shutters and
-mansard roofs, tiled roofs are hipped, towers get glass, trees and moored
+so there is no tile streaming at all. Each building gets one of nine real
+Monaco façade types (Belle Époque palace, arched Casino front, Riviera house
+with shutters, painted villa, 1930s, 1960s-80s loggias, 1970s tower with
+balcony bands, contemporary glass and fins, glass tower), chosen from its
+year built (OpenStreetMap, Wikidata), its name and a short list of landmarks
+around the square, and as many rows of windows as its real number of floors
+(OpenStreetMap, Wikidata, BD TOPO) where open data has it. Mansard
+roofs top the palaces, tiled roofs are hipped, trees and moored
 yachts are rebuilt from the LiDAR, flat roofs get parapets and the
 machinery rooms the LiDAR sees and plants where the IGN photo shows roof
 gardens, Belle Époque buildings get stone cornices, the streets carry the
@@ -70,7 +76,10 @@ sun, so they show on phones too), about 200 yachts traced from the IGN
 photo are rebuilt with hulls and stepped decks, and the sea moves out to the
 horizon under a light film colour grade. Buildings
 the 2021 scan does not see are dropped, except those IGN dates from 2022 on
-(Mareterra and its neighbours), which keep their BD TOPO height. Rebuild it with
+(Mareterra and its neighbours), which keep their BD TOPO height. The
+Grand Prix tunnel under the Fairmont is carved out (the LiDAR only sees its
+roof): a deck over it, an open tube with road and walls inside, and the lap
+tours' lit vault fits inside it. Rebuild it with
 `python pipeline/build_filmset.py --fetch` (about 15 seconds after the 50 MB
 download; needs `npx` for the meshopt compression step).
 
