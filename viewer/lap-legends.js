@@ -1,5 +1,5 @@
 // "Legendary laps": the three fastest laps of each decade at Monaco, from
-// 1950 to today, replayed behind a small generic single-seater. The car
+// 1950 to today, replayed behind a car of the period in its team colours. The car
 // covers the circuit in exactly the real lap time; how fast it goes in each
 // corner and on each straight is estimated from the shape of the road.
 //
@@ -85,7 +85,6 @@
     "2010s": { mu: 1.7, c: 0.0065, acc: 12, brk: 42, top: 290 },
     "2020s": { mu: 1.7, c: 0.0065, acc: 12, brk: 42, top: 290 },
   };
-  const shapeOf = (y) => (y < 1968 ? "classic" : y < 2000 ? "winged" : "modern");
 
   // ---- Route geometry -------------------------------------------------
   const P = K.P;
@@ -198,13 +197,53 @@
   }
 
   // ---- The car -----------------------------------------------------------
-  // Built from simple shapes, x forward, y left, z up, wheels on z = 0.
-  // Pearl and gold: no team's colours.
+  // Built from simple shapes, x forward, y left, z up, wheels on z = 0, in
+  // the colours each team ran that year. Colour schemes only: no sponsor
+  // names, logos or other marks.
+  const hex = (c) => Cesium.Color.fromCssColorString(c);
   const COL = {
-    body: Cesium.Color.fromCssColorString("#f1eee6"), accent: Cesium.Color.fromCssColorString("#e2b65e"),
-    carbon: Cesium.Color.fromCssColorString("#1d2026"), tyre: Cesium.Color.fromCssColorString("#141414"),
-    rim: Cesium.Color.fromCssColorString("#a7adb4"), glass: Cesium.Color.fromCssColorString("#3b4652"),
+    carbon: hex("#1b1d22"), tyre: hex("#131313"), rim: hex("#a7adb4"), glass: hex("#2f3a45"),
+    metal: hex("#8d9399"), wire: hex("#c9cdd2"),
   };
+  // body: main colour · accent: stripes, airbox, fins · wing: wing planes
+  // nose: nose tip or nose band · lower: lower sidepods · helmet.
+  // Pass a list for a stripe pair.
+  const LIVERY = {
+    "1959-moss": { body: "#16285a", accent: "#f2f2ee", nose: "#f2f2ee", helmet: "#f2f2ee", band: true },      // Rob Walker blue, white nose band
+    "1958-brooks": { body: "#0f3b26", accent: "#e8e2c8", helmet: "#e6e6e0" },                                 // Vanwall green
+    "1959-brabham": { body: "#124a2c", accent: "#f2f2ee", helmet: "#f2f2ee", stripes: true },                 // Cooper works green, white stripes
+    "1967-brabham": { body: "#1a4d2e", accent: "#e8b923", helmet: "#f2f2ee", stripes: true },                 // Brabham green and gold
+    "1968-attwood": { body: "#12402a", accent: "#e46c1a", nose: "#e46c1a", helmet: "#f2f2ee", band: true },   // BRM green, orange band
+    "1968-hill": { body: "#c41a1e", accent: "#f4f1e8", wing: "#c41a1e", helmet: "#0d1b3d", stripes: true, gold: "#c9a64a" }, // red, white and gold
+    "1970-rindt": { body: "#c41a1e", accent: "#f4f1e8", wing: "#c41a1e", helmet: "#f4f1e8", stripes: true, gold: "#c9a64a" },
+    "1972-fittipaldi": { body: "#0c0c0e", accent: "#c9a64a", wing: "#0c0c0e", helmet: "#f2f2ee", pin: true }, // black and gold
+    "1971-stewart": { body: "#1f3d8f", accent: "#f2f2ee", wing: "#1f3d8f", helmet: "#f2f2ee", stripes: true },  // French blue
+    "1985-senna": { body: "#0c0c0e", accent: "#c9a64a", wing: "#0c0c0e", helmet: "#f2d21b", pin: true },      // black and gold
+    "1986-prost": { body: "#f4f2ee", accent: "#e8332a", top: "#e8332a", wing: "#e8332a", helmet: "#f4f2ee" },  // white, fluorescent red top
+    "1987-mansell": { body: "#f4f2ee", accent: "#f2c400", lower: "#1b2f6e", wing: "#1b2f6e", helmet: "#d22a2a" }, // white, navy, yellow
+    "1997-frentzen": { body: "#f4f2ee", accent: "#c8a24a", lower: "#14285c", wing: "#14285c", helmet: "#f4f2ee" },  // white and dark blue
+    "1994-schumacher": { body: "#3c8fd0", accent: "#2fa84f", top: "#f2f2ee", wing: "#3c8fd0", helmet: "#f2f2ee", nose: "#f2d21b" }, // light blue, green, yellow
+    "1992-mansell": { body: "#f4f2ee", accent: "#f2c400", lower: "#1b3a8a", wing: "#1b3a8a", helmet: "#d22a2a" },   // white, blue, yellow
+    "2006-alonso": { body: "#2e6fd1", accent: "#f2c400", nose: "#f2c400", wing: "#f2c400", helmet: "#2a5ac0" },      // light blue and yellow
+    "2004-trulli": { body: "#2e6fd1", accent: "#f2c400", nose: "#f2c400", wing: "#2e6fd1", helmet: "#f2f2ee" },
+    "2004-schumacher": { body: "#d10f16", accent: "#f2f2ee", wing: "#d10f16", helmet: "#d10f16" },                   // Ferrari red
+    "2019-hamilton": { body: "#b8bec4", accent: "#00a19b", top: "#c9ced3", wing: "#1b1d22", helmet: "#f2d21b" },    // silver and teal
+    "2018-ricciardo": { body: "#1d2750", accent: "#d6252f", nose: "#f2c400", wing: "#1d2750", helmet: "#f2f2ee" },  // matte navy, red, yellow
+    "2017-raikkonen": { body: "#d10f16", accent: "#f2f2ee", wing: "#d10f16", helmet: "#1b1d22" },
+    "2025-norris": { body: "#ff8000", accent: "#1b1d22", lower: "#2a2d33", wing: "#ff8000", helmet: "#e6f21b" },    // papaya and anthracite
+    "2024-leclerc": { body: "#d10f16", accent: "#f2d21b", wing: "#d10f16", helmet: "#d10f16" },
+    "2023-verstappen": { body: "#1d2750", accent: "#d6252f", nose: "#f2c400", wing: "#1d2750", helmet: "#f07a1a" },
+  };
+  const liveryOf = (lap) => {
+    const l = LIVERY[lap.id] || { body: "#f1eee6", accent: "#e2b65e", helmet: "#e2b65e" };
+    const c = (v, d) => (v ? hex(v) : d);
+    const body = hex(l.body), accent = hex(l.accent);
+    return {
+      body, accent, wing: c(l.wing, COL.carbon), nose: c(l.nose, body), lower: c(l.lower, body), top: c(l.top, body),
+      helmet: hex(l.helmet), gold: c(l.gold, accent), band: !!l.band, stripes: !!l.stripes, pin: !!l.pin,
+    };
+  };
+
   const VF = Cesium.PerInstanceColorAppearance.VERTEX_FORMAT;
   const inst = (geometry, at, color, rot) => {
     let mm = Cesium.Matrix4.fromTranslation(new Cesium.Cartesian3(...at));
@@ -214,67 +253,179 @@
       attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(color) },
     });
   };
-  const box = (at, size, color) => inst(Cesium.BoxGeometry.fromDimensions({ dimensions: new Cesium.Cartesian3(...size), vertexFormat: VF }), at, color);
-  const blob = (at, radii, color) => inst(new Cesium.EllipsoidGeometry({ radii: new Cesium.Cartesian3(...radii), vertexFormat: VF, stackPartitions: 14, slicePartitions: 18 }), at, color);
+  const box = (at, size, color, rot) => inst(Cesium.BoxGeometry.fromDimensions({ dimensions: new Cesium.Cartesian3(...size), vertexFormat: VF }), at, color, rot);
+  const blob = (at, radii, color, rot) => inst(new Cesium.EllipsoidGeometry({ radii: new Cesium.Cartesian3(...radii), vertexFormat: VF, stackPartitions: 16, slicePartitions: 22 }), at, color, rot);
   const AXLE = Cesium.Matrix3.fromRotationX(Math.PI / 2);
-  const disc = (at, r, w, color) => inst(new Cesium.CylinderGeometry({ length: w, topRadius: r, bottomRadius: r, slices: 22, vertexFormat: VF }), at, color, AXLE);
+  const disc = (at, r, w, color) => inst(new Cesium.CylinderGeometry({ length: w, topRadius: r, bottomRadius: r, slices: 28, vertexFormat: VF }), at, color, AXLE);
+  const pitch = (deg) => Cesium.Matrix3.fromRotationY(Cesium.Math.toRadians(deg));
+  const Z = new Cesium.Cartesian3(0, 0, 1);
+  // A round bar from a to b (suspension arms, halo, roll hoop, exhausts).
+  function rod(a, b, r, color, r2) {
+    const d = new Cesium.Cartesian3(b[0] - a[0], b[1] - a[1], b[2] - a[2]), len = Cesium.Cartesian3.magnitude(d);
+    Cesium.Cartesian3.normalize(d, d);
+    const axis = Cesium.Cartesian3.cross(Z, d, new Cesium.Cartesian3()), s = Cesium.Cartesian3.magnitude(axis);
+    const rot = s < 1e-6 ? (d.z > 0 ? Cesium.Matrix3.IDENTITY : Cesium.Matrix3.fromRotationX(Math.PI))
+      : Cesium.Matrix3.fromQuaternion(Cesium.Quaternion.fromAxisAngle(Cesium.Cartesian3.normalize(axis, axis), Math.acos(Cesium.Math.clamp(d.z, -1, 1))));
+    return inst(new Cesium.CylinderGeometry({ length: len, topRadius: r2 ?? r, bottomRadius: r, slices: 12, vertexFormat: VF }),
+      [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2], color, rot);
+  }
+  // A cone along x: from radius r0 at x0 to radius r1 at x1, dropping by dz.
+  function cone(x0, x1, z0, z1, r0, r1, color, sy = 1, sz = 1) {
+    const g = new Cesium.CylinderGeometry({ length: Math.hypot(x1 - x0, z1 - z0), topRadius: r1, bottomRadius: r0, slices: 24, vertexFormat: VF });
+    const tilt = Math.atan2(z0 - z1, x1 - x0);
+    const rot = Cesium.Matrix3.multiply(Cesium.Matrix3.fromRotationY(Math.PI / 2 + tilt), Cesium.Matrix3.fromScale(new Cesium.Cartesian3(sz, sy, 1)), new Cesium.Matrix3());
+    return inst(g, [(x0 + x1) / 2, 0, (z0 + z1) / 2], color, rot);
+  }
 
-  const SHAPES = {
-    classic: { wb: 2.3, track: 1.25, rF: 0.33, rR: 0.35, wF: 0.17, wR: 0.22, len: 4.0 },
-    winged: { wb: 2.7, track: 1.55, rF: 0.32, rR: 0.34, wF: 0.27, wR: 0.42, len: 4.5 },
-    modern: { wb: 3.5, track: 1.6, rF: 0.35, rR: 0.36, wF: 0.32, wR: 0.4, len: 5.5 },
-  };
-  function carParts(shape) {
-    const s = SHAPES[shape], h = s.wb / 2, parts = [];
-    const wheels = [[h, s.track / 2, s.rF, s.wF], [h, -s.track / 2, s.rF, s.wF], [-h, s.track / 2, s.rR, s.wR], [-h, -s.track / 2, s.rR, s.wR]];
-    for (const [x, y, r, w] of wheels) {
+  // Era of each car: proportions in metres (wheelbase, track, tyre radius
+  // and width front/rear, overall length) and which parts it has.
+  function eraOf(y) {
+    if (y < 1968) return { kind: "cigar", wb: 2.3, track: 1.25, rF: 0.29, rR: 0.31, wF: 0.15, wR: 0.2, len: 3.7 };
+    if (y < 1978) return { kind: "wedge", wb: 2.5, track: 1.45, rF: 0.29, rR: 0.32, wF: 0.24, wR: 0.38, len: 4.2, rearWing: y >= 1969, airbox: y >= 1971 };
+    if (y < 1989) return { kind: "turbo", wb: 2.8, track: 1.72, rF: 0.3, rR: 0.32, wF: 0.3, wR: 0.42, len: 4.4, noseZ: 0.3 };
+    if (y < 2000) return { kind: "modern", wb: 2.9, track: 1.66, rF: 0.32, rR: 0.33, wF: 0.3, wR: 0.38, len: 4.5, highNose: y >= 1993, airbox: true, wideWing: false };
+    if (y < 2009) return { kind: "modern", wb: 3.1, track: 1.45, rF: 0.33, rR: 0.33, wF: 0.3, wR: 0.36, len: 4.6, highNose: true, airbox: true, wideWing: false, aero: true };
+    if (y < 2022) return { kind: "modern", wb: y >= 2017 ? 3.6 : 3.4, track: y >= 2017 ? 1.62 : 1.48, rF: 0.33, rR: 0.33, wF: y >= 2017 ? 0.305 : 0.25, wR: y >= 2017 ? 0.405 : 0.33, len: 5.4, highNose: false, airbox: true, wideWing: true, aero: true, halo: y >= 2018, fin: y >= 2017 && y <= 2018 };
+    return { kind: "modern", wb: 3.6, track: 1.62, rF: 0.36, rR: 0.36, wF: 0.3, wR: 0.405, len: 5.6, highNose: false, airbox: true, wideWing: true, halo: true, ground: true, lowProfile: true };
+  }
+
+  function wheels(e, parts) {
+    const h = e.wb / 2;
+    for (const [x, y, r, w] of [[h, e.track / 2, e.rF, e.wF], [h, -e.track / 2, e.rF, e.wF], [-h, e.track / 2, e.rR, e.wR], [-h, -e.track / 2, e.rR, e.wR]]) {
+      const out = Math.sign(y);
       parts.push(disc([x, y, r], r, w, COL.tyre));
-      parts.push(disc([x, y + Math.sign(y) * 0.006, r], r * 0.62, w + 0.01, COL.rim));
+      // Sidewall bulge, then the rim: wire wheels on the old cars, big
+      // low-profile rims (and covers) on today's.
+      parts.push(disc([x, y, r], r * 0.97, w + 0.012, COL.tyre));
+      const rim = e.lowProfile ? 0.74 : e.kind === "cigar" ? 0.7 : 0.6;
+      parts.push(disc([x, y + out * 0.008, r], r * rim, w + 0.02, e.kind === "cigar" ? COL.wire : e.lowProfile ? COL.carbon : COL.rim));
+      parts.push(disc([x, y + out * 0.012, r], r * 0.16, w + 0.03, COL.metal));
     }
-    if (shape === "classic") {
-      parts.push(blob([0.05, 0, 0.47], [h + 0.62, 0.37, 0.32], COL.body));
-      parts.push(blob([h + 0.6, 0, 0.45], [0.08, 0.2, 0.17], COL.carbon));          // grille
-      parts.push(box([0.1, 0, 0.78], [0.04, 0.34, 0.14], COL.glass));             // screen
-      parts.push(blob([-0.22, 0, 0.86], [0.14, 0.13, 0.14], COL.accent));          // helmet
-      parts.push(box([-h + 0.1, 0, 0.62], [0.9, 0.08, 0.06], COL.accent));       // stripe
-    } else {
-      const w = s.track;
-      parts.push(box([-0.1, 0, 0.1], [s.wb + 0.5, w * 0.72, 0.05], COL.carbon));     // floor
-      parts.push(box([0.15 * s.wb, 0, 0.38], [s.wb * 0.7, 0.55, 0.42], COL.body));   // tub
-      parts.push(box([h + 0.35, 0, 0.3], [1.0, 0.3, 0.2], COL.body));               // nose
-      parts.push(box([-0.12 * s.wb, 0, 0.33], [s.wb * 0.42, w * 0.82, 0.36], COL.body)); // sidepods
-      parts.push(box([-0.33 * s.wb, 0, 0.58], [s.wb * 0.42, 0.42, 0.34], COL.body)); // engine cover
-      parts.push(box([-0.1 * s.wb, 0, 0.84], [0.32, 0.28, 0.28], COL.accent));      // airbox
-      parts.push(blob([0.04 * s.wb, 0, 0.76], [0.15, 0.13, 0.14], COL.accent));     // helmet
-      const fw = w + 0.25;
-      parts.push(box([h + 0.7, 0, 0.1], [0.42, fw, 0.04], COL.accent));             // front wing
-      parts.push(box([h + 0.7, fw / 2, 0.16], [0.48, 0.03, 0.17], COL.carbon));
-      parts.push(box([h + 0.7, -fw / 2, 0.16], [0.48, 0.03, 0.17], COL.carbon));
-      const rx = -h - 0.42;
-      parts.push(box([rx, 0, 0.94], [0.34, 1.0, 0.05], COL.accent));               // rear wing
-      parts.push(box([rx + 0.06, 0, 0.8], [0.26, 1.0, 0.04], COL.carbon));
-      parts.push(box([rx, 0.5, 0.78], [0.55, 0.03, 0.46], COL.carbon));
-      parts.push(box([rx, -0.5, 0.78], [0.55, 0.03, 0.46], COL.carbon));
-      parts.push(box([rx + 0.15, 0, 0.55], [0.12, 0.06, 0.42], COL.carbon));
+  }
+  // Wishbones from the body to each wheel.
+  function arms(e, parts, bodyHalf, color) {
+    const h = e.wb / 2;
+    for (const [x, r] of [[h, e.rF], [-h, e.rR]]) for (const sy of [1, -1]) {
+      const wy = sy * (e.track / 2 - 0.12);
+      parts.push(rod([x + 0.18, sy * bodyHalf, r + 0.05], [x, wy, r + 0.06], 0.018, color));
+      parts.push(rod([x - 0.18, sy * bodyHalf, r + 0.05], [x, wy, r + 0.06], 0.018, color));
+      parts.push(rod([x + 0.15, sy * bodyHalf, r - 0.1], [x, wy, r - 0.1], 0.018, color));
+      parts.push(rod([x - 0.15, sy * bodyHalf, r - 0.1], [x, wy, r - 0.1], 0.018, color));
     }
+  }
+
+  function carParts(lap) {
+    const e = eraOf(lap.year), L = liveryOf(lap), h = e.wb / 2, parts = [];
+    wheels(e, parts);
+    if (e.kind === "cigar") {
+      // 1950s – 60s: a slim cigar, open wheels on wire spokes.
+      parts.push(blob([0.05, 0, 0.42], [h + 0.62, 0.34, 0.27], L.body));
+      parts.push(blob([h + 0.62, 0, 0.4], [0.07, 0.17, 0.14], COL.carbon));                 // radiator grille
+      if (L.band) parts.push(blob([h + 0.4, 0, 0.42], [0.16, 0.2, 0.17], L.nose));           // nose band
+      if (L.stripes) for (const sy of [0.07, -0.07]) parts.push(box([0.35, sy, 0.69], [2.1, 0.05, 0.012], L.accent));
+      parts.push(box([0.15, 0, 0.72], [0.04, 0.36, 0.13], COL.glass));                       // screen
+      parts.push(blob([-0.2, 0, 0.82], [0.13, 0.12, 0.13], L.helmet));                      // helmet
+      parts.push(rod([-0.42, 0.16, 0.6], [-0.42, 0.16, 0.92], 0.02, COL.metal));             // roll hoop
+      parts.push(rod([-0.42, -0.16, 0.6], [-0.42, -0.16, 0.92], 0.02, COL.metal));
+      parts.push(rod([-0.42, 0.16, 0.92], [-0.42, -0.16, 0.92], 0.02, COL.metal));
+      for (const sy of [0.12, -0.12]) parts.push(rod([-0.5, sy, 0.32], [-h - 0.55, sy * 1.4, 0.36], 0.03, COL.metal, 0.036)); // exhausts
+      arms(e, parts, 0.25, COL.metal);
+      return parts;
+    }
+    if (e.kind === "wedge") {
+      // 1968 – 77: wedge nose, side radiators, wings on tall struts.
+      parts.push(box([0.05, 0, 0.36], [e.wb * 0.85, 0.56, 0.34], L.body));                   // tub
+      parts.push(cone(0.45 * e.wb, h + 0.72, 0.4, 0.2, 0.25, 0.06, L.body, 1.6, 0.7));        // wedge nose
+      if (L.band) parts.push(cone(h + 0.3, h + 0.5, 0.29, 0.25, 0.17, 0.14, L.nose, 1.6, 0.75));
+      for (const sy of [1, -1]) parts.push(box([-0.15, sy * 0.44, 0.3], [1.3, 0.34, 0.3], L.body)); // radiator pods
+      parts.push(blob([-0.55, 0, 0.5], [0.75, 0.26, 0.2], L.body));                         // engine cover
+      parts.push(box([-h - 0.1, 0, 0.32], [0.55, 0.5, 0.3], COL.metal));                    // gearbox / engine
+      if (L.stripes || L.pin) for (const sy of L.pin ? [0.2, -0.2] : [0.06, -0.06]) parts.push(box([0.3, sy, 0.54], [2.0, L.pin ? 0.02 : 0.05, 0.012], L.pin ? L.gold : L.accent));
+      if (L.gold && !L.pin) parts.push(box([0.3, 0, 0.545], [2.0, 0.025, 0.014], L.gold));
+      parts.push(box([0.42, 0, 0.62], [0.05, 0.42, 0.12], COL.glass));
+      parts.push(blob([0.12, 0, 0.72], [0.14, 0.13, 0.14], L.helmet));
+      if (e.airbox) parts.push(blob([-0.2, 0, 0.9], [0.32, 0.17, 0.16], L.body, pitch(-6)));
+      parts.push(box([h + 0.7, 0, 0.2], [0.32, 1.25, 0.025], L.wing));                       // nose fins
+      if (e.rearWing) {
+        parts.push(box([-h - 0.55, 0, 1.0], [0.42, 1.0, 0.035], L.wing));
+        for (const sy of [0.5, -0.5]) parts.push(box([-h - 0.55, sy, 0.95], [0.45, 0.02, 0.2], L.accent));
+        for (const sy of [0.2, -0.2]) parts.push(rod([-h - 0.45, sy, 0.45], [-h - 0.55, sy, 0.98], 0.02, COL.carbon));
+      }
+      arms(e, parts, 0.28, COL.carbon);
+      return parts;
+    }
+    // 1978 onwards: monocoque, sidepods, front and rear wings.
+    const highZ = e.highNose ? 0.5 : e.noseZ || 0.32, tub = 0.6;
+    parts.push(box([-0.1 * e.wb, 0, 0.09], [e.wb + 0.55, e.track * 0.74, 0.04], COL.carbon)); // floor
+    parts.push(box([0.17 * e.wb, 0, 0.37], [e.wb * 0.62, tub, 0.4], L.body));               // tub
+    parts.push(box([0.17 * e.wb, 0, 0.58], [e.wb * 0.6, tub * 0.75, 0.04], L.top));          // tub top deck
+    parts.push(cone(0.45 * e.wb, h + 0.78, highZ + 0.05, e.highNose ? 0.33 : 0.18, 0.27, 0.07, L.body, 1.15, 0.85));
+    parts.push(cone(h + 0.45, h + 0.8, e.highNose ? 0.37 : 0.2, e.highNose ? 0.33 : 0.18, 0.11, 0.06, L.nose, 1.15, 0.85)); // nose tip
+    if (e.highNose) for (const sy of [0.12, -0.12]) parts.push(box([h + 0.6, sy, 0.22], [0.25, 0.03, 0.2], COL.carbon)); // wing pylons
+    // Sidepods: long and flat in the turbo years, rounder later.
+    const podY = tub / 2 + (e.kind === "turbo" ? 0.3 : 0.22), podL = e.kind === "turbo" ? 1.9 : 1.55;
+    for (const sy of [1, -1]) {
+      parts.push(box([-0.12 * e.wb, sy * podY, 0.26], [podL * 0.8, e.kind === "turbo" ? 0.56 : 0.4, e.ground ? 0.3 : 0.26], L.body));
+      parts.push(blob([-0.12 * e.wb + podL * 0.4, sy * podY, 0.26], [0.2, e.kind === "turbo" ? 0.28 : 0.2, e.ground ? 0.15 : 0.13], L.body)); // rounded intake
+      parts.push(box([-0.12 * e.wb, sy * (podY + 0.01), 0.17], [podL * 0.8 + 0.01, e.kind === "turbo" ? 0.56 : 0.4, 0.1], L.lower));
+      parts.push(box([0.17 * e.wb, sy * (tub / 2 + 0.22), 0.6], [0.08, 0.1, 0.05], L.body)); // mirror
+      parts.push(rod([0.17 * e.wb, sy * (tub / 2), 0.55], [0.17 * e.wb, sy * (tub / 2 + 0.2), 0.6], 0.012, COL.carbon));
+      if (e.aero) parts.push(box([0.2 * e.wb, sy * (tub / 2 + 0.15), 0.3], [0.5, 0.02, 0.3], COL.carbon)); // bargeboards
+    }
+    // Cockpit, helmet, engine cover and airbox.
+    parts.push(blob([-0.02 * e.wb, 0, 0.68], [0.14, 0.13, 0.14], L.helmet));
+    parts.push(box([-0.02 * e.wb + 0.05, 0, 0.6], [0.5, 0.36, 0.06], COL.carbon));            // cockpit rim
+    parts.push(blob([-0.32 * e.wb, 0, 0.45], [0.95, 0.25, e.airbox ? 0.27 : 0.22], L.body));
+    if (e.airbox) parts.push(blob([-0.13 * e.wb, 0, 0.74], [0.3, 0.12, 0.13], L.top));
+    if (e.airbox) parts.push(box([-0.13 * e.wb + 0.12, 0, 0.77], [0.05, 0.11, 0.08], COL.carbon)); // intake
+    if (e.fin) parts.push(box([-0.42 * e.wb, 0, 0.78], [1.0, 0.02, 0.22], L.body));
+    // Stripes along the top.
+    if (L.pin) for (const sy of [0.2, -0.2]) parts.push(box([0.17 * e.wb, sy, 0.605], [e.wb * 0.6, 0.015, 0.008], L.gold));
+    parts.push(box([0.3 * e.wb, 0, 0.606], [e.wb * 0.45, 0.06, 0.006], L.accent));
+    // Front wing: narrow on older cars, the full width since 2009.
+    const fw = e.wideWing ? e.track + e.wF * 0.6 : e.track - 0.15;
+    parts.push(box([h + 0.68, 0, 0.1], [0.5, fw, 0.03], L.wing));
+    parts.push(box([h + 0.58, 0, 0.17], [0.22, fw * (e.ground ? 0.92 : 0.95), 0.025], L.wing, pitch(-14)));
+    if (e.wideWing || e.aero) parts.push(box([h + 0.52, 0, 0.23], [0.15, fw * 0.9, 0.02], L.accent, pitch(-22)));
+    for (const sy of [fw / 2, -fw / 2]) parts.push(box([h + 0.65, sy, 0.16], [0.55, 0.02, 0.17], L.accent));
+    // Rear wing with endplates, a beam wing below, and the diffuser.
+    const rx = -h - 0.42, rwW = e.kind === "turbo" ? 1.05 : e.wideWing ? 0.95 : 1.0;
+    const rwZ = e.kind === "turbo" ? 0.9 : e.wideWing && !e.ground ? 0.92 : 0.86;
+    parts.push(box([rx, 0, rwZ], [0.34, rwW, 0.045], L.wing, pitch(-8)));
+    parts.push(box([rx - 0.12, 0, rwZ + 0.12], [0.2, rwW, 0.03], L.wing, pitch(-26)));
+    for (const sy of [rwW / 2, -rwW / 2]) parts.push(box([rx - 0.03, sy, rwZ - 0.14], [0.62, 0.025, e.ground ? 0.42 : 0.55], L.accent));
+    parts.push(box([rx + 0.18, 0, 0.42], [0.14, 0.06, rwZ - 0.4], COL.carbon));             // wing pillar
+    parts.push(box([rx + 0.05, 0, 0.35], [0.2, rwW * 0.7, 0.025], COL.carbon));             // beam wing
+    parts.push(box([-h - 0.05, 0, 0.16], [0.6, e.track * 0.62, 0.12], COL.carbon, pitch(10))); // diffuser
+    parts.push(box([-h - 0.2, 0, 0.3], [0.4, 0.4, 0.22], COL.carbon));                      // gearbox
+    if (e.halo) {
+      const hx = 0.17 * e.wb + 0.3, top = 0.88, back = -0.02 * e.wb - 0.12;
+      parts.push(rod([hx + 0.06, 0, 0.62], [hx - 0.04, 0, top], 0.025, COL.carbon));
+      for (const sy of [1, -1]) {
+        parts.push(rod([hx - 0.04, 0, top], [hx - 0.28, sy * 0.25, top - 0.02], 0.023, COL.carbon));
+        parts.push(rod([hx - 0.28, sy * 0.25, top - 0.02], [back, sy * 0.26, top - 0.06], 0.023, COL.carbon));
+        parts.push(rod([back, sy * 0.26, top - 0.06], [back - 0.05, sy * 0.27, 0.6], 0.023, COL.carbon));
+      }
+    }
+    arms(e, parts, tub / 2, COL.carbon);
     return parts;
   }
   const cars = {};
-  function makeCar(shape) {
-    if (cars[shape]) return cars[shape];
-    const s = SHAPES[shape];
+  function makeCar(lap) {
+    if (cars[lap.id]) return cars[lap.id];
+    const e = eraOf(lap.year);
     const body = scene.primitives.add(new Cesium.Primitive({
-      geometryInstances: carParts(shape),
+      geometryInstances: carParts(lap),
       appearance: new Cesium.PerInstanceColorAppearance({ flat: false, translucent: false }),
       asynchronous: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
     }));
     // A soft dark patch under the car, so it sits on the road.
     const shadow = scene.primitives.add(new Cesium.Primitive({
-      geometryInstances: blob([-0.1, 0, 0.02], [s.len / 2 + 0.2, s.track / 2 + 0.35, 0.012], Cesium.Color.BLACK.withAlpha(0.42)),
+      geometryInstances: blob([-0.1, 0, 0.02], [e.len / 2 + 0.2, e.track / 2 + 0.35, 0.012], Cesium.Color.BLACK.withAlpha(0.42)),
       appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: true }),
       asynchronous: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
     }));
-    return (cars[shape] = { body, shadow, len: s.len });
+    return (cars[lap.id] = { body, shadow, len: e.len });
   }
   let car = null;
   const showCar = (on) => { for (const c of Object.values(cars)) { c.body.show = on && c === car; c.shadow.show = on && c === car; } };
@@ -821,7 +972,7 @@
     looked = false;
     ctrl.enableInputs = false;
     zOffOk = false; zOff = 0;
-    car = makeCar(shapeOf(lap.year));
+    car = makeCar(lap);
     showCar(view !== "onboard");
     setFov();
     hud.show(handlers);
@@ -941,7 +1092,7 @@
   M.tours.register({ id: "legends", label: "Legendary laps", start, stop });
   // For checks from the browser console.
   M.legends = {
-    LAPS, choose, seek, bake, racingLine: RACE_OFF, setSky,
+    LAPS, choose, seek, bake, racingLine: RACE_OFF, setSky, makeCar,
     skyNight: (v, moon) => {
       const u = skyDome.appearance.material.uniforms;
       u.night = v;
