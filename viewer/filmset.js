@@ -22,6 +22,9 @@
     lightingModel: Cesium.LightingModel.PBR,
     uniforms: {
       u_time: { type: Cesium.UniformType.FLOAT, value: 0 },
+      // 0 day, 1 night: lit windows, street lamps and their pools of light.
+      u_night: { type: Cesium.UniformType.FLOAT, value: 0 },
+      u_lights: { type: Cesium.UniformType.SAMPLER_2D, value: new Cesium.TextureUniform({ url: `${URL_BASE}-night.jpg` }) },
     },
     fragmentShaderText: `
       float hash12(vec2 p) {
@@ -47,6 +50,10 @@
         float kind = floor(a255 / 16.0);
         if (kind < 0.5) {               // ground: the painted map
           material.roughness = 0.95;
+          if (u_night > 0.0) {
+            float L = texture(u_lights, fsInput.attributes.texCoord_0).r;
+            material.emissive = material.diffuse * vec3(1.0, 0.78, 0.5) * L * 2.4 * u_night;
+          }
           return;
         }
         vec3 base = czm_srgbToLinear(c.rgb);
@@ -268,6 +275,14 @@
           // Soft darkening at the foot of walls (ambient occlusion).
           col *= mix(0.72, 1.0, smoothstep(0.0, 1.2, uv.y));
           material.diffuse = col;
+          if (u_night > 0.0 && uv.y > 0.0) {
+            // Night: about half the flats lit, warm; a few cool TV-blue
+            // ones; every shop on the ground floor.
+            float lit = gnd ? 1.0 : step(hash12(cell * 1.31 + vr * 7.7), style > 5.5 && style < 6.5 ? 0.3 : 0.48);
+            vec3 wc = mix(vec3(1.0, 0.72, 0.4), vec3(0.62, 0.78, 1.0), step(0.88, hash12(cell + 3.1)));
+            wc *= 0.7 + 0.5 * hash12(cell * 2.7 + 1.3);
+            material.emissive = wc * u_night * mix(0.16, shine * lit * 1.1, detail);
+          }
         } else if (kind < 3.5) {        // flat roofs
           material.diffuse = base * (0.95 + 0.08 * hash12(floor(fsInput.attributes.positionMC.xz * 0.5)));
         } else if (kind < 4.5) {        // tiled roofs: rows of tiles
@@ -299,7 +314,7 @@
           vec3 nMC = normalize(vec3(0.12 * g.x * near, 1.0, 0.12 * g.y * near));
           material.normalEC = normalize(czm_normal * nMC);
           float far = clamp(length(fsInput.attributes.positionEC) / 3000.0, 0.0, 1.0);
-          material.diffuse = mix(base, base * vec3(0.8, 0.95, 1.05), far) * 0.55;
+          material.diffuse = mix(base, base * vec3(0.8, 0.95, 1.05), far) * 0.55 * mix(1.0, 0.4, u_night);
           material.roughness = 0.08;
           material.specular = vec3(0.04);
         } else {
@@ -309,6 +324,10 @@
             material.diffuse = base * 0.08;
             material.emissive = st > 1.5 ? vec3(1.0, 0.92, 0.72) : base * 0.55;
             material.roughness = st > 1.5 ? 1.0 : 0.6;
+          } else if (st > 2.5 && st < 3.5) {
+            // Street lamp head: lights up at night.
+            material.diffuse = base * mix(0.8, 0.2, u_night);
+            material.emissive = vec3(1.0, 0.88, 0.62) * 1.6 * u_night;
           } else {
             material.diffuse = base;
           }
@@ -319,23 +338,40 @@
 
   let model = null, tube = null, loading = null, active = false, meta = null;
 
-  // Film grade: a touch more colour, warm highlights, cool shadows and a soft
-  // vignette, in one cheap full-screen pass.
+  // Game grade, in one full-screen pass: richer colour, an S-curve for
+  // punchy contrast, golden highlights over teal shadows, warm haze that
+  // grows with distance (from the depth buffer), and a soft vignette. At
+  // night the haze turns blue and the shadows cool.
+  let night = 0;
   const grade = scene.postProcessStages.add(new Cesium.PostProcessStage({
     fragmentShader: `
       uniform sampler2D colorTexture;
+      uniform sampler2D depthTexture;
+      uniform float u_night;
       in vec2 v_textureCoordinates;
       void main() {
         vec4 c = texture(colorTexture, v_textureCoordinates);
         vec3 col = c.rgb;
+        float depth = czm_readDepth(depthTexture, v_textureCoordinates);
+        if (depth < 1.0) {
+          vec4 eye = czm_windowToEyeCoordinates(gl_FragCoord.xy, depth);
+          float dist = length(eye.xyz);
+          float haze = 1.0 - exp(-max(dist - 120.0, 0.0) / 1800.0);
+          vec3 hz = mix(vec3(0.96, 0.84, 0.66), vec3(0.07, 0.09, 0.16), u_night);
+          col = mix(col, hz, haze * mix(0.42, 0.55, u_night));
+        }
         float l = dot(col, vec3(0.299, 0.587, 0.114));
-        col = mix(vec3(l), col, 1.14);
-        col *= mix(vec3(0.97, 0.99, 1.04), vec3(1.04, 1.0, 0.94), smoothstep(0.15, 0.8, l));
-        col = col * 1.03 + 0.012;
+        col = mix(vec3(l), col, mix(1.24, 1.1, u_night));
+        col = mix(col, col * col * (3.0 - 2.0 * col), 0.35);           // S-curve
+        vec3 lo = mix(vec3(0.93, 1.0, 1.04), vec3(0.85, 0.93, 1.12), u_night);
+        vec3 hi = mix(vec3(1.07, 1.0, 0.88), vec3(1.06, 0.98, 0.9), u_night);
+        col *= mix(lo, hi, smoothstep(0.1, 0.75, l));
+        col = col * 1.03 + 0.01;
         vec2 d = v_textureCoordinates - 0.5;
-        col *= 1.0 - dot(d, d) * 0.45;
+        col *= 1.0 - dot(d, d) * mix(0.5, 0.75, u_night);
         out_FragColor = vec4(clamp(col, 0.0, 1.0), c.a);
       }`,
+    uniforms: { u_night: () => night },
   }));
   grade.enabled = false;
   let clip = null;
@@ -469,10 +505,18 @@
       if (tube) tube.show = true;
       if (clip) clip.enabled = true;
       watchFps();
+      if (night > 0.5) applyNight(); else setBloom();
     } else {
       if (model) model.show = false;
       if (tube) tube.show = false;
       if (clip) clip.enabled = false;
+      bloom.enabled = false;
+      if (nightSaved) {
+        const layers = viewer.imageryLayers;
+        nightSaved.bright.forEach((b, i) => { if (i < layers.length) layers.get(i).brightness = b; });
+        nightSaved = null;
+      }
+      if (M.legends && M.legends.skyNight) M.legends.skyNight(0);
       if (saved.time) {
         viewer.clock.currentTime = saved.time;
         scene.light = saved.light;
@@ -502,8 +546,80 @@
     if (b !== btn) b.addEventListener("click", () => setFilm(false), true);
   });
 
-  M.filmset = { setFilm, isOn: () => active, getModel: () => model };
+  // ---- Night ----------------------------------------------------------
+  // Late evening in June: the sun is down, a cool moon lights the set,
+  // windows, shops and street lamps glow, and bloom makes the lights bleed.
+  const bloom = scene.postProcessStages.bloom;
+  function moonDir() {             // towards the moon, world axes
+    const az = Cesium.Math.toRadians(150), el = Cesium.Math.toRadians(24);
+    const toMoon = new Cesium.Cartesian3(Math.cos(el) * Math.sin(az), Math.cos(el) * Math.cos(az), Math.sin(el));
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(Cesium.Cartesian3.fromDegrees(7.428, 43.7395));
+    const d = Cesium.Matrix4.multiplyByPointAsVector(enu, toMoon, new Cesium.Cartesian3());
+    return Cesium.Cartesian3.normalize(d, d);
+  }
+  function moonLight() {
+    const dir = Cesium.Cartesian3.negate(moonDir(), new Cesium.Cartesian3());
+    return new Cesium.DirectionalLight({ direction: dir, color: new Cesium.Color(0.6, 0.7, 1.0), intensity: 0.65 });
+  }
+  const dayLight = () => new Cesium.SunLight({ color: new Cesium.Color(1.0, 0.93, 0.82), intensity: 2.6 });
+  let nightSaved = null;
+  function setBloom() {
+    bloom.enabled = active && (night > 0.5 || !MOBILE);
+    const u = bloom.uniforms;
+    u.contrast = night > 0.5 ? 160 : 128;
+    u.brightness = night > 0.5 ? -0.42 : -0.3;
+    u.glowOnly = false;
+    u.delta = 1.0;
+    u.sigma = night > 0.5 ? 3.2 : 2.2;
+    u.stepSize = 1.0;
+  }
+  function setNight(on) {
+    night = on ? 1 : 0;
+    shader.setUniform("u_night", night);
+    document.body.classList.toggle("night", on);
+    nightBtn.classList.toggle("on", on);
+    if (!active) return;
+    applyNight();
+  }
+  function applyNight() {
+    const on = night > 0.5;
+    if (on) {
+      if (!nightSaved) {
+        const layers = viewer.imageryLayers;
+        nightSaved = { bright: [] };
+        for (let i = 0; i < layers.length; i++) { nightSaved.bright.push(layers.get(i).brightness); layers.get(i).brightness = 0.22; }
+      }
+      viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T21:40:00Z");
+      scene.light = moonLight();
+      viewer.shadows = false;
+      for (const m of [model, tube]) if (m && m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(0.25, 0.25);
+    } else {
+      if (nightSaved) {
+        const layers = viewer.imageryLayers;
+        nightSaved.bright.forEach((b, i) => { if (i < layers.length) layers.get(i).brightness = b; });
+        nightSaved = null;
+      }
+      viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T06:15:00Z");
+      scene.light = dayLight();
+      viewer.shadows = true;
+      for (const m of [model, tube]) if (m && m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(1, 1);
+    }
+    if (M.legends && M.legends.skyNight) M.legends.skyNight(night, moonDir());
+    setBloom();
+  }
+  // "Night" sits under the view buttons while the film set is on.
+  const nightRow = document.createElement("div");
+  nightRow.className = "row film-only";
+  const nightBtn = document.createElement("button");
+  nightBtn.textContent = "☾ Night";
+  nightBtn.title = "Switch the film set between day and night";
+  nightRow.appendChild(nightBtn);
+  row.parentElement.insertBefore(nightRow, row.nextSibling);
+  nightBtn.onclick = () => setNight(!(night > 0.5));
 
+  M.filmset = { setFilm, isOn: () => active, getModel: () => model, setNight, isNight: () => night > 0.5 };
+
+  if (new URLSearchParams(location.search).get("night") === "1") setNight(true);
   if (new URLSearchParams(location.search).get("mode") === "film") {
     setFilm(true).then(() => {
       if (!new URLSearchParams(location.search).get("place")) {

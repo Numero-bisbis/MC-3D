@@ -250,3 +250,9 @@ body.lap-playing .loading { display: none !important; }
   .drive-speed { top: calc(max(14px, env(safe-area-inset-top)) + 56px); bottom: auto; font-size: 36px; }
   .drive-place { top: calc(max(14px, env(safe-area-inset-top)) + 140px); bottom: auto; font-size: 24px; }
 }
+
+/* Film set extras (Night) only show while the film set is on. */
+.film-only { display: none !important; }
+body.filmset .film-only { display: flex !important; margin-top: 6px; }
+.drive-night { right: calc(max(14px, env(safe-area-inset-right)) + 108px) !important; }
+body.night .drive-night { background: rgba(240, 200, 90, .85); color: #111; }

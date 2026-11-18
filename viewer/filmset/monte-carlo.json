@@ -29,7 +29,7 @@
    43.745304
   ]
  ],
- "triangles": 823746,
+ "triangles": 832328,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -75,6 +75,7 @@
   57,
   129
  ],
+ "lamps": 613,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
