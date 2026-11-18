@@ -279,6 +279,64 @@
   let car = null;
   const showCar = (on) => { for (const c of Object.values(cars)) { c.body.show = on && c === car; c.shadow.show = on && c === car; } };
 
+  // ---- Sky: one steady summer sky -------------------------------------------
+  // Down at street level Cesium's sky turned black or changed colour: its
+  // atmosphere is worked out for a view from above, goes dark below the
+  // horizon (normally hidden by the globe, which the photoreal view turns
+  // off) and shifts tint with height and the angle to the sun, so every
+  // bump, turn or missing far tile showed. During the laps it is replaced by
+  // a dome 30 km wide that travels with the camera: deep blue overhead, pale
+  // at the horizon, sea blue below it, and a soft glow around the sun.
+  const SKY_R = 30000;
+  const skyDome = new Cesium.Primitive({
+    geometryInstances: new Cesium.GeometryInstance({
+      geometry: new Cesium.EllipsoidGeometry({
+        radii: new Cesium.Cartesian3(SKY_R, SKY_R, SKY_R), stackPartitions: 32, slicePartitions: 48,
+        vertexFormat: Cesium.MaterialAppearance.MaterialSupport.BASIC.vertexFormat,
+      }),
+    }),
+    appearance: new Cesium.MaterialAppearance({
+      materialSupport: Cesium.MaterialAppearance.MaterialSupport.BASIC,
+      flat: true, faceForward: true, closed: false, translucent: false,
+      material: new Cesium.Material({
+        translucent: false,
+        fabric: {
+          source: `
+            czm_material czm_getMaterial(czm_materialInput materialInput) {
+              czm_material m = czm_getDefaultMaterial(materialInput);
+              vec3 dir = normalize(-materialInput.positionToEyeEC);
+              vec3 up = normalize(czm_viewRotation * normalize(czm_viewerPositionWC));
+              float e = dot(dir, up);
+              vec3 zenith = vec3(0.24, 0.47, 0.80), horizon = vec3(0.80, 0.88, 0.95), sea = vec3(0.12, 0.31, 0.47);
+              vec3 col = e >= 0.0
+                ? mix(horizon, zenith, pow(smoothstep(0.0, 0.5, e), 0.5))
+                : mix(horizon * 0.9, sea, smoothstep(0.0, 0.06, -e));
+              float s = max(dot(dir, normalize(czm_sunDirectionEC)), 0.0);
+              col += vec3(1.0, 0.95, 0.85) * (0.55 * pow(s, 900.0) + 0.12 * pow(s, 12.0));
+              m.diffuse = vec3(0.0);
+              m.emission = col;
+              return m;
+            }`,
+        },
+      }),
+    }),
+    asynchronous: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
+  });
+  scene.primitives.add(skyDome);
+  let oldSky = null;
+  function setSky(on) {
+    if (on && !oldSky) {
+      oldSky = true;
+      skyDome.show = true;
+    } else if (!on && oldSky) {
+      skyDome.show = false;
+      oldSky = null;
+    }
+  }
+  scene.preRender.addEventListener(() => {
+    if (skyDome.show) skyDome.modelMatrix = Cesium.Matrix4.fromTranslation(cam.positionWC, skyDome.modelMatrix);
+  });
+
   // ---- Tunnel: darken everything but what is close, like headlights --------
   const dark = new Cesium.PostProcessStage({
     name: "mc3d_legend_tunnel",
@@ -646,6 +704,7 @@
 
   function start() {
     state = "pick";
+    setSky(new URLSearchParams(location.search).get("sky") !== "cesium");
     if (M.setTourQuality) M.setTourQuality(true);
     if (M.cleanTrack) M.cleanTrack.show(true);
     lap = null;
@@ -787,6 +846,7 @@
     flying = false;
     showCar(false);
     tunnelDark = 0; dark.enabled = false;
+    setSky(false);
     timer.hidden = true;
     ui.tunnel.classList.remove("lamps");
     for (const e of [ui.map, ui.tunnel, ui.lights]) e.hidden = true;
