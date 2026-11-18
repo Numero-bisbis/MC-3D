@@ -54,11 +54,11 @@ scene (`viewer/streetview.js`). The Google key needs **Maps Embed API**
 enabled in its project and ticked in its API restrictions.
 
 **Drive** (`?tour=drive`, or "Drive" in Tours) puts you in a car on the film
-set, open-world style: arrow keys or WASD, Space for the handbrake, C for the
-camera, Esc to leave; on a phone, steering bottom left and pedals bottom
-right. The car follows the set's ground, goes through the Grand Prix tunnel
-and stops against buildings and the sea, from a 1 m drive map the film set
-build writes (`viewer/filmset/monte-carlo-drive.png`). A turning minimap with
+set, on the Grand Prix circuit: arrow keys or WASD, Space for the handbrake,
+C for the camera, Esc to leave; on a phone, steering bottom left and pedals
+bottom right. The car stays between the circuit's barriers, rides the modelled
+track through the tunnel, and skips ahead past Port Hercule, which lies outside
+the film set. A turning minimap with
 the circuit, a speedometer and the names of the places you pass make up the
 HUD (`viewer/drive.js`).
 

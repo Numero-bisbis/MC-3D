@@ -1,12 +1,12 @@
-// Drive: take a car round the film set yourself, open-world style.
+// Drive: take a car round the Grand Prix circuit on the film set yourself.
 //
 // Arrow keys or WASD to drive, Space for the handbrake, C to change the
 // camera, Esc to leave. On a phone: the pedals on the right, steering on
-// the left. The car follows the ground the set is built on and stops
-// against buildings and the sea, using the drive map written by
-// pipeline/build_filmset.py (viewer/filmset/monte-carlo-drive.png: height
-// and what blocks a car, 1 m grid). Open it with "Drive" in Tours, or
-// ?tour=drive.
+// the left. The car stays on the circuit between its barriers. The drive
+// map written by pipeline/build_filmset.py (viewer/filmset/
+// monte-carlo-drive.png: ground height and what blocks, 1 m grid) keeps the
+// camera out of buildings and draws the minimap. Open it with "Drive" in
+// Tours, or ?tour=drive.
 /* global Cesium */
 (function () {
   const M = window.MC3D;
@@ -240,28 +240,84 @@
     g.fill(); g.stroke();
   }
 
+  function say(text) {
+    place.textContent = text;
+    place.classList.remove("in"); void place.offsetWidth; place.classList.add("in");
+    clearTimeout(placeTimer);
+    placeTimer = setTimeout(() => place.classList.remove("in"), 3500);
+  }
+
   // ---- Driving --------------------------------------------------------------
   const S = { e: 0, n: 0, z: 0, yaw: 0, v: 0, pitch: 0, roll: 0, steer: 0 };
   const VIEWS = [{ back: 8.5, up: 3.2, look: 1.4 }, { back: 15, up: 6.5, look: 1.0 }, { back: -0.2, up: 1.15, look: 1.1 }];
   let view = 0, on = false, last = 0, camYaw = 0, lastPlace = "", placeTimer = 0, oldMinZoom = null, remove = null;
   const MAXV = 50, MAXR = -9;
 
+  // ---- The circuit ---------------------------------------------------------
+  // Driving stays on the Grand Prix circuit: the tours' modelled track
+  // (clean-track.js: asphalt, kerbs, barriers) is shown, the car rides on
+  // its surface and bumps off the barriers. The part of the lap that runs
+  // outside the film set (Port Hercule to Anthony-Noghès) is skipped.
+  const K = M.lapKit;
+  const HALF = 5.2;                            // m from the centre line to the barrier face
+  let TR = null, ri = 0, gapA = 0, gapB = 0;
+  function buildTrack() {
+    const N = K.N, CX = K.smooth(K.X, 2), CY = K.smooth(K.Y, 2), CZ = K.smooth(K.ZG, 3);
+    const e = new Float64Array(N), n = new Float64Array(N), z = new Float64Array(N), out = new Uint8Array(N);
+    const w = new Cesium.Cartesian3(), l = new Cesium.Cartesian3();
+    for (let i = 0; i < N; i++) {
+      Cesium.Matrix4.multiplyByPoint(K.toWorld, Cesium.Cartesian3.fromElements(CX[i], CY[i], CZ[i] + (M.cleanTrack ? M.cleanTrack.lift : 0.1), w), w);
+      Cesium.Matrix4.multiplyByPoint(inv, w, l);
+      e[i] = l.x; n[i] = l.y; z[i] = l.z;
+      const [c, r] = toGrid(l.x, l.y);
+      out[i] = c < 8 || r < 8 || c > map.n - 8 || r > map.n - 8 ? 1 : 0;
+    }
+    // The longest run outside the set: leave it at gapA, come back at gapB.
+    let best = 0;
+    for (let i = 0; i < N; i++) {
+      if (!out[i] || out[(i - 1 + N) % N]) continue;
+      let j = i;
+      while (out[(j + 1) % N] && j - i < N) j++;
+      if (j - i > best) { best = j - i; gapA = (i - 4 + N) % N; gapB = (j + 5) % N; }
+    }
+    TR = { e, n, z, out, N };
+  }
+  const wrapI = (i) => ((i % TR.N) + TR.N) % TR.N;
+  // Nearest point on the centre line near index i0: index, lateral offset
+  // (+ left), height, and the heading of the line there.
+  function onTrack(pe, pn, i0, span) {
+    let bi = i0, bd = 1e18;
+    for (let k = -span; k <= span; k++) {
+      const i = wrapI(i0 + k), d = (TR.e[i] - pe) ** 2 + (TR.n[i] - pn) ** 2;
+      if (d < bd) { bd = d; bi = i; }
+    }
+    const j = wrapI(bi + 1), h = wrapI(bi - 1);
+    let dx = TR.e[j] - TR.e[h], dy = TR.n[j] - TR.n[h];
+    const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+    const rx = pe - TR.e[bi], ry = pn - TR.n[bi];
+    const along = rx * dx + ry * dy, lat = -rx * dy + ry * dx;
+    const k2 = along >= 0 ? j : h, t = Math.min(1, Math.abs(along) / (Math.hypot(TR.e[k2] - TR.e[bi], TR.n[k2] - TR.n[bi]) || 1));
+    return { i: bi, lat, z: TR.z[bi] * (1 - t) + TR.z[k2] * t, dir: Math.atan2(dy, dx) };
+  }
+
   function spawn(at) {
-    // On the Grand Prix circuit in Casino square, pointing along it.
-    const t = new Cesium.Cartesian3(), u = new Cesium.Cartesian3();
-    const R = window.MC3D_LAP_ROUTE;
-    let best = 1e9, bi = 0;
-    R.points.forEach(([lon, lat], i) => {
-      const d = (lon - 7.42815) ** 2 + (lat - 43.73935) ** 2;
-      if (d < best) { best = d; bi = i; }
-    });
-    if (at !== undefined) bi = at;
-    const [lo, la] = R.points[bi], [lo2, la2] = R.points[(bi + 3) % R.points.length];
-    Cesium.Matrix4.multiplyByPoint(inv, Cesium.Cartesian3.fromDegrees(lo, la, 50), t);
-    Cesium.Matrix4.multiplyByPoint(inv, Cesium.Cartesian3.fromDegrees(lo2, la2, 50), u);
-    Object.assign(S, { e: t.x, n: t.y, yaw: Math.atan2(u.y - t.y, u.x - t.x), v: 0, steer: 0 });
-    S.z = sample(S.e, S.n).z;
+    // On the circuit in Casino square, pointing along it.
+    if (at === undefined) {
+      let best = 1e18;
+      const t = new Cesium.Cartesian3();
+      Cesium.Matrix4.multiplyByPoint(inv, Cesium.Cartesian3.fromDegrees(7.42815, 43.73935, 50), t);
+      for (let i = 0; i < TR.N; i++) {
+        const d = (TR.e[i] - t.x) ** 2 + (TR.n[i] - t.y) ** 2;
+        if (d < best) { best = d; at = i; }
+      }
+    }
+    ri = wrapI(at);
+    const j = wrapI(ri + 3);
+    Object.assign(S, { e: TR.e[ri], n: TR.n[ri], z: TR.z[ri], yaw: Math.atan2(TR.n[j] - TR.n[ri], TR.e[j] - TR.e[ri]), v: S.v || 0, steer: 0 });
     camYaw = S.yaw;
+  }
+  function inGap(i) {
+    return gapA < gapB ? i > gapA && i < gapB : i > gapA || i < gapB;
   }
 
   function step(dt) {
@@ -280,26 +336,40 @@
     const grip = hand ? 1.6 : 1;
     const yawRate = S.steer * grip * Math.min(1, Math.abs(S.v) / 4) * (1.25 / (1 + Math.abs(S.v) / 22)) * Math.sign(S.v || 1);
     S.yaw += yawRate * dt;
-    // Move, then check the corners of the car against buildings and sea.
+    // Move, then keep the front corners inside the barriers.
     const ce = Math.cos(S.yaw), sn = Math.sin(S.yaw);
     const ne = S.e + ce * S.v * dt, nn = S.n + sn * S.v * dt;
     const ahead = Math.sign(S.v || 1) * 2.2;
-    const hit = [[ahead, 0.9], [ahead, -0.9], [ahead, 0]].some(([a, b]) => blocked(ne + ce * a - sn * b, nn + sn * a + ce * b));
-    const here = sample(ne, nn);
-    const climb = here.z - S.z;
-    if (hit || climb > 1.2) {
-      S.v = -S.v * 0.25;                       // bump off the wall
-      shake = Math.min(1, Math.abs(S.v) / 6 + 0.2);
+    const hit = [[ahead, 0.92], [ahead, -0.92]].some(([a, b]) =>
+      Math.abs(onTrack(ne + ce * a - sn * b, nn + sn * a + ce * b, ri, 12).lat) > HALF);
+    if (hit) {
+      // Glance off the barrier: lose speed, turn a little back along it.
+      const T = onTrack(S.e, S.n, ri, 12);
+      const along = Math.cos(S.yaw - T.dir) >= 0 ? T.dir : T.dir + Math.PI;
+      S.yaw += Cesium.Math.negativePiToPi(along - S.yaw) * 0.35;
+      S.v *= Math.abs(S.v) > 8 ? 0.55 : -0.3;
+      shake = Math.min(1, Math.abs(S.v) / 10 + 0.25);
     } else {
       S.e = ne; S.n = nn;
     }
-    // Sit on the ground: pitch and roll from the height under the wheels.
-    const f = sample(S.e + ce * 1.4, S.n + sn * 1.4).z, b = sample(S.e - ce * 1.4, S.n - sn * 1.4).z;
-    const l = sample(S.e - sn * 0.85, S.n + ce * 0.85).z, r = sample(S.e + sn * 0.85, S.n - ce * 0.85).z;
-    const zg = (f + b + l + r) / 4;
-    S.z += (zg - S.z) * Math.min(1, dt * 18);
-    S.pitch = Math.atan2(f - b, 2.8);
-    S.roll = Math.atan2(l - r, 1.7);
+    const T = onTrack(S.e, S.n, ri, 12);
+    ri = T.i;
+    // Past the edge of the set: carry on from where the circuit comes back.
+    if (inGap(ri)) {
+      const fwd = Math.cos(S.yaw - T.dir) >= 0;
+      const v = S.v;
+      spawn(fwd ? gapB : gapA);
+      if (!fwd) S.yaw += Math.PI;
+      S.v = v;
+      camYaw = S.yaw;
+      say("Port Hercule is outside the film set: skipping ahead");
+      return;
+    }
+    // Ride on the track: height from the centre line, pitch along it.
+    const T2 = onTrack(S.e + ce * 1.4, S.n + sn * 1.4, ri, 6), T3 = onTrack(S.e - ce * 1.4, S.n - sn * 1.4, ri, 6);
+    S.z += (T.z - S.z) * Math.min(1, dt * 20);
+    S.pitch = Math.atan2(T2.z - T3.z, 2.8);
+    S.roll = 0;
   }
   let shake = 0;
 
@@ -376,7 +446,10 @@
     if (!on) return;
     if (!mapCanvas) paintMap();
     placesENU = placesENU || placesLocal();
+    if (!TR) buildTrack();
+    if (M.cleanTrack) M.cleanTrack.show(true);
     car = car || makeCar();
+    S.v = 0;
     spawn();
     oldMinZoom = ctrl.minimumZoomDistance;
     ctrl.enableInputs = false;
@@ -396,6 +469,7 @@
     ctrl.enableInputs = true;
     if (oldMinZoom !== null) { ctrl.minimumZoomDistance = oldMinZoom; oldMinZoom = null; }
     if (M.legends && M.legends.setSky) M.legends.setSky(false);
+    if (M.cleanTrack) M.cleanTrack.show(false);
     for (const key in keys) keys[key] = false;
     if (frame) {
       const p = local(S.e - Math.cos(S.yaw) * 120, S.n - Math.sin(S.yaw) * 120, S.z + 90);
@@ -404,5 +478,5 @@
   }
 
   M.tours.register({ id: "drive", label: "Drive", start, stop });
-  M.drive = { get state() { return { ...S }; }, spawnAt: (i) => spawn(i), sample: (e, n) => (map ? sample(e, n) : null), set view(v) { view = v; } };
+  M.drive = { get state() { return { ...S, ri, gapA, gapB }; }, spawnAt: (i) => spawn(i), sample: (e, n) => (map ? sample(e, n) : null), set view(v) { view = v; } };
 })();
