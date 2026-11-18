@@ -91,7 +91,11 @@ wear the real 20 cm IGN aerial photo of themselves: tiles, skylights, rooftop
 pools and terraces. The photo is not a true orthophoto, so taller roofs show
 up shifted east by about 6 cm per metre of height; the build measures that
 lean from the photo's edges and shifts each roof's patch back onto its
-outline. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
+outline. Nothing of the set stands on the Grand Prix track: trees, lamps and
+building edges stop at its barriers, and the ground stays under the road and
+below the barrier tops, so no slope spills over its edges. The tunnel is open
+on its sea side where it runs along the shore: a parapet, pillars every 7.5 m
+and the sea between them, with the hotel above on stilts. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
 streaks under the sills). Trees and moored
 yachts are rebuilt from the LiDAR, flat roofs get parapets and the
 machinery rooms the LiDAR sees and plants where the IGN photo shows roof

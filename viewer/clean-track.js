@@ -243,10 +243,13 @@
         // +y in PROFILE is to the left.
         vault.push({ s, pts: PROFILE.map(([w, h], j) => [f.x + f.lx * w, f.y + f.ly * w, f.z + h, tt[j] / acc]) });
       }
-      prims.push(new Cesium.Primitive({
+      const vaultPrim = new Cesium.Primitive({
         geometryInstances: new Cesium.GeometryInstance({ geometry: sheet(vault) }),
         appearance: mat(TUNNEL, undefined, false), asynchronous: false, compressVertices: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
-      }));
+      });
+      // The film set brings its own tunnel, open on the sea side.
+      vaultPrim.mcFilmHide = true;
+      prims.push(vaultPrim);
       // The tunnel is cut out of the scan from end to end (its hotel would
       // otherwise poke into the vault). A stone block fills the cut above
       // the vault up to the height of the hotel, so seen from outside there
