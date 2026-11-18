@@ -112,13 +112,19 @@ and a raised centre with its clock on the square. Along the shore the sea
 turns lighter, with a line of foam and small waves lapping at the quays.
 Mapped street trees are sized from the LiDAR canopy (the plane trees of the
 boulevards), and white shapes on piers and quays are no longer taken for
-boats. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
+boats. Boats are moored the way Port Hercule moors them: stern-to, bow out,
+square to the quay or pontoon and side by side (neighbours that merge into
+one white shape in the photo are split into a row). Trees need a green crown
+in the photo and at least 6 m² of it, and none grow on pools, pool decks,
+sports grounds or piers. The Stade Nautique Rainier III gets its racing pool
+(coping, lane lines, lane ropes) and its diving tower, with boards from 1 to
+10 m. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
 streaks under the sills). Trees and moored
 yachts are rebuilt from the LiDAR, flat roofs get parapets and the
 machinery rooms the LiDAR sees and plants where the IGN photo shows roof
 gardens, Belle Époque buildings get stone cornices, the streets carry the
 sun shadows of buildings and trees (computed from the LiDAR for the scene's
-sun, so they show on phones too), about 200 yachts traced from the IGN
+sun, so they show on phones too), about 500 yachts traced from the IGN
 photo are rebuilt with hulls and stepped decks, and the sea moves out to the
 horizon under a light film colour grade. Buildings
 the 2021 scan does not see are dropped, except those IGN dates from 2022 on

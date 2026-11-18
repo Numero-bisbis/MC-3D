@@ -56,7 +56,7 @@ import triangle
 from PIL import Image, ImageDraw, ImageFilter
 from scipy import ndimage
 from shapely import contains_xy
-from shapely.geometry import LineString, MultiPolygon, Polygon, box, shape
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box, shape
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
@@ -429,6 +429,41 @@ def ground_mesh(mnt, sea):
     return m, Z
 
 
+def race_pool(d, xy, pts, px):
+    """A public racing pool seen from above: white coping, bright water
+    shading darker towards the middle, dark lane lines with T ends and
+    lane ropes."""
+    g = Polygon(pts).buffer(0)
+    rect = g.minimum_rotated_rectangle
+    c = np.asarray(rect.exterior.coords)[:4]
+    e1, e2 = c[1] - c[0], c[2] - c[1]
+    if np.linalg.norm(e1) < np.linalg.norm(e2):
+        c = np.roll(c, -1, axis=0)
+        e1, e2 = c[1] - c[0], c[2] - c[1]
+    L, W = np.linalg.norm(e1), np.linalg.norm(e2)
+    u, v = e1 / L, e2 / W
+    d.polygon(xy(np.asarray(g.buffer(1.2, join_style=2).exterior.coords)), fill=(236, 233, 224))
+    for k, col in enumerate([(52, 178, 206), (44, 160, 196), (38, 146, 186)]):
+        q = g.buffer(-0.6 * k, join_style=2)
+        if not q.is_empty and isinstance(q, Polygon):
+            d.polygon(xy(np.asarray(q.exterior.coords)), fill=col)
+    lanes = max(4, min(10, int(W / 2.5)))
+    lw = max(1, int(0.25 * px))
+    for k in range(lanes):
+        o = (k + 0.5) * W / lanes
+        a, b = c[0] + v * o + u * 2.0, c[0] + v * o + u * (L - 2.0)
+        d.line(xy([a, b]), fill=(18, 56, 96), width=lw)
+        for e in (a, b):
+            d.line(xy([e - v * 0.5, e + v * 0.5]), fill=(18, 56, 96), width=lw)
+    for k in range(1, lanes):
+        o = k * W / lanes
+        a, b = c[0] + v * o, c[0] + v * o + u * L
+        n_ = int(L / 0.6)
+        for j in range(n_):
+            p0, p1 = a + (b - a) * j / n_, a + (b - a) * (j + 0.5) / n_
+            col = (220, 40, 40) if j < n_ * 0.1 or j > n_ * 0.9 else ((240, 240, 240) if j % 2 else (30, 90, 200))
+            d.line(xy([p0, p1]), fill=col, width=max(1, int(0.12 * px)))
+
 def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     S = 6144
     px = S / (X1 - X0)
@@ -505,7 +540,10 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     for t, pts, closed in ways:
         if closed and (t.get("leisure") == "swimming_pool" or t.get("amenity") == "fountain"
                        or (t.get("natural") == "water" and t.get("water") != "harbour")):
-            poly(pts, "#45bfd0")
+            if t.get("leisure") == "swimming_pool" and t.get("sport") == "swimming":
+                race_pool(d, xy, pts, px)
+            else:
+                poly(pts, "#45bfd0")
     # Soft shade at the foot of buildings (baked ambient occlusion).
     bm = Image.fromarray((bmask * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
     ao = bm.filter(ImageFilter.GaussianBlur(int(4.5 * px)))
@@ -1827,17 +1865,44 @@ def add_tree(m, x, y, z, h, r, kind, rnd):
                 base_g * (1.05 + 0.08 * rnd.random()), LEAF, 0.07)
 
 
-def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
+def no_tree_zones(ways):
+    """Pools, pool decks, sports grounds and piers: open paved places
+    where the LiDAR sees diving boards, stands, awnings and masts standing
+    up, but no trees grow."""
+    out = []
+    for tg, pts, closed in ways:
+        if not closed or len(pts) < 4:
+            continue
+        if (tg.get("leisure") in ("sports_centre", "swimming_pool", "pitch", "stadium", "track")
+                or tg.get("amenity") == "spring_board" or tg.get("man_made") in ("pier", "tower")):
+            g = Polygon(pts).buffer(0)
+            if g.area > 4:
+                out.append(g.buffer(1.0))
+    return unary_union(out) if out else None
+
+
+def trees(m, mns, mnt, ortho, bmask, osm_pts, stats, no_tree=None):
     chm = np.nan_to_num(mns - mnt, nan=0)
     chm[bmask > 0] = 0
+    if no_tree is not None:
+        img = Image.new("L", (chm.shape[1], chm.shape[0]), 0)
+        dz = ImageDraw.Draw(img)
+        for q in to_polys(no_tree):
+            dz.polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in q.exterior.coords], fill=255)
+        chm[np.asarray(img) > 0] = 0
     o = ortho.astype(np.float32)
     exg = 2 * o[..., 1] - o[..., 0] - o[..., 2]
     lum = o.mean(-1)
-    veg = (chm > 2.5) & ((exg > 8) | (lum < 55))
+    # Green in the photo, or dark and still a little green (a crown in its
+    # own shade). Dark alone was too loose: building shadows on squares,
+    # awnings and parked lorries came out as trees.
+    veg = (chm > 2.5) & ((exg > 12) | ((lum < 60) & (exg > 3)))
     veg = ndimage.binary_opening(veg, iterations=1)
     lab, n = ndimage.label(veg)
     sizes = ndimage.sum(veg, lab, np.arange(1, n + 1))
-    veg &= np.isin(lab, np.nonzero(sizes >= 12)[0] + 1)
+    # At least 6 m² of crown, and green on average.
+    gmean = ndimage.mean(exg, lab, np.arange(1, n + 1))
+    veg &= np.isin(lab, np.nonzero((sizes >= 24) & (gmean > 8))[0] + 1)
     sm = ndimage.gaussian_filter(np.where(veg, chm, 0), 2.0)
     mx = ndimage.maximum_filter(sm, size=11)
     peaks = np.argwhere((sm == mx) & veg & (sm > 2.5))
@@ -1873,6 +1938,8 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats):
         if len(placed) and np.min(np.hypot(placed[:, 0] - x, placed[:, 1] - y)) < 4:
             continue
         if not off_track(x, y, 1.5):
+            continue
+        if no_tree is not None and no_tree.contains(Point(x, y)):
             continue
         z = float(mntR.sample(np.array([x]), np.array([y]))[0])
         if not np.isfinite(z):
@@ -1929,8 +1996,60 @@ def yachts(m, ortho, sea, stats, ways=()):
         for q in to_polys(g.buffer(1.0)):
             dpi.polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in q.exterior.coords], fill=255)
     on_pier = np.asarray(pim) > 0
-    lab, n = ndimage.label(boat)
     rnd = np.random.default_rng(5)
+    # Where boats tie up: quays, pontoons and piers. Distance to them, the
+    # nearest one, and their edge (for the line of the quay).
+    moor = ~sea | on_pier
+    moor_d, moor_i = ndimage.distance_transform_edt(~moor, return_indices=True)
+    moor_d = moor_d * RES
+    moor_edge = moor & ~ndimage.binary_erosion(moor)
+
+    placed = []
+
+    def build(stern, ax, L, W):
+        side = np.array([-ax[1], ax[0]])
+
+        def plan(along0, along1, half):
+            q = [(stern + ax * a + side * s) for a, s in
+                 [(along0, -half), (along1, -half), (along1, half), (along0, half)]]
+            return orient(Polygon(q), 1.0)
+
+        hull = orient(Polygon([stern + ax * u + side * s for u, s in hull_outline(L, W)]), 1.0)
+        if not hull.is_valid:
+            hull = hull.buffer(0)
+        if not isinstance(hull, Polygon):
+            return
+        # Two rows meeting at a quay corner: no boat inside another.
+        for h_ in placed:
+            if h_.intersects(hull) and h_.intersection(hull).area > 0.08 * min(h_.area, hull.area):
+                return
+        placed.append(hull)
+        hull_h = min(0.8 + 0.045 * L, 4.5)
+        white = np.array(hexrgb("#f6f5f1"))
+        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#f6f5f1", "#6d7780", "#0e3a5c"])))
+        add_walls(m, hull, -0.4, 0.35, -0.4, 100, stripe * 0.9, HULL)
+        add_walls(m, hull, 0.35, hull_h, -0.4, 100, white, HULL)
+        deck = hull.buffer(-0.25)
+        add_roof(m, hull, hull_h, white * 0.97, False)
+        if L > 9 and not deck.is_empty:
+            aft = plan(0.03 * L, 0.2 * L, W * 0.42).intersection(deck)
+            for q in to_polys(aft):
+                add_roof(m, orient(q, 1.0), hull_h + 0.03, hexrgb("#b88a5c"), False)   # teak
+        tiers = 1 if L < 14 else 2 if L < 30 else 3 if L < 55 else 4
+        z = hull_h
+        for t in range(tiers):
+            a0, a1 = (0.2 + 0.05 * t) * L, (0.66 - 0.07 * t) * L
+            half = W / 2 * (0.8 - 0.1 * t)
+            if a1 - a0 < 2 or half < 0.6:
+                break
+            th = 2.4 if L > 14 else 1.5
+            q = plan(a0, a1, half)
+            add_walls(m, q, z, z + th, z, th, white, HULL)
+            add_roof(m, q, z + th, white * 0.95, False)
+            z += th
+        stats["yachts"] += 1
+
+    lab, n = ndimage.label(boat)
     for i, sl in enumerate(ndimage.find_objects(lab), 1):
         if sl is None:
             continue
@@ -1956,49 +2075,130 @@ def yachts(m, ortho, sea, stats, ways=()):
             continue                     # a crisp rectangle: a tent or roof on a quay, not a hull
         W = min(Wr, L / 2.6)
         mid = cen + ax * (proj.max() + proj.min()) / 2
+        for stern, ax_, L_, W_ in moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
+            build(stern, ax_, L_, W_)
 
+
+def moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
+    """Lay a white shape on the water out as moored boats. In Port Hercule
+    boats lie stern-to: bow out, perpendicular to the quay or pontoon,
+    side by side. A shape touching a quay is read in the quay's frame: its
+    depth out from the quay is the boat length, its width along the quay
+    holds as many boats as fit side by side (neighbours merge into one
+    shape in the photo). Shapes out in the open keep their own axis.
+    Yields (stern point, bow direction, length, beam)."""
+    rows = np.clip(((Y1 - pts[:, 1]) / RES).astype(int), 0, moor_d.shape[0] - 1)
+    cols = np.clip(((pts[:, 0] - X0) / RES).astype(int), 0, moor_d.shape[1] - 1)
+    d = moor_d[rows, cols]
+    if d.min() > 6.0:
+        # Free: bow away from the nearest quay.
         def dl(p):
-            c_ = int((p[0] - X0) / RES); r_ = int((Y1 - p[1]) / RES)
-            return dist_land[np.clip(r_, 0, sea.shape[0] - 1), np.clip(c_, 0, sea.shape[1] - 1)]
+            c_ = int(np.clip((p[0] - X0) / RES, 0, moor_d.shape[1] - 1)); r_ = int(np.clip((Y1 - p[1]) / RES, 0, moor_d.shape[0] - 1))
+            return moor_d[r_, c_]
         if dl(mid + ax * L / 2) < dl(mid - ax * L / 2):
             ax = -ax
-        side = np.array([-ax[1], ax[0]])
-        stern = mid - ax * L / 2
+        yield mid - ax * L / 2, ax, L, W
+        return
+    k = int(np.argmin(d))
+    qr, qc = moor_i[0][rows[k], cols[k]], moor_i[1][rows[k], cols[k]]
+    q0 = np.array(cell_xy(qr, qc), float)
+    # The line of the quay: its edge cells within 12 m of where the boat
+    # touches it.
+    w_ = int(12 / RES)
+    r0, r1 = max(0, qr - w_), min(moor_d.shape[0], qr + w_ + 1)
+    c0, c1 = max(0, qc - w_), min(moor_d.shape[1], qc + w_ + 1)
+    er, ec = np.nonzero(moor_edge[r0:r1, c0:c1])
+    tdir = None
+    if len(er) > 10:
+        ex, ey = cell_xy(er + r0, ec + c0)
+        e = np.column_stack([ex, ey])
+        e = e[np.hypot(e[:, 0] - q0[0], e[:, 1] - q0[1]) < 12]
+        if len(e) > 10:
+            ev, evec = np.linalg.eigh(np.cov((e - e.mean(0)).T))
+            if ev[1] > 4 * max(ev[0], 1e-6):
+                tdir = evec[:, 1]
+    if tdir is None:
+        # A corner or a ragged edge: square to the shape's own axis.
+        tdir = np.array([-ax[1], ax[0]])
+    nrm = np.array([-tdir[1], tdir[0]])
+    if (mid - q0) @ nrm < 0:
+        nrm = -nrm
+    a = (pts - q0) @ nrm
+    b = (pts - q0) @ tdir
+    depth = a.max() - max(a.min(), 0.0) + RES
+    width = b.max() - b.min() + RES
+    if depth < 4.5 and width > 2.5 * depth:
+        # Lying alongside the quay.
+        Lb = min(width, 70.0)
+        yield (q0 + nrm * (max(a.min(), 0.6) + depth / 2) + tdir * (b.min() + (width - Lb) / 2),
+               tdir, Lb, min(depth, Lb / 3.2))
+        return
+    Lb = float(np.clip(depth, 5.0, 90.0))
+    beam = float(np.clip(Lb / 3.1, 2.2, 13.0))
+    n_ = max(1, int(round(width / (beam + 0.9))))
+    pitch = width / n_
+    beam = min(beam, pitch - 0.7)
+    if beam < 1.8:
+        n_ = max(1, int(width // 2.6)); pitch = width / n_; beam = pitch - 0.7
+    a_st = max(a.min(), 0.8)
+    for j in range(n_):
+        yield q0 + nrm * a_st + tdir * (b.min() + pitch * (j + 0.5)), nrm, Lb, beam
 
-        def plan(along0, along1, half):
-            q = [(stern + ax * a + side * s) for a, s in
-                 [(along0, -half), (along1, -half), (along1, half), (along0, half)]]
-            return orient(Polygon(q), 1.0)
 
-        hull = orient(Polygon([stern + ax * u + side * s for u, s in hull_outline(L, W)]), 1.0)
-        if not hull.is_valid:
-            hull = hull.buffer(0)
-        if not isinstance(hull, Polygon):
+def pool_features(m, ways, mnt):
+    """The diving tower of a public pool (OSM tower:type=diving): a concrete
+    column with boards at 1, 3, 5, 7.5 and 10 m reaching out over the
+    water. The tower's own LiDAR hump is kept free of trees by
+    no_tree_zones()."""
+    mntR = Raster(mnt)
+    pools = [Polygon(p_).buffer(0) for tg, p_, c in ways if c and len(p_) > 3 and tg.get("leisure") == "swimming_pool"]
+    n_ = 0
+    for tg, pts, closed in ways:
+        if not closed or len(pts) < 4 or tg.get("tower:type") != "diving":
             continue
-        hull_h = min(0.8 + 0.045 * L, 4.5)
-        white = np.array(hexrgb("#f6f5f1"))
-        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#f6f5f1", "#6d7780", "#0e3a5c"])))
-        add_walls(m, hull, -0.4, 0.35, -0.4, 100, stripe * 0.9, HULL)
-        add_walls(m, hull, 0.35, hull_h, -0.4, 100, white, HULL)
-        deck = hull.buffer(-0.25)
-        add_roof(m, hull, hull_h, white * 0.97, False)
-        if L > 9 and not deck.is_empty:
-            aft = plan(0.03 * L, 0.2 * L, W * 0.42).intersection(deck)
-            for q in to_polys(aft):
-                add_roof(m, orient(q, 1.0), hull_h + 0.03, hexrgb("#b88a5c"), False)   # teak
-        tiers = 1 if L < 14 else 2 if L < 30 else 3 if L < 55 else 4
-        z = hull_h
-        for t in range(tiers):
-            a0, a1 = (0.2 + 0.05 * t) * L, (0.66 - 0.07 * t) * L
-            half = W / 2 * (0.8 - 0.1 * t)
-            if a1 - a0 < 2 or half < 0.6:
-                break
-            th = 2.4 if L > 14 else 1.5
-            q = plan(a0, a1, half)
-            add_walls(m, q, z, z + th, z, th, white, HULL)
-            add_roof(m, q, z + th, white * 0.95, False)
-            z += th
-        stats["yachts"] += 1
+        tw = Polygon(pts).buffer(0)
+        c = tw.centroid
+        near = min(pools, key=lambda q: q.distance(c)) if pools else None
+        if near is None or near.distance(c) > 15:
+            continue
+        z0 = float(np.nanmedian(mntR.sample(np.array([c.x]), np.array([c.y]))))
+        if not np.isfinite(z0):
+            continue
+        H = float(tg.get("height", 10))
+        concrete, board = np.array(hexrgb("#e9e5db")), np.array(hexrgb("#f4f1ea"))
+        rail = np.array(hexrgb("#3b5f8a"))
+        core = orient(tw.buffer(-0.2, join_style=2), 1.0)
+        add_walls(m, core, z0 - 0.3, z0 + H + 1.0, z0, 100, concrete, PLAIN)
+        add_roof(m, core, z0 + H + 1.0, concrete * 0.97, False)
+        # Out over the pool: boards perpendicular to the pool's near side.
+        pc = near.representative_point()
+        out = np.array([pc.x - c.x, pc.y - c.y])
+        bnd = near.exterior
+        q = bnd.interpolate(bnd.project(c))
+        if q.distance(c) > 0.5:
+            out = np.array([q.x - c.x, q.y - c.y])
+        out /= np.linalg.norm(out) + 1e-9
+        side = np.array([-out[1], out[0]])
+        rr = np.asarray(tw.exterior.coords)[:, :2] - [c.x, c.y]
+        edge = float((rr @ out).max())
+        for k, (hb, reach, wb) in enumerate([(1.0, 4.0, 0.5), (3.0, 4.5, 0.6), (5.0, 5.0, 1.8),
+                                             (7.5, 5.5, 2.0), (H, 6.0, 2.2)]):
+            sx = ((k % 2) * 2 - 1) * 0.8 if hb < 4 else 0.0
+            a = np.array([c.x, c.y]) + out * (edge - 0.3) + side * sx
+            b = a + out * reach
+            slab = orient(Polygon([a - side * wb / 2, b - side * wb / 2, b + side * wb / 2, a + side * wb / 2]), 1.0)
+            th = 0.12 if hb < 4 else 0.35
+            add_walls(m, slab, z0 + hb - th, z0 + hb, z0, 100, board if hb < 4 else concrete, PLAIN)
+            add_roof(m, slab, z0 + hb, board, False)
+            if hb >= 4:
+                # Railings along both sides, stopping short of the edge.
+                for s_ in (-1, 1):
+                    r0 = a + side * s_ * (wb / 2 - 0.05)
+                    r1 = r0 + out * (reach - 1.2)
+                    rl = orient(Polygon([r0 - side * 0.04, r1 - side * 0.04, r1 + side * 0.04, r0 + side * 0.04]), 1.0)
+                    add_walls(m, rl, z0 + hb, z0 + hb + 1.0, z0, 100, rail, PLAIN)
+        n_ += 1
+    return n_
 
 
 def coast_land(ways, sea):
@@ -2307,12 +2507,13 @@ def main():
         tunnel_tube(tun_m)
     print("trees…")
     tm = Mesh()
-    trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats)
+    trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats, no_tree_zones(ways))
     print("harbour…")
     hm = Mesh()
     yachts(hm, ortho, sea, stats, ways)
     piers(hm, ways, sea)
     stats["bridges"] = bridges(bm, ways, mns, mnt)
+    stats["diving_towers"] = pool_features(bm, ways, mnt_f)
     sm = Mesh()
     sea_plane(sm)
 

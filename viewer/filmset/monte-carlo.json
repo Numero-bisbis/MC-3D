@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 1325316,
+ "triangles": 1083957,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -61,8 +61,8 @@
  "roof_plants": 56,
  "levels": 1381,
  "towers": 9,
- "trees": 4129,
- "yachts": 284,
+ "trees": 1488,
+ "yachts": 505,
  "real_floors": 722,
  "styles": [
   273,
@@ -81,6 +81,7 @@
   -0.009999999999999676
  ],
  "bridges": 19,
+ "diving_towers": 1,
  "lamps": 996,
  "track_clear": true,
  "sources": [
