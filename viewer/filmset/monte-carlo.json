@@ -29,19 +29,33 @@
    43.745304
   ]
  ],
- "triangles": 788251,
+ "triangles": 823746,
+ "tunnel": true,
  "buildings": 876,
  "dropped": 5,
  "rooftop": 52,
- "roof_plants": 901,
+ "roof_plants": 948,
  "levels": 877,
- "towers": 7,
+ "towers": 6,
  "trees": 2121,
  "yachts": 203,
+ "real_floors": 472,
+ "styles": [
+  144,
+  138,
+  5,
+  225,
+  140,
+  38,
+  0,
+  57,
+  129
+ ],
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
   "IGN BD ORTHO, classification only (Etalab 2.0)",
-  "OpenStreetMap contributors (ODbL)"
+  "OpenStreetMap contributors (ODbL)",
+  "Wikidata (CC0)"
  ]
 }

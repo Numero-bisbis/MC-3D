@@ -245,10 +245,13 @@
         ]);
         walls.push(q(6.3, 10, -0.6, top), q(-10, -6.3, -0.6, top), q(-6.3, 6.3, 5.3, top));
       }
-      prims.push(new Cesium.Primitive({
+      const stone = new Cesium.Primitive({
         geometryInstances: walls.map((g) => new Cesium.GeometryInstance({ geometry: g })),
         appearance: mat(STONE), asynchronous: false, compressVertices: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
-      }));
+      });
+      // The film set carves its own tunnel and deck: no block there.
+      stone.mcFilmHide = true;
+      prims.push(stone);
     }
     prims.forEach((p) => scene.primitives.add(p));
 
@@ -292,7 +295,8 @@
     on = !!yes;
     if (on && !built) build();
     if (!built) return;
-    built.prims.forEach((p) => { p.show = on; });
+    const film = M.filmset && M.filmset.isOn();
+    built.prims.forEach((p) => { p.show = on && !(film && p.mcFilmHide); });
     const google = M.getGoogle && M.getGoogle();
     if (on) attachClipping(google);
     else if (clip) clip.enabled = false;

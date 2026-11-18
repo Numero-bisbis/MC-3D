@@ -12,9 +12,12 @@
   const MOBILE = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 700;
   const URL_BASE = "filmset/monte-carlo";
 
-  // Kinds written by the pipeline into the colour alpha: kind * 16 + 8.
+  // Kinds written by the pipeline into the colour alpha: kind * 16 + style.
   // 0 ground, 1 classic wall, 2 modern wall, 3 flat roof, 4 tiled roof,
-  // 5 leaves, 6 wood, 7 boat, 8 sea, 9 plain.
+  // 5 leaves, 6 wood, 7 boat, 8 sea, 9 plain, 10 glass wall. For walls the
+  // style is the façade type (pipeline S_*): 0 Riviera shutters, 1 Belle
+  // Époque, 2 arched (Casino), 3 painted villa, 4 1960s-80s loggias,
+  // 5 1970s balcony bands, 6 glass, 7 contemporary, 8 1930s.
   const shader = new Cesium.CustomShader({
     lightingModel: Cesium.LightingModel.PBR,
     uniforms: {
@@ -30,9 +33,18 @@
         vec2 a = smoothstep(lo - aa, lo + aa, f) * (1.0 - smoothstep(hi - aa, hi + aa, f));
         return a.x * a.y;
       }
+      // Round-headed opening: straight jambs from y0 to ys, a half circle above.
+      float archMask(vec2 f, float x0, float x1, float y0, float ys, vec2 aa) {
+        float rr = (x1 - x0) * 0.5;
+        float rect = box(f, vec2(x0, y0), vec2(x1, ys), aa);
+        float d = length((f - vec2((x0 + x1) * 0.5, ys)) / vec2(1.0, 1.0));
+        float top = (1.0 - smoothstep(rr - aa.x, rr + aa.x, d)) * step(ys, f.y);
+        return max(rect, top);
+      }
       void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
         vec4 c = fsInput.attributes.color_0;
-        float kind = floor(c.a * 255.0 / 16.0);
+        float a255 = floor(c.a * 255.0 + 0.5);
+        float kind = floor(a255 / 16.0);
         if (kind < 0.5) {               // ground: the painted map
           material.roughness = 0.95;
           return;
@@ -41,54 +53,200 @@
         vec2 uv = fsInput.attributes.texCoord_0;
         material.roughness = 0.85;
         material.specular = vec3(0.03);
-        if (kind < 2.5 || kind > 9.5) {  // walls: windows, floors, shutters
-          bool classic = kind < 1.5;
+        if (kind < 2.5 || kind > 9.5) {  // walls: one of nine real façade types
+          float style = a255 - kind * 16.0;
           vec2 f = fract(uv);
           vec2 cell = floor(uv);
           vec2 aa = max(fwidth(uv) * 1.2, vec2(0.002));
           // Fade the pattern out far away instead of letting it shimmer.
           float detail = 1.0 - smoothstep(0.18, 0.45, max(aa.x, aa.y));
-          float r = hash12(cell + floor(uv.x * 0.0) + 17.0);
+          float fine = 1.0 - smoothstep(0.025, 0.07, max(aa.x, aa.y));   // louvres, bars, stripes
+          float r = hash12(cell + 17.0);
+          float vr = hash12(floor(c.rgb * 255.0 + 0.5).rg + floor(c.b * 255.0 + 0.5) * 0.03);   // per building
           vec3 col = base;
-          vec3 glass = mix(vec3(0.05, 0.07, 0.09), vec3(0.20, 0.26, 0.32), smoothstep(0.3, 1.0, f.y));
-          float gnd = 1.0 - step(1.0, uv.y);
+          vec3 glass = mix(vec3(0.05, 0.07, 0.09), vec3(0.22, 0.28, 0.34), smoothstep(0.3, 1.0, f.y));
+          bool gnd = uv.y < 1.0;
+          float shine = 0.0;               // how much of this pixel is glass
+          vec3 farCol = mix(base, glass, 0.18);
           if (uv.y < 0.0) {
-            col = base * 0.7;            // plinth below street level
-          } else if (classic) {
-            float sill = box(f, vec2(0.0, 0.0), vec2(1.0, 0.06), aa);
-            col = mix(col, base * 1.08, sill);
-            if (gnd > 0.5) {
-              float shop = box(f, vec2(0.12, 0.08), vec2(0.88, 0.78), aa);
-              float awning = box(f, vec2(0.08, 0.78), vec2(0.92, 0.9), aa);
+            col = base * 0.7;              // plinth below street level
+          } else if (style < 0.5 || (style > 2.5 && style < 3.5)) {
+            // Riviera house (0) and painted villa (3): tall windows with
+            // louvred shutters, sills; villas have white surrounds.
+            bool villa = style > 2.5;
+            vec3 surround = villa ? vec3(0.93, 0.90, 0.84) : base * 1.12;
+            float sill = box(f, vec2(0.28, 0.14), vec2(0.72, 0.19), aa);
+            if (gnd && !villa) {
+              float shop = box(f, vec2(0.1, 0.06), vec2(0.9, 0.78), aa);
+              float awning = box(f, vec2(0.06, 0.78), vec2(0.94, 0.9), aa);
               vec3 aw = r < 0.33 ? vec3(0.55, 0.12, 0.10) : (r < 0.66 ? vec3(0.13, 0.25, 0.20) : vec3(0.75, 0.70, 0.60));
-              col = mix(col, glass * 1.4, shop);
+              col = mix(col, glass * 1.5 + vec3(0.04, 0.03, 0.02), shop);
+              col = mix(col, vec3(0.15), box(f, vec2(0.1, 0.06), vec2(0.9, 0.1), aa) * 0.6);
               col = mix(col, aw, awning * step(0.25, r));
+              shine = shop;
             } else {
-              float win = box(f, vec2(0.36, 0.22), vec2(0.64, 0.84), aa);
-              float frame = box(f, vec2(0.32, 0.18), vec2(0.68, 0.88), aa);
-              float shut = box(f, vec2(0.17, 0.2), vec2(0.35, 0.86), aa) + box(f, vec2(0.65, 0.2), vec2(0.83, 0.86), aa);
-              vec3 green = mix(vec3(0.20, 0.30, 0.22), vec3(0.42, 0.45, 0.36), hash12(cell * 1.7));
-              bool closed = r < 0.18;
-              col = mix(col, base * 1.12, frame);
-              col = mix(col, closed ? green * 0.9 : glass, win);
-              col = mix(col, green, shut * (closed ? 0.0 : 1.0));
-              // little balcony rail on some floors
-              float rail = box(f, vec2(0.28, 0.2), vec2(0.72, 0.27), aa) * step(0.6, hash12(vec2(cell.y, 3.0)));
-              col = mix(col, vec3(0.12), rail * 0.8);
-              material.roughness = mix(0.85, 0.3, win * (closed ? 0.0 : 1.0));
+              vec2 lo = vec2(0.36, 0.2), hi = vec2(0.64, 0.84);
+              float win = box(f, lo, hi, aa);
+              float frame = box(f, lo - (villa ? 0.07 : 0.035), hi + (villa ? 0.07 : 0.035), aa);
+              float shut = box(f, vec2(0.18, 0.2), vec2(0.355, 0.84), aa) + box(f, vec2(0.645, 0.2), vec2(0.82, 0.84), aa);
+              vec3 sc = vr < 0.5 ? vec3(0.22, 0.33, 0.24) : (vr < 0.75 ? vec3(0.42, 0.52, 0.52) : vec3(0.55, 0.42, 0.25));
+              sc *= 0.85 + 0.3 * hash12(cell * 1.7);
+              float louv = mix(0.94, 0.88 + 0.12 * step(0.5, fract(f.y * 22.0)), fine);
+              bool closed = r < 0.2;
+              bool half_ = r > 0.2 && r < 0.3;
+              col = mix(col, surround, frame);
+              col = mix(col, base * 1.15, sill);
+              col = mix(col, glass, win);
+              // Recess: the lintel and one side of the opening in shadow.
+              col *= 1.0 - 0.45 * win * box(f, vec2(lo.x, hi.y - 0.07), hi, aa);
+              col *= 1.0 - 0.3 * win * box(f, lo, vec2(lo.x + 0.04, hi.y), aa);
+              col = mix(col, vec3(0.85, 0.82, 0.74), win * box(f, vec2(0.495, lo.y), vec2(0.505, hi.y), aa));
+              if (closed) col = mix(col, sc * louv, win);
+              else if (half_) col = mix(col, sc * louv, win * step(0.5, f.y));
+              col = mix(col, sc * louv, shut * (closed ? 0.0 : 1.0));
+              // Wrought-iron balconette on some floors.
+              float rail = box(f, vec2(0.3, 0.2), vec2(0.7, 0.36), aa) * step(0.55, hash12(vec2(cell.y, 3.0) + vr));
+              float bars = step(0.6, fract(f.x * 30.0)) + box(f, vec2(0.3, 0.33), vec2(0.7, 0.36), aa);
+              col = mix(col, vec3(0.1), rail * mix(0.35, clamp(bars, 0.0, 1.0), fine) * 0.85);
+              shine = win * (closed ? 0.0 : 1.0);
             }
-          } else if (kind > 9.5) {
+          } else if (style < 1.5) {
+            // Belle Époque palace: rusticated, arched ground floor; tall
+            // French windows with moulded surrounds and hoods; a stone
+            // balcony along the first floor, iron balconettes above.
+            if (gnd) {
+              float groove = 1.0 - 0.18 * (1.0 - smoothstep(0.0, 0.05, abs(fract(f.y * 4.0) - 0.5) * 2.0 - 0.9));
+              col = base * groove;
+              float arch_ = archMask(f, 0.18, 0.82, 0.0, 0.58, aa);
+              float archF = archMask(f, 0.14, 0.86, 0.0, 0.58, aa);
+              col = mix(col, base * 1.1, archF);
+              col = mix(col, glass * 1.6 + vec3(0.06, 0.04, 0.0), arch_);
+              col = mix(col, vec3(0.12), arch_ * box(f, vec2(0.18, 0.5), vec2(0.82, 0.53), aa));
+              col = mix(col, base * 1.2, box(f, vec2(0.45, 0.85), vec2(0.55, 0.96), aa));   // keystone
+              shine = arch_;
+            } else {
+              vec2 lo = vec2(0.31, 0.1), hi = vec2(0.69, 0.8);
+              float win = box(f, lo, hi, aa);
+              float frame = box(f, lo - vec2(0.05, 0.03), hi + vec2(0.05, 0.03), aa);
+              float hood = box(f, vec2(0.24, 0.86), vec2(0.76, 0.93), aa);
+              float hoodSh = box(f, vec2(0.24, 0.83), vec2(0.76, 0.86), aa);
+              float band = box(f, vec2(-1.0, 0.0), vec2(2.0, 0.035), aa);
+              col = mix(col, base * 1.14, frame);
+              col = mix(col, base * 0.82, hoodSh);
+              col = mix(col, base * 1.2, hood);
+              col = mix(col, base * 1.1, band);
+              vec3 g = glass;
+              if (vr < 0.35) {             // some palaces keep their shutters
+                float shut = box(f, vec2(0.15, 0.1), vec2(0.255, 0.8), aa) + box(f, vec2(0.745, 0.1), vec2(0.85, 0.8), aa);
+                col = mix(col, vec3(0.62, 0.64, 0.58) * mix(0.95, 0.9 + 0.1 * step(0.5, fract(f.y * 22.0)), fine), shut);
+              }
+              if (r < 0.25) g = mix(g, vec3(0.80, 0.76, 0.66), step(0.35, f.y) * 0.8);   // drawn curtains
+              col = mix(col, g, win);
+              col *= 1.0 - 0.45 * win * box(f, vec2(lo.x, hi.y - 0.06), hi, aa);
+              col *= 1.0 - 0.3 * win * box(f, lo, vec2(lo.x + 0.04, hi.y), aa);
+              col = mix(col, base * 1.1, win * (box(f, vec2(0.495, lo.y), vec2(0.505, hi.y), aa) + box(f, vec2(lo.x, 0.6), vec2(hi.x, 0.62), aa)));
+              bool piano = cell.y < 1.5 || (vr > 0.6 && abs(cell.y - 4.0) < 0.5);
+              if (piano) {               // continuous balcony
+                float slab = box(f, vec2(-1.0, 0.0), vec2(2.0, 0.06), aa);
+                float rail = box(f, vec2(-1.0, 0.06), vec2(2.0, 0.3), aa);
+                float bal = step(0.55, fract(f.x * 9.0)) + box(f, vec2(-1.0, 0.27), vec2(2.0, 0.3), aa);
+                col = mix(col, base * 1.18, rail * mix(0.6, clamp(bal, 0.0, 1.0), fine));
+                col = mix(col, base * 0.75, slab * 0.4 + rail * (1.0 - clamp(bal, 0.0, 1.0)) * 0.0);
+                col = mix(col, base * 1.15, slab);
+              } else {
+                float rail = box(f, vec2(0.27, 0.1), vec2(0.73, 0.32), aa);
+                float bars = step(0.62, fract(f.x * 34.0)) + box(f, vec2(0.27, 0.29), vec2(0.73, 0.32), aa) + box(f, vec2(0.27, 0.1), vec2(0.73, 0.13), aa);
+                col = mix(col, vec3(0.09, 0.09, 0.08), rail * mix(0.35, clamp(bars, 0.0, 1.0), fine) * 0.9);
+              }
+              shine = win;
+            }
+          } else if (style < 2.5) {
+            // Casino / Café de Paris: round-arched windows between pilasters.
+            float pil = 1.0 - box(f, vec2(0.08, -1.0), vec2(0.92, 2.0), aa);
+            float archF = archMask(f, 0.2, 0.8, 0.08, 0.6, aa);
+            float arch_ = archMask(f, 0.25, 0.75, 0.1, 0.6, aa);
+            col = mix(col, base * 1.08, archF);
+            col = mix(col, base * 1.12, pil);
+            col = mix(col, base * 0.85, pil * box(f, vec2(0.08, -1.0), vec2(0.1, 2.0), aa));
+            vec3 g = gnd ? glass * 1.5 + vec3(0.07, 0.05, 0.0) : glass;
+            col = mix(col, g, arch_);
+            col = mix(col, base * 1.1, arch_ * (box(f, vec2(0.49, 0.1), vec2(0.51, 0.9), aa) + box(f, vec2(0.25, 0.58), vec2(0.75, 0.6), aa)));
+            col *= 1.0 - 0.35 * arch_ * box(f, vec2(0.25, 0.1), vec2(0.29, 0.62), aa);
+            col = mix(col, base * 1.22, box(f, vec2(0.46, 0.84), vec2(0.54, 0.95), aa));
+            col = mix(col, base * 1.15, box(f, vec2(-1.0, 0.0), vec2(2.0, 0.05), aa));
+            shine = arch_;
+          } else if (style > 7.5) {
+            // 1930s: smooth render, wide three-pane windows, no shutters,
+            // a thin band at each floor.
+            if (gnd) {
+              float shop = box(f, vec2(0.08, 0.06), vec2(0.92, 0.82), aa);
+              col = mix(col, glass * 1.5 + vec3(0.04, 0.03, 0.02), shop);
+              col = mix(col, base * 0.9, box(f, vec2(-1.0, 0.86), vec2(2.0, 1.0), aa));
+              shine = shop;
+            } else {
+              vec2 lo = vec2(0.2, 0.22), hi = vec2(0.8, 0.8);
+              float win = box(f, lo, hi, aa);
+              col = mix(col, base * 0.93, box(f, vec2(-1.0, 0.9), vec2(2.0, 0.95), aa));
+              col = mix(col, base * 1.1, box(f, lo - 0.025, hi + 0.025, aa));
+              col = mix(col, glass, win);
+              col = mix(col, vec3(0.92, 0.92, 0.88), win * (box(f, vec2(0.39, lo.y), vec2(0.405, hi.y), aa) + box(f, vec2(0.595, lo.y), vec2(0.61, hi.y), aa)));
+              col *= 1.0 - 0.4 * win * box(f, vec2(lo.x, hi.y - 0.06), hi, aa);
+              if (r < 0.3) col = mix(col, vec3(0.78, 0.66, 0.45) * mix(0.95, 0.9 + 0.1 * step(0.5, fract(f.y * 25.0)), fine), win * step(0.6, f.y));  // blind
+              shine = win;
+            }
+          } else if (style > 5.5 && style < 6.5) {
             // Glass tower: bands of glass between slab edges.
             float slab = 1.0 - box(f, vec2(-1.0, 0.16), vec2(2.0, 0.92), aa);
             float mull = 1.0 - box(f, vec2(0.04, -1.0), vec2(0.96, 2.0), aa);
             vec3 g2 = mix(vec3(0.12, 0.17, 0.22), vec3(0.40, 0.52, 0.60), smoothstep(0.1, 1.0, f.y));
             g2 *= 0.85 + 0.3 * hash12(cell);
             col = mix(g2, base, clamp(slab + mull * 0.8, 0.0, 1.0));
-            material.roughness = mix(0.15, 0.8, clamp(slab + mull, 0.0, 1.0));
-            material.specular = mix(vec3(0.08), vec3(0.03), clamp(slab + mull, 0.0, 1.0));
+            shine = 1.0 - clamp(slab + mull, 0.0, 1.0);
+            farCol = mix(base, vec3(0.16, 0.22, 0.28), 0.45);
+          } else if (style > 6.5) {
+            // Contemporary (One Monte-Carlo, Mareterra): floor-to-ceiling
+            // glass, crisp white slab edges, glass balustrades, thin fins.
+            vec3 g2 = mix(vec3(0.10, 0.14, 0.18), vec3(0.42, 0.52, 0.58), smoothstep(0.1, 1.0, f.y));
+            g2 *= 0.9 + 0.2 * hash12(cell);
+            float slab = box(f, vec2(-1.0, 0.0), vec2(2.0, 0.08), aa);
+            float balu = box(f, vec2(-1.0, 0.08), vec2(2.0, 0.34), aa) * step(0.5, gnd ? 0.0 : 1.0);
+            float fin = 1.0 - box(f, vec2(0.035, -1.0), vec2(0.965, 2.0), aa);
+            vec3 finC = vr < 0.6 ? vec3(0.9, 0.9, 0.88) : vec3(0.55, 0.42, 0.30);
+            col = g2;
+            col = mix(col, mix(col, vec3(0.75, 0.84, 0.86), 0.35), balu);
+            col = mix(col, vec3(0.95), balu * box(f, vec2(-1.0, 0.32), vec2(2.0, 0.34), aa));
+            col = mix(col, finC, fin);
+            col = mix(col, base * 1.06, slab);
+            shine = (1.0 - fin) * (1.0 - slab);
+            farCol = mix(base, vec3(0.2, 0.26, 0.3), 0.4);
+          } else if (style > 4.5) {
+            // 1960s-80s towers: deep balconies running all round each
+            // floor, solid or glass parapets, sliding windows behind and,
+            // here and there, the striped awnings of the Riviera.
+            float slab = box(f, vec2(-1.0, 0.0), vec2(2.0, 0.09), aa);
+            float para = box(f, vec2(-1.0, 0.09), vec2(2.0, 0.38), aa);
+            vec3 shade = base * 0.5;
+            vec3 g2 = mix(vec3(0.08, 0.10, 0.12), vec3(0.28, 0.33, 0.38), smoothstep(0.4, 1.0, f.y));
+            float win = box(f, vec2(0.05, 0.38), vec2(0.95, 0.94), aa);
+            col = mix(shade, g2, win);
+            col = mix(col, shade * 1.3, win * box(f, vec2(0.49, 0.38), vec2(0.51, 0.94), aa));
+            col *= 1.0 - 0.3 * box(f, vec2(-1.0, 0.8), vec2(2.0, 1.0), aa);          // soffit shadow
+            float awn = step(0.72, hash12(cell * 0.37 + vr * 9.0));
+            vec3 awC = vr < 0.5 ? vec3(0.78, 0.48, 0.22) : vec3(0.32, 0.45, 0.42);
+            float stripes = mix(0.92, 0.84 + 0.16 * step(0.5, fract(f.x * 4.0)), fine);
+            col = mix(col, awC * stripes, awn * box(f, vec2(0.0, 0.62), vec2(1.0, 0.98), aa));
+            vec3 paraC = vr < 0.55 ? base * 1.04 : mix(vec3(0.42, 0.50, 0.54), base, 0.25);
+            col = mix(col, paraC, para);
+            col = mix(col, base * 0.8, para * box(f, vec2(-1.0, 0.36), vec2(2.0, 0.38), aa));
+            col = mix(col, base * 1.1, slab);
+            float pier = (1.0 - box(f, vec2(0.04, -1.0), vec2(0.96, 2.0), aa)) * step(mod(cell.x, 4.0), 0.5);
+            col = mix(col, base, pier);
+            if (gnd) col = mix(base * 0.85, glass * 1.4, box(f, vec2(0.06, 0.06), vec2(0.94, 0.86), aa));
+            shine = win * (1.0 - para) * (1.0 - awn);
+            farCol = mix(base, base * 0.55, 0.35);
           } else {
-            // Riviera residential: white slab edges, balcony rails, deep
-            // windows behind, a solid pier every few bays.
+            // Riviera residential (style 4): white slab edges, balcony
+            // rails, deep windows behind, a solid pier every bay.
             float slab = 1.0 - box(f, vec2(-1.0, 0.10), vec2(2.0, 1.1), aa);
             float rail = box(f, vec2(-1.0, 0.10), vec2(2.0, 0.36), aa);
             float pier = 1.0 - box(f, vec2(0.07, -1.0), vec2(0.93, 2.0), aa);
@@ -100,10 +258,13 @@
             col = mix(col, mix(vec3(0.62, 0.70, 0.74), base, 0.4), rail * 0.85);
             col = mix(col, base * 1.04, clamp(slab + pier, 0.0, 1.0));
             col = mix(col, vec3(0.78, 0.74, 0.62), awn * box(f, vec2(0.1, 0.85), vec2(0.9, 1.0), aa) * 0.8);
-            if (gnd > 0.5) col = mix(base * 0.8, glass * 1.3, box(f, vec2(0.08, 0.08), vec2(0.92, 0.85), aa));
-            material.roughness = mix(0.85, 0.35, win * (1.0 - rail));
+            if (gnd) col = mix(base * 0.8, glass * 1.3, box(f, vec2(0.08, 0.08), vec2(0.92, 0.85), aa));
+            shine = win * (1.0 - rail);
+            farCol = mix(base, base * 0.6, 0.35);
           }
-          col = mix(classic ? mix(base, glass, 0.18) : (kind > 9.5 ? mix(base, vec3(0.16, 0.22, 0.28), 0.45) : mix(base, base * 0.6, 0.35)), col, detail);
+          col = mix(farCol, col, detail);
+          material.roughness = mix(0.85, 0.22, shine * detail);
+          material.specular = mix(vec3(0.03), vec3(0.07), shine * detail);
           // Soft darkening at the foot of walls (ambient occlusion).
           col *= mix(0.72, 1.0, smoothstep(0.0, 1.2, uv.y));
           material.diffuse = col;
@@ -142,13 +303,21 @@
           material.roughness = 0.08;
           material.specular = vec3(0.04);
         } else {
-          material.diffuse = base;
+          float st = a255 - kind * 16.0;
+          if (st > 0.5 && st < 2.5) {
+            // Inside the tunnel: lit by its own lamps, not the sun.
+            material.diffuse = base * 0.08;
+            material.emissive = st > 1.5 ? vec3(1.0, 0.92, 0.72) : base * 0.55;
+            material.roughness = st > 1.5 ? 1.0 : 0.6;
+          } else {
+            material.diffuse = base;
+          }
         }
       }
     `,
   });
 
-  let model = null, loading = null, active = false, meta = null;
+  let model = null, tube = null, loading = null, active = false, meta = null;
 
   // Film grade: a touch more colour, warm highlights, cool shadows and a soft
   // vignette, in one cheap full-screen pass.
@@ -195,6 +364,16 @@
       });
       model.show = active;
       scene.primitives.add(model);
+      // The Grand Prix tunnel's inside: lit by its own lamps, no shadows.
+      if (meta.tunnel) {
+        tube = await Cesium.Model.fromGltfAsync({
+          url: `${URL_BASE}-tunnel.glb`, modelMatrix: frame(),
+          upAxis: Cesium.Axis.Y, forwardAxis: Cesium.Axis.X,
+          customShader: shader, shadows: Cesium.ShadowMode.DISABLED, backFaceCulling: true,
+        });
+        tube.show = active;
+        scene.primitives.add(tube);
+      }
       // The open-data globe stays around the set, but not inside it.
       const ring = meta.clip.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon, lat));
       if (Cesium.ClippingPolygonCollection && Cesium.ClippingPolygonCollection.isSupported(scene)) {
@@ -242,6 +421,7 @@
     if (on === active) return;
     active = on;
     document.body.classList.toggle("filmset", on);
+    if (M.cleanTrack && M.cleanTrack.on) M.cleanTrack.show(true);
     btn.classList.toggle("on", on);
     if (on) {
       document.querySelectorAll("[data-mode]").forEach((o) => o.classList.remove("on"));
@@ -286,10 +466,12 @@
       loadingEl.lastChild.textContent = "Loading Monaco…";
       if (!active) return;
       model.show = true;
+      if (tube) tube.show = true;
       if (clip) clip.enabled = true;
       watchFps();
     } else {
       if (model) model.show = false;
+      if (tube) tube.show = false;
       if (clip) clip.enabled = false;
       if (saved.time) {
         viewer.clock.currentTime = saved.time;
