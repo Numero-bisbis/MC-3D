@@ -210,3 +210,43 @@ body.lap-playing .loading { display: none !important; }
   .sv-panel { width: 100vw; height: 100dvh; border-radius: 0;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 }
+
+/* Drive: open-world style HUD (viewer/drive.js). */
+.drive-hud { position: absolute; inset: 0; pointer-events: none; z-index: 6; user-select: none; -webkit-user-select: none; }
+.drive-hud[hidden] { display: none; }
+.drive-map { position: absolute; left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom));
+  width: 160px; height: 160px; border-radius: 50%; border: 3px solid rgba(10, 12, 16, .75);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .45); }
+.drive-speed { position: absolute; right: max(22px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
+  color: #fff; font: italic 800 46px/1 system-ui, sans-serif; letter-spacing: -.02em;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, .7), 0 0 14px rgba(0, 0, 0, .45); }
+.drive-speed small { font-size: 14px; font-weight: 700; margin-left: 5px; letter-spacing: .06em; }
+.drive-place { position: absolute; right: max(22px, env(safe-area-inset-right)); bottom: 84px; max-width: 70vw; text-align: right;
+  color: #fff; font: italic 700 32px/1.1 Georgia, "Times New Roman", serif;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, .85), 0 0 16px rgba(0, 0, 0, .55); opacity: 0; transform: translateY(8px);
+  transition: opacity .5s, transform .5s; }
+.drive-place.in { opacity: 1; transform: none; }
+.drive-help { position: absolute; left: 50%; top: max(16px, env(safe-area-inset-top)); transform: translateX(-50%);
+  padding: 8px 14px; border-radius: 10px; background: rgba(10, 13, 18, .72); color: #e8ecef; font-size: 13px;
+  white-space: nowrap; opacity: 0; transition: opacity .6s; }
+.drive-help.in { opacity: 1; }
+.drive-help:empty { display: none; }
+.drive-exit, .drive-cam { position: absolute; top: max(14px, env(safe-area-inset-top)); width: 44px; height: 44px;
+  border-radius: 50%; border: 0; background: rgba(10, 13, 18, .72); color: #fff; font-size: 18px; pointer-events: auto; cursor: pointer; }
+.drive-exit { right: max(14px, env(safe-area-inset-right)); }
+.drive-cam { right: calc(max(14px, env(safe-area-inset-right)) + 54px); }
+.drive-pads[hidden] { display: none; }
+.drive-pad { position: absolute; bottom: max(18px, env(safe-area-inset-bottom)); display: flex; gap: 12px; }
+.drive-pad.left { left: max(16px, env(safe-area-inset-left)); }
+.drive-pad.right { right: max(16px, env(safe-area-inset-right)); }
+.drive-pad button { width: 74px; height: 74px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .5);
+  background: rgba(10, 13, 18, .45); color: #fff; font-size: 26px; pointer-events: auto; touch-action: none; }
+.drive-pad button.on { background: rgba(255, 255, 255, .35); }
+.drive-pad button.gas { width: 86px; height: 86px; border-color: rgba(120, 230, 140, .8); }
+.drive-pad button.brake { border-color: rgba(255, 120, 110, .8); }
+/* Phones: pedals and steering at the bottom, map and speed up top. */
+@media (pointer: coarse), (max-width: 700px) {
+  .drive-map { width: 112px; height: 112px; top: max(14px, env(safe-area-inset-top)); bottom: auto; }
+  .drive-speed { top: calc(max(14px, env(safe-area-inset-top)) + 56px); bottom: auto; font-size: 36px; }
+  .drive-place { top: calc(max(14px, env(safe-area-inset-top)) + 140px); bottom: auto; font-size: 24px; }
+}

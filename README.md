@@ -53,6 +53,15 @@ with no usage limit), shown in an overlay; it is never copied onto the 3D
 scene (`viewer/streetview.js`). The Google key needs **Maps Embed API**
 enabled in its project and ticked in its API restrictions.
 
+**Drive** (`?tour=drive`, or "Drive" in Tours) puts you in a car on the film
+set, open-world style: arrow keys or WASD, Space for the handbrake, C for the
+camera, Esc to leave; on a phone, steering bottom left and pedals bottom
+right. The car follows the set's ground, goes through the Grand Prix tunnel
+and stops against buildings and the sea, from a 1 m drive map the film set
+build writes (`viewer/filmset/monte-carlo-drive.png`). A turning minimap with
+the circuit, a speedometer and the names of the places you pass make up the
+HUD (`viewer/drive.js`).
+
 **Film set** (`?mode=film`, or the "Film set" button in View) is our own
 stylised model of Monte-Carlo, like a set for an animated film: Casino
 square, the Boulingrins gardens, the north side of Port Hercule and the slopes
