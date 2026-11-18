@@ -1,5 +1,5 @@
 // "Legendary laps": the three fastest laps of each decade at Monaco, from
-// 1950 to today, replayed behind a small generic single-seater. The car
+// 1950 to today, replayed behind a car of the period in its team colours. The car
 // covers the circuit in exactly the real lap time; how fast it goes in each
 // corner and on each straight is estimated from the shape of the road.
 //
