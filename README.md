@@ -43,7 +43,10 @@ switches between the chase view and an onboard view. The car drives a real racin
 open the picker, or `?tour=legends&legend=1985-senna` to start one lap. During the laps the photoreal road is
 replaced by a clean modelled track (asphalt, kerbs, barriers) and a modelled
 tunnel, so the scan's parked cars and roadworks disappear (`viewer/clean-track.js`;
-add `?clean=0` to see the raw scan).
+add `?clean=0` to see the raw scan). In the Surface view the ground model is
+pressed down under the whole circuit, so distant, coarse terrain tiles cannot
+fold the hillside over the road. The inside of the Nouvelle Chicane has no
+barrier (the escape road runs straight on); the harbour side keeps its rail.
 
 **Street View stops**: in the lap tours, the pegman button pauses the lap and
 opens Google's own 360° Street View panorama of the corner you are at; ‹ and ›
@@ -97,7 +100,10 @@ with pavements, parapets and piers. Along the harbour the quays are kept flat
 gardens are planted only where the photo shows green and the LiDAR sees
 something standing on the roof. Nothing of the set stands on the Grand Prix track: trees, lamps and
 building edges stop at its barriers, and the ground stays under the road and
-below the barrier tops, so no slope spills over its edges. The tunnel is open
+below the barrier tops, so no slope spills over its edges, even where two stretches of the lap
+run side by side at different heights (below the hairpin, Ostende above the
+harbour). The build sweeps the whole lap and prints anything left standing on
+the road (`track audit`). The tunnel is open
 on its sea side where it runs along the shore: a parapet, pillars every 7.5 m
 and the sea between them, with the hotel above on stilts. Ground floors along the streets are rows of shops (display windows lit
 from inside, doors, painted sign bands with gold lettering, striped awnings),

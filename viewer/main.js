@@ -190,6 +190,9 @@ function makeTerrain(surface) {
         fallback = fallback || await terrarium(x, y, level);
         out[i] = fallback[i];
       }
+      // Keep the circuit's road clear of trees and awnings in the surface
+      // model (clean-track.js sets the hook).
+      if (window.MC3D && window.MC3D.roadClamp) window.MC3D.roadClamp(scheme.tileXYToRectangle(x, y, level), SIZE, out);
       return out;
     },
   });

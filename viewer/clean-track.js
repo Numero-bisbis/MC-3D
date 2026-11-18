@@ -30,6 +30,11 @@
   const LIFT = 0.1;           // m, the track sits this much above the ground model
   const BARRIER = HALF + 0.35, BARRIER_H = 1.0;
   const [TA, TB] = TUN[0] || [1e9, -1e9];
+  // Stretches with no barrier on one side: [s from, s to, side (+1 left, -1 right)].
+  // The inside of the Nouvelle Chicane is open (the escape road runs straight
+  // on); the harbour side keeps its rail, and so do the straights either side.
+  const OPEN = [[2072, 2122, 1]];
+  const openAt = (s, side) => OPEN.some(([a, b, sd]) => sd === side && s > a && s < b);
 
   // The same smoothed line as the car (lap-legends.js), so it sits on the track.
   const CX = smooth(X, 2), CY = smooth(Y, 2), CZ = smooth(ZG, 3);
@@ -53,6 +58,63 @@
     const h = (q) => Math.atan2(at(CY, q + 2) - at(CY, q - 2), at(CX, q + 2) - at(CX, q - 2));
     return Cesium.Math.negativePiToPi(h(s + 3) - h(s - 3)) / 6;
   }
+
+  // ---- The road in the surface model ----------------------------------
+  // The LiDAR surface view is a heightmap of everything the laser hit:
+  // trees over the road, awnings, parked lorries. Within the track the
+  // heights are pressed down to just under the modelled road, and the
+  // band beside it may rise no faster than 1.5 m per metre, so nothing
+  // pokes through the tarmac. Grid of 1 m in lon/lat metres around the
+  // start line: the road height and the distance to the centre line.
+  (function roadClamp() {
+    const P = K.P, R0 = 6378137, lon0 = P[0][0], lat0 = P[0][1];
+    const kx = Math.PI / 180 * R0 * Math.cos(lat0 * Math.PI / 180), ky = Math.PI / 180 * R0;
+    const ex = new Float64Array(N), ey = new Float64Array(N), eh = new Float64Array(N);
+    for (let i = 0; i < N; i++) { ex[i] = (P[i][0] - lon0) * kx; ey[i] = (P[i][1] - lat0) * ky; eh[i] = P[i][2]; }
+    const SX = smooth(ex, 2), SY = smooth(ey, 2), SH = smooth(eh, 3);
+    const REACH = 10;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < N; i++) { x0 = Math.min(x0, SX[i]); x1 = Math.max(x1, SX[i]); y0 = Math.min(y0, SY[i]); y1 = Math.max(y1, SY[i]); }
+    x0 = Math.floor(x0 - REACH); y0 = Math.floor(y0 - REACH);
+    const W = Math.ceil(x1 + REACH - x0) + 1, H = Math.ceil(y1 + REACH - y0) + 1;
+    const dist = new Float32Array(W * H).fill(1e9), hgt = new Float32Array(W * H);
+    for (let i = 0; i < N; i++) {
+      const j = wrap(i + 1);
+      if (i * DS > TA - 6 && i * DS < TB + 6) continue;      // the hill over the tunnel stays
+      for (let f = 0; f < 1; f += 0.25) {
+        const px = SX[i] + (SX[j] - SX[i]) * f, py = SY[i] + (SY[j] - SY[i]) * f, ph = SH[i] + (SH[j] - SH[i]) * f;
+        const cx = Math.round(px - x0), cy = Math.round(py - y0);
+        for (let v = cy - REACH; v <= cy + REACH; v++) {
+          for (let u = cx - REACH; u <= cx + REACH; u++) {
+            const d = Math.hypot(u + x0 - px, v + y0 - py), k = v * W + u;
+            if (d < dist[k]) { dist[k] = d; hgt[k] = ph; }
+          }
+        }
+      }
+    }
+    const D = Cesium.Math.toDegrees;
+    M.roadClamp = (rect, size, out) => {
+      const w = D(rect.west), e = D(rect.east), n = D(rect.north), s = D(rect.south);
+      // Far away the tiles are coarse (one sample every few metres): keep
+      // a wider flat band so a slope between two samples cannot reach in.
+      const gap = (n - s) * ky / (size - 1), flat = HALF + Math.min(REACH - HALF, Math.max(1.2, gap));
+      if ((e - lon0) * kx < x0 || (w - lon0) * kx > x0 + W || (n - lat0) * ky < y0 || (s - lat0) * ky > y0 + H) return;
+      for (let j = 0; j < size; j++) {
+        const gy = (n + (s - n) * j / (size - 1) - lat0) * ky - y0;
+        const v = Math.round(gy);
+        if (v < 0 || v >= H) continue;
+        for (let i = 0; i < size; i++) {
+          const u = Math.round((w + (e - w) * i / (size - 1) - lon0) * kx - x0);
+          if (u < 0 || u >= W) continue;
+          const k = v * W + u, d = dist[k];
+          if (d > REACH) continue;
+          const top = hgt[k] - 0.1 + 1.5 * Math.max(0, d - flat);
+          const o = j * size + i;
+          if (out[o] > top) out[o] = top;
+        }
+      }
+    };
+  })();
 
   const tmp = new Cesium.Cartesian3();
   // A sheet made of rings across the track: rings[k] = { s, pts: [[x, y, z, t]] }.
@@ -220,7 +282,7 @@
     for (const side of [1, -1]) {
       let runB = [];
       for (let s = 0; s <= LEN + 0.01; s += STEP) {
-        if (s > TA - 2 && s < TB + 2) { if (runB.length > 1) barriers.push(runB); runB = []; continue; }
+        if ((s > TA - 2 && s < TB + 2) || openAt(s, side)) { if (runB.length > 1) barriers.push(runB); runB = []; continue; }
         const f = frame(s), o = side * BARRIER;
         const x = f.x + f.lx * o, y = f.y + f.ly * o;
         runB.push({ s, pts: [[x, y, f.z - 0.4, 0], [x, y, f.z + BARRIER_H, 1]] });
