@@ -86,12 +86,33 @@
     });
   }
   // st.s is metres along the lap, st.t runs across (0 → 1).
-  const mat = (source, uniforms) => new Cesium.MaterialAppearance({
+  // Every outdoor material also takes "night" (0 day … 1 night): colours go
+  // dark and moonlit blue, with a warm pool of street light around the
+  // camera. The tunnel is lit by its own lamps and stays as it is.
+  const NIGHT = `
+    czm_material czm_getMaterial(czm_materialInput materialInput) {
+      czm_material m = mcDay(materialInput);
+      if (night > 0.0) {
+        float near = exp(-length(materialInput.positionToEyeEC) / 28.0);
+        vec3 lit = m.diffuse * vec3(0.16, 0.19, 0.3) + m.diffuse * vec3(1.0, 0.78, 0.5) * 0.5 * near;
+        m.diffuse = mix(m.diffuse, lit, night);
+        m.emission = mix(m.emission, m.emission * 0.25, night);
+      }
+      return m;
+    }`;
+  const materials = [];
+  let nightNow = 0;
+  const mat = (source, uniforms, outdoor = true) => {
+    const fabric = outdoor
+      ? { uniforms: { ...(uniforms || {}), night: nightNow }, source: source.replace("czm_material czm_getMaterial(", "czm_material mcDay(") + NIGHT }
+      : { uniforms: uniforms || {}, source };
     // translucent: false matters: a custom material counts as see-through by
     // default, which blended the road with whatever lay behind it.
-    material: new Cesium.Material({ translucent: false, fabric: { uniforms: uniforms || {}, source } }),
-    flat: true, faceForward: false, translucent: false, closed: false,
-  });
+    const material = new Cesium.Material({ translucent: false, fabric });
+    if (outdoor) materials.push(material);
+    return new Cesium.MaterialAppearance({ material, flat: true, faceForward: false, translucent: false, closed: false });
+  };
+  function setNight(v) { nightNow = v; for (const m of materials) m.uniforms.night = v; }
   const NOISE = `
     float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -224,7 +245,7 @@
       }
       const vaultPrim = new Cesium.Primitive({
         geometryInstances: new Cesium.GeometryInstance({ geometry: sheet(vault) }),
-        appearance: mat(TUNNEL), asynchronous: false, compressVertices: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
+        appearance: mat(TUNNEL, undefined, false), asynchronous: false, compressVertices: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
       });
       // The film set brings its own tunnel, open on the sea side.
       vaultPrim.mcFilmHide = true;
@@ -306,7 +327,7 @@
   }
 
   M.cleanTrack = {
-    show, lift: LIFT,
+    show, lift: LIFT, setNight,
     get on() { return on; },
     get primitives() { return built ? built.prims : []; },
     get clipped() { return !!clip && clip.enabled; },

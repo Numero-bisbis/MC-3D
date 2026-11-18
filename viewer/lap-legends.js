@@ -689,12 +689,81 @@
   const ICON_TV = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><rect x="2.5" y="6" width="10.5" height="8" rx="1.6"/><path d="M13.8 9.2 17.5 7v6l-3.7-2.2z"/></svg>';
   const ICON_LIST = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><rect x="3" y="4" width="14" height="2.2" rx="1"/><rect x="3" y="9" width="14" height="2.2" rx="1"/><rect x="3" y="14" width="14" height="2.2" rx="1"/></svg>';
 
+  // ---- Day and night ----------------------------------------------------
+  // One switch for the whole site: the film set keeps the day/night state
+  // (filmset.js, its "☾ Night" button), and this button flips the same one.
+  // The film set lights its own night (windows, lamps, moon). On the other
+  // scenery the laps add their own: a night sky with stars and moon, the
+  // Google scan and the modelled track darkened to moonlight with a warm
+  // pool of street light near the camera, and moonlight on the car.
+  const ICON_MOON = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M12.9 3.2a7 7 0 1 0 3.9 11.9A6 6 0 0 1 12.9 3.2z"/></svg>';
+  const ICON_SUN = '<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="3.6"/><g stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 1.8v2.2M10 16v2.2M1.8 10h2.2M16 10h2.2M4.2 4.2l1.6 1.6M14.2 14.2l1.6 1.6M4.2 15.8l1.6-1.6M14.2 5.8l1.6-1.6"/></g></svg>';
+  let localNight = new URLSearchParams(location.search).get("night") === "1";
+  const isNight = () => (M.filmset && M.filmset.isNight ? M.filmset.isNight() : localNight);
+  const filmOn = () => !!(M.filmset && M.filmset.isOn && M.filmset.isOn());
+  function moonDir() {             // same moon as the film set
+    const az = Cesium.Math.toRadians(150), el = Cesium.Math.toRadians(24);
+    const toMoon = new Cesium.Cartesian3(Math.cos(el) * Math.sin(az), Math.cos(el) * Math.cos(az), Math.sin(el));
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(Cesium.Cartesian3.fromDegrees(7.428, 43.7395));
+    const d = Cesium.Matrix4.multiplyByPointAsVector(enu, toMoon, new Cesium.Cartesian3());
+    return Cesium.Cartesian3.normalize(d, d);
+  }
+  const GOOGLE_NIGHT = new Cesium.CustomShader({
+    fragmentShaderText: `
+      void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+        float near = exp(-length(fsInput.attributes.positionEC) / 28.0);
+        vec3 c = material.diffuse;
+        material.diffuse = c * vec3(0.16, 0.19, 0.3) + c * vec3(1.0, 0.78, 0.5) * 0.5 * near;
+      }`,
+  });
+  let nightShown = null, savedLight = null, nightGoogle = null;
+  function showNight() {
+    const n = state !== "off" && isNight();
+    const film = filmOn();
+    const btn = hud.buttons && hud.buttons[NIGHT_BTN];
+    if (state !== "off" && btn && btn.dataset.night !== String(n)) {
+      btn.dataset.night = String(n);
+      btn.innerHTML = n ? ICON_SUN : ICON_MOON;
+      btn.title = n ? "Day" : "Night";
+      btn.setAttribute("aria-label", btn.title);
+    }
+    const key = `${n}|${film}`;
+    if (key === nightShown) return;
+    nightShown = key;
+    const v = n ? 1 : 0;
+    const u = skyDome.appearance.material.uniforms;
+    u.night = v; u.moonDir = moonDir();
+    if (M.cleanTrack && M.cleanTrack.setNight) M.cleanTrack.setNight(n && !film ? 1 : 0);
+    // Google's scan: darkened only while the laps run at night.
+    if (nightGoogle && nightGoogle.customShader === GOOGLE_NIGHT) nightGoogle.customShader = undefined;
+    nightGoogle = null;
+    const g = M.getGoogle && M.getGoogle();
+    if (n && g && !film) { g.customShader = GOOGLE_NIGHT; nightGoogle = g; }
+    // Moonlight on the car (the film set sets its own light).
+    if (n && !film) {
+      if (!savedLight) savedLight = scene.light;
+      scene.light = new Cesium.DirectionalLight({ direction: Cesium.Cartesian3.negate(moonDir(), new Cesium.Cartesian3()), color: new Cesium.Color(0.6, 0.7, 1.0), intensity: 0.65 });
+    } else if (savedLight) {
+      if (!film) scene.light = savedLight;
+      savedLight = null;
+    }
+  }
+  function toggleNight() {
+    const on = !isNight();
+    if (M.filmset && M.filmset.setNight) M.filmset.setNight(on); else localNight = on;
+    nightShown = null;
+    showNight();
+  }
+  scene.preRender.addEventListener(() => { if (state !== "off" || nightShown) showNight(); });
+  const NIGHT_BTN = 2;
+
   const handlers = {
     onToggle: toggle, onSeek: seek, onReplay: () => begin(lap),
     marks: K.CORNERS.slice(1).map((c) => c.s / LEN),
     buttons: [
       { html: ICON_ONBOARD, title: "Onboard camera", onClick: () => switchView() },
       { html: ICON_LIST, title: "Choose another lap", onClick: () => openPicker() },
+      { html: ICON_MOON, title: "Night", onClick: () => toggleNight() },
     ].concat(M.streetView && M.streetView.available && K.svButton
       ? [K.svButton(() => (lap ? uAt(tl) * DS : 0), () => (state === "intro" ? seek(0) : pause(false)))] : []),
     more: { label: "Other laps", onClick: () => openPicker() },
