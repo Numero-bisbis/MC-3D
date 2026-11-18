@@ -87,7 +87,9 @@
   }
   // st.s is metres along the lap, st.t runs across (0 → 1).
   const mat = (source, uniforms) => new Cesium.MaterialAppearance({
-    material: new Cesium.Material({ fabric: { uniforms: uniforms || {}, source } }),
+    // translucent: false matters: a custom material counts as see-through by
+    // default, which blended the road with whatever lay behind it.
+    material: new Cesium.Material({ translucent: false, fabric: { uniforms: uniforms || {}, source } }),
     flat: true, faceForward: false, translucent: false, closed: false,
   });
   const NOISE = `
