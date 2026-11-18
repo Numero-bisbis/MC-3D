@@ -1484,6 +1484,65 @@ def write_glb(path, prims, ground_jpg):
         f.write(struct.pack("<II", len(bin_), 0x004E4942)); f.write(bin_)
 
 
+# ---------------------------------------------------------- street lamps ----
+# Lamp posts along the streets, and a light map of the pools of light they
+# throw on the ground, for the viewer's night mode.
+LAMP_HEAD = 3                       # PLAIN style: glows at night only
+LAMP_ROADS = {"primary": 10, "secondary": 8.5, "tertiary": 7.5, "residential": 6, "unclassified": 6,
+              "living_street": 5, "primary_link": 6, "secondary_link": 6, "tertiary_link": 5, "pedestrian": 4}
+
+
+def street_lamps(m, ways, gz, bmask, sea):
+    def ground(x, y):
+        return float(ndimage.map_coordinates(gz, [[(Y1 - y) / GRID], [(x - X0) / GRID]], order=1, mode="nearest")[0])
+    placed = []
+    post_c, head_c = np.array(hexrgb("#2d3134")), np.array(hexrgb("#fff1c8"))
+    for t, pts, closed in ways:
+        w = LAMP_ROADS.get(t.get("highway"))
+        if not w or t.get("tunnel") in ("yes", "building_passage") or t.get("area") == "yes" \
+                or t.get("layer", "0") not in ("0", "1"):
+            continue
+        ls = LineString(pts)
+        side = 1
+        for d_ in np.arange(8, ls.length - 4, 24.0):
+            a, b = ls.interpolate(d_), ls.interpolate(min(d_ + 1, ls.length))
+            dx, dy = b.x - a.x, b.y - a.y
+            l = math.hypot(dx, dy) or 1
+            nx_, ny_ = -dy / l * side, dx / l * side
+            off = w / 2 + 0.9
+            x, y = a.x + nx_ * off, a.y + ny_ * off
+            side = -side
+            if not (X0 + 2 < x < X1 - 2 and Y0 + 2 < y < Y1 - 2):
+                continue
+            r, c = int((Y1 - y) / RES), int((x - X0) / RES)
+            if bmask[r, c] or sea[r, c]:
+                continue
+            if TUNNEL is not None and TUNNEL["ground"].contains(shapely.Point(x, y)):
+                continue
+            if any(abs(px - x) < 12 and abs(py - y) < 12 for px, py in placed[-60:]):
+                continue
+            placed.append((x, y))
+            z = ground(x, y)
+            add_walls(m, box(x - 0.08, y - 0.08, x + 0.08, y + 0.08), z - 0.3, z + 5.4, z, 10, post_c, PLAIN)
+            hx, hy = x - nx_ * 0.7, y - ny_ * 0.7          # the head leans over the road
+            arm = LineString([(x, y), (hx, hy)]).buffer(0.05, cap_style=2)
+            add_walls(m, orient(arm, 1.0), z + 5.3, z + 5.4, z, 10, post_c, PLAIN)
+            head = box(hx - 0.28, hy - 0.28, hx + 0.28, hy + 0.28)
+            add_walls(m, head, z + 5.05, z + 5.35, z, 10, head_c, PLAIN, style=LAMP_HEAD)
+            add_roof(m, head, z + 5.35, post_c, False)
+            placed[-1] = (hx, hy)
+    # Light map: soft pools under each lamp, 2048 px over the district.
+    S = 2048
+    g = np.zeros((S, S), np.float32)
+    for x, y in placed:
+        g[int((Y1 - y) / (Y1 - Y0) * S), int((x - X0) / (X1 - X0) * S)] += 1
+    g = ndimage.gaussian_filter(g, 5.5 / ((X1 - X0) / S))
+    g = np.clip(g / g.max() * 1.4, 0, 1) ** 0.8
+    im = Image.fromarray((g * 255).astype(np.uint8), "L")
+    im.save(OUT / "monte-carlo-night.jpg", quality=85)
+    return len(placed)
+
+
 # ------------------------------------------------------------ drive map ----
 # For driving the set yourself (viewer/drive.js): a 1 m grid in Lambert-93
 # of the ground height the set is built on and what blocks a car. PNG, RGB:
@@ -1594,6 +1653,7 @@ def main():
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     gm, gz = ground_mesh(mnt_ground, sea)
     drive = drive_map(gz, bmask, sea)
+    stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea))

@@ -301,18 +301,31 @@
       material: new Cesium.Material({
         translucent: false,
         fabric: {
+          uniforms: { night: 0.0, moonDir: new Cesium.Cartesian3(0, 0, 1) },
           source: `
             czm_material czm_getMaterial(czm_materialInput materialInput) {
               czm_material m = czm_getDefaultMaterial(materialInput);
               vec3 dir = normalize(-materialInput.positionToEyeEC);
               vec3 up = normalize(czm_viewRotation * normalize(czm_viewerPositionWC));
               float e = dot(dir, up);
-              vec3 zenith = vec3(0.24, 0.47, 0.80), horizon = vec3(0.80, 0.88, 0.95), sea = vec3(0.12, 0.31, 0.47);
+              vec3 zenith = mix(vec3(0.24, 0.47, 0.80), vec3(0.015, 0.025, 0.07), night);
+              vec3 horizon = mix(vec3(0.80, 0.88, 0.95), vec3(0.16, 0.13, 0.17), night);
+              vec3 sea = mix(vec3(0.12, 0.31, 0.47), vec3(0.02, 0.03, 0.06), night);
               vec3 col = e >= 0.0
                 ? mix(horizon, zenith, pow(smoothstep(0.0, 0.5, e), 0.5))
                 : mix(horizon * 0.9, sea, smoothstep(0.0, 0.06, -e));
               float s = max(dot(dir, normalize(czm_sunDirectionEC)), 0.0);
-              col += vec3(1.0, 0.95, 0.85) * (0.55 * pow(s, 900.0) + 0.12 * pow(s, 12.0));
+              col += (1.0 - night) * vec3(1.0, 0.95, 0.85) * (0.55 * pow(s, 900.0) + 0.12 * pow(s, 12.0));
+              // Night: stars, and a moon low in the south-east.
+              if (night > 0.0 && e > 0.02) {
+                vec3 dw = normalize((czm_inverseViewRotation * dir));
+                vec3 q = floor(dw * 420.0);
+                float h = fract(sin(dot(q, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+                col += night * vec3(0.9, 0.92, 1.0) * step(0.9975, h) * smoothstep(0.02, 0.2, e);
+                vec3 moon = normalize(czm_viewRotation * moonDir);
+                float mm = max(dot(dir, moon), 0.0);
+                col += night * (vec3(0.95, 0.95, 0.9) * smoothstep(0.99965, 0.9998, mm) + vec3(0.25, 0.3, 0.45) * pow(mm, 30.0) * 0.5);
+              }
               m.diffuse = vec3(0.0);
               m.emission = col;
               return m;
@@ -860,6 +873,11 @@
   // For checks from the browser console.
   M.legends = {
     LAPS, choose, seek, bake, racingLine: RACE_OFF, setSky,
+    skyNight: (v, moon) => {
+      const u = skyDome.appearance.material.uniforms;
+      u.night = v;
+      if (moon) u.moonDir = moon;
+    },
     get state() { return state; }, get clock() { return tl; }, get lap() { return lap; },
     set view(v) { if (v !== view && VIEWS.includes(v)) switchView(v); },
   };

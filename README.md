@@ -62,6 +62,16 @@ build writes (`viewer/filmset/monte-carlo-drive.png`). A turning minimap with
 the circuit, a speedometer and the names of the places you pass make up the
 HUD (`viewer/drive.js`).
 
+**Night** (the "☾ Night" button under View while the film set is on, the ☾
+button while driving, or `?night=1`): the sun goes down and a cool moon
+lights the set, about half the windows and every shop light up, 600 street
+lamps traced along the OpenStreetMap streets glow over pools of light on
+the pavement (a light map from the build, `monte-carlo-night.jpg`), the sky
+fills with stars and the car gets headlights. Day or night, the film set
+uses a game-style grade: richer colour, an S-curve, golden highlights over
+teal shadows, haze that thickens with distance, and bloom (at night only on
+phones).
+
 **Film set** (`?mode=film`, or the "Film set" button in View) is our own
 stylised model of Monte-Carlo, like a set for an animated film: Casino
 square, the Boulingrins gardens, the north side of Port Hercule and the slopes

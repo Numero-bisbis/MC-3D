@@ -109,7 +109,16 @@
       appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: true }),
       asynchronous: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
     }));
-    return { body, shadow };
+    // Headlights at night: a soft warm pool on the road ahead.
+    const beam = scene.primitives.add(new Cesium.Primitive({
+      geometryInstances: new Cesium.GeometryInstance({
+        geometry: new Cesium.EllipsoidGeometry({ radii: new Cesium.Cartesian3(10, 3.2, 0.03), vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT }),
+        attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(new Cesium.Color(1.0, 0.93, 0.72, 0.09)) },
+      }),
+      appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: true }),
+      asynchronous: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
+    }));
+    return { body, shadow, beam };
   }
   let car = null;
 
@@ -158,6 +167,9 @@
   const camBtn = el("button", "drive-cam", hud, "◎");
   camBtn.setAttribute("aria-label", "Change camera");
   camBtn.onclick = () => { view = (view + 1) % VIEWS.length; };
+  const nightBtn = el("button", "drive-cam drive-night", hud, "☾");
+  nightBtn.setAttribute("aria-label", "Day or night");
+  nightBtn.onclick = () => M.filmset.setNight && M.filmset.setNight(!M.filmset.isNight());
   const pads = el("div", "drive-pads", hud);
   const padL = el("div", "drive-pad left", pads), padR = el("div", "drive-pad right", pads);
   const bLeft = el("button", "", padL, "◀"), bRight = el("button", "", padL, "▶");
@@ -301,6 +313,13 @@
     car.body.modelMatrix = Cesium.Matrix4.multiply(frame, m, car.body.modelMatrix);
     car.shadow.modelMatrix = Cesium.Matrix4.multiply(frame,
       Cesium.Matrix4.fromRotationTranslation(Cesium.Matrix3.fromRotationZ(S.yaw), new Cesium.Cartesian3(S.e, S.n, S.z + 0.04)), car.shadow.modelMatrix);
+    const isNight = M.filmset.isNight && M.filmset.isNight();
+    car.beam.show = isNight;
+    if (isNight) {
+      const be = S.e + Math.cos(S.yaw) * 11, bn = S.n + Math.sin(S.yaw) * 11;
+      car.beam.modelMatrix = Cesium.Matrix4.multiply(frame,
+        Cesium.Matrix4.fromRotationTranslation(Cesium.Matrix3.fromRotationZ(S.yaw), new Cesium.Cartesian3(be, bn, sample(be, bn).z + 0.08)), car.beam.modelMatrix);
+    }
     // Chase camera: swings round behind the car with a little lag.
     const V = VIEWS[view];
     camYaw += Cesium.Math.negativePiToPi(S.yaw - camYaw) * Math.min(1, 0.06 + (view === 2 ? 1 : 0));
@@ -373,7 +392,7 @@
     hud.hidden = true;
     document.body.classList.remove("driving");
     if (remove) { remove(); remove = null; }
-    if (car) car.body.show = car.shadow.show = false;
+    if (car) car.body.show = car.shadow.show = car.beam.show = false;
     ctrl.enableInputs = true;
     if (oldMinZoom !== null) { ctrl.minimumZoomDistance = oldMinZoom; oldMinZoom = null; }
     if (M.legends && M.legends.setSky) M.legends.setSky(false);
