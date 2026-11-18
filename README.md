@@ -53,6 +53,19 @@ with no usage limit), shown in an overlay; it is never copied onto the 3D
 scene (`viewer/streetview.js`). The Google key needs **Maps Embed API**
 enabled in its project and ticked in its API restrictions.
 
+**Film set** (`?mode=film`, or the "Film set" button in View) is our own
+stylised model of Monte-Carlo, like a set for an animated film: Casino
+square, the Boulingrins gardens, the north side of Port Hercule and the slopes
+up to Beausoleil, 1.2 × 1.2 km. Nothing in it comes from Google: shapes come
+from IGN LiDAR HD and BD TOPO, streets and gardens from OpenStreetMap, and
+every colour and texture is authored by us. It is one 5 MB file
+(`viewer/filmset/monte-carlo.glb`) that loads once and then runs from memory,
+so there is no tile streaming at all. Belle Époque buildings get shutters and
+mansard roofs, tiled roofs are hipped, towers get glass, trees and moored
+yachts are rebuilt from the LiDAR, and the sea moves. Rebuild it with
+`python pipeline/build_filmset.py --fetch` (about 15 seconds after the 50 MB
+download; needs `npx` for the meshopt compression step).
+
 ## Publish it
 
 `.github/workflows/pages.yml` rebuilds the tiles from IGN and publishes the viewer
@@ -68,6 +81,7 @@ a private repository needs a paid GitHub plan).
 | `pipeline/build_tiles.py` | thins, colours, reprojects and tiles the point cloud |
 | `pipeline/build_surface.py` | ground height tiles for the Surface view (surface model with buildings taken out) |
 | `pipeline/build_buildings.py` | 3D buildings from IGN outlines + LiDAR roofs and ground |
+| `pipeline/build_filmset.py` | builds the Monte-Carlo film set into `viewer/filmset/` (already committed) |
 | `pipeline/build_lap.py` | bakes the circuit route and its heights into `viewer/lap-route.js` (already committed) |
 | `viewer/` | the CesiumJS viewer |
 | `data/sources.md` | every data source with licence and date |

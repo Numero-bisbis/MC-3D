@@ -1,0 +1,44 @@
+{
+ "name": "Monte-Carlo film set",
+ "origin": {
+  "lon": 7.428,
+  "lat": 43.7395,
+  "height": 0
+ },
+ "bounds_l93": [
+  1056000,
+  6302800,
+  1057200,
+  6304000
+ ],
+ "clip": [
+  [
+   7.4202895,
+   43.7345227
+  ],
+  [
+   7.4351581,
+   43.7339176
+  ],
+  [
+   7.4359943,
+   43.7446987
+  ],
+  [
+   7.4211229,
+   43.745304
+  ]
+ ],
+ "triangles": 457693,
+ "buildings": 878,
+ "levels": 879,
+ "towers": 25,
+ "trees": 2176,
+ "yachts": 132,
+ "sources": [
+  "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
+  "IGN BD TOPO (Etalab 2.0)",
+  "IGN BD ORTHO, classification only (Etalab 2.0)",
+  "OpenStreetMap contributors (ODbL)"
+ ]
+}

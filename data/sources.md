@@ -9,6 +9,7 @@
 | Orthophoto | IGN BD ORTHO via Géoplateforme WMS/WMTS (`ORTHOIMAGERY.ORTHOPHOTOS`) | Etalab Open Licence 2.0 | latest IGN edition | point colours; ground imagery near Monaco |
 | Geoid grid | IGN RAF20 (`fr_ign_RAF20.tif` from cdn.proj.org) | Etalab Open Licence 2.0 | 2020 | NGF-IGN69 heights to WGS84 ellipsoid |
 | Circuit route | OpenStreetMap relation 148194 "Circuit de Monaco" via the OSM API | ODbL 1.0 (credit "© OpenStreetMap contributors") | fetched 2026-11-16 | Grand Prix lap tour |
+| Film set (Monte-Carlo) | IGN LiDAR HD MNT/MNS 50 cm, BD TOPO outlines, BD ORTHO (only to tell tiled, copper and flat roofs and trees apart), OpenStreetMap roads, gardens, pools, piers and trees | Etalab 2.0 and ODbL 1.0 | fetched 2026-11-18 | `viewer/filmset/monte-carlo.glb` |
 | Wide imagery | EOX Sentinel-2 cloudless 2020 | CC BY-NC-SA 4.0 (non-commercial) | 2020 | Riviera view |
 | Wide terrain | AWS Terrain Tiles (Mapzen Terrarium) | mixed open sources, see tilezen/joerd attribution | — | mountains behind Monaco |
 
