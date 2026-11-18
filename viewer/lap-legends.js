@@ -859,7 +859,7 @@
   M.tours.register({ id: "legends", label: "Legendary laps", start, stop });
   // For checks from the browser console.
   M.legends = {
-    LAPS, choose, seek, bake, racingLine: RACE_OFF,
+    LAPS, choose, seek, bake, racingLine: RACE_OFF, setSky,
     get state() { return state; }, get clock() { return tl; }, get lap() { return lap; },
     set view(v) { if (v !== view && VIEWS.includes(v)) switchView(v); },
   };

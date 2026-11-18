@@ -1484,6 +1484,45 @@ def write_glb(path, prims, ground_jpg):
         f.write(struct.pack("<II", len(bin_), 0x004E4942)); f.write(bin_)
 
 
+# ------------------------------------------------------------ drive map ----
+# For driving the set yourself (viewer/drive.js): a 1 m grid in Lambert-93
+# of the ground height the set is built on and what blocks a car. PNG, RGB:
+# R/G = (height + 10 m) in cm, B = 0 road or ground, 1 building, 2 sea,
+# 3 the tunnel's road (height is the road, not the deck over it).
+def drive_map(gz, bmask, sea):
+    n = int(X1 - X0)
+    cx = np.arange(n) + 0.5
+    YY, XX = np.meshgrid(cx, cx, indexing="ij")          # rows from the top (Y1), cols from X0
+    h = ndimage.map_coordinates(gz, [YY / GRID, XX / GRID], order=1, mode="nearest")
+    def down(mask):
+        m_ = mask[: 2 * n, : 2 * n]
+        return m_.reshape(n, 2, n, 2).mean((1, 3))
+    flag = np.zeros((n, n), np.uint8)
+    flag[down(sea.astype(np.float32)) > 0.5] = 2
+    flag[down(bmask.astype(np.float32)) > 0.4] = 1
+    if TUNNEL is not None:
+        t = TUNNEL
+        X, Y = X0 + XX, Y1 - YY
+        def line(a, b):
+            sel = (t["s"] >= a) & (t["s"] <= b)
+            return LineString(np.column_stack([t["x"][sel], t["y"][sel]]))
+        tube = line(t["ta"] - 1, t["tb"] + 1).buffer(TUBE_HALF - 0.6, cap_style=2)
+        road = unary_union([line(t["ta"] - 14, t["ta"]).buffer(5.5, cap_style=2),
+                            line(t["tb"], t["tb"] + 14).buffer(5.5, cap_style=2)])
+        flag[contains_xy(t["ground"], X, Y)] = 1
+        flag[contains_xy(road, X, Y)] = 0
+        inside = contains_xy(tube, X, Y)
+        from scipy.spatial import cKDTree
+        _, j = cKDTree(np.column_stack([t["x"], t["y"]])).query(np.column_stack([X[inside], Y[inside]]))
+        h[inside] = t["z"][j]
+        flag[inside] = 3
+    v = np.clip(np.round((h + 10) * 100), 0, 65535).astype(np.uint32)
+    img = np.dstack([(v >> 8).astype(np.uint8), (v & 255).astype(np.uint8), flag])
+    Image.fromarray(img, "RGB").save(OUT / "monte-carlo-drive.png", optimize=True)
+    return {"file": "monte-carlo-drive.png", "x0": X0, "y1": Y1, "res": 1.0, "size": n,
+            "affine": [[round(float(v_), 9) for v_ in row] for row in AFF]}
+
+
 # ------------------------------------------------------------------- main ----
 def main():
     ap = argparse.ArgumentParser()
@@ -1553,7 +1592,8 @@ def main():
     chm = np.nan_to_num(mns - mnt_f, nan=0)
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
-    gm, _ = ground_mesh(mnt_ground, sea)
+    gm, gz = ground_mesh(mnt_ground, sea)
+    drive = drive_map(gz, bmask, sea)
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea))
@@ -1583,6 +1623,7 @@ def main():
                  for x, y in [(X0, Y0), (X1, Y0), (X1, Y1), (X0, Y1)]],
         "triangles": int(tris),
         "tunnel": bool(tun_m.p),
+        "drive": drive,
         **stats,
         "sources": ["IGN LiDAR HD MNT/MNS (Etalab 2.0)", "IGN BD TOPO (Etalab 2.0)",
                     "IGN BD ORTHO, classification only (Etalab 2.0)", "OpenStreetMap contributors (ODbL)",
