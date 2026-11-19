@@ -3,27 +3,27 @@
  "method": "median wall colour 4-12 m up, sky/trees/windows dropped; brightness mapped to V 0.72-0.95",
  "buildings": {
   "BATIMENT0000000074070420": {
-   "colour": "#e6dcd9",
+   "colour": "#e6d8d5",
    "photos": 5
   },
   "BATIMENT0000000074074336": {
-   "colour": "#ecdcc4",
+   "colour": "#ecd7b7",
    "photos": 14
   },
   "BATIMENT0000000074074340": {
-   "colour": "#ebe2d1",
+   "colour": "#ebdfc8",
    "photos": 8
   },
   "BATIMENT0000000074074342": {
-   "colour": "#f2eae0",
+   "colour": "#f2e7da",
    "photos": 4
   },
   "BATIMENT0000000074074355": {
-   "colour": "#d9d0c5",
+   "colour": "#d9cdbe",
    "photos": 32
   },
   "BATIMENT0000000074074356": {
-   "colour": "#efdfc6",
+   "colour": "#efd9b7",
    "photos": 11
   },
   "BATIMENT0000000074074359": {
@@ -31,67 +31,67 @@
    "photos": 9
   },
   "BATIMENT0000000074074360": {
-   "colour": "#ddc8a7",
+   "colour": "#ddc194",
    "photos": 9
   },
   "BATIMENT0000000074074361": {
-   "colour": "#e6e4d7",
+   "colour": "#e6e4d2",
    "photos": 33
   },
   "BATIMENT0000000074074362": {
-   "colour": "#d4cfd0",
+   "colour": "#d4cdce",
    "photos": 9
   },
   "BATIMENT0000000074074370": {
-   "colour": "#cfcfcc",
+   "colour": "#cfcfcb",
    "photos": 11
   },
   "BATIMENT0000000074074371": {
-   "colour": "#bdb9b0",
+   "colour": "#bdb8ab",
    "photos": 15
   },
   "BATIMENT0000000074074373": {
-   "colour": "#d8d3c1",
+   "colour": "#d8d1b9",
    "photos": 22
   },
   "BATIMENT0000000074074374": {
-   "colour": "#e3d1cc",
+   "colour": "#e3cac5",
    "photos": 7
   },
   "BATIMENT0000000074074377": {
-   "colour": "#d4d5d1",
+   "colour": "#d4d5d0",
    "photos": 8
   },
   "BATIMENT0000000074074381": {
-   "colour": "#e4d2c4",
+   "colour": "#e4ccb8",
    "photos": 13
   },
   "BATIMENT0000000074074396": {
-   "colour": "#bfa78f",
+   "colour": "#bf9f7e",
    "photos": 10
   },
   "BATIMENT0000000074074430": {
-   "colour": "#d9c6b5",
+   "colour": "#d9bfa9",
    "photos": 11
   },
   "BATIMENT0000000074074431": {
-   "colour": "#caa394",
+   "colour": "#ca9581",
    "photos": 5
   },
   "BATIMENT0000000074074434": {
-   "colour": "#d9d0cb",
+   "colour": "#d9cdc6",
    "photos": 4
   },
   "BATIMENT0000000074074436": {
-   "colour": "#ceb7b7",
+   "colour": "#ceafaf",
    "photos": 18
   },
   "BATIMENT0000000074074438": {
-   "colour": "#b4b8b2",
+   "colour": "#b3b8b0",
    "photos": 8
   },
   "BATIMENT0000000074074452": {
-   "colour": "#ded9d1",
+   "colour": "#ded8cc",
    "photos": 9
   },
   "BATIMENT0000002009009982": {
@@ -99,19 +99,19 @@
    "photos": 4
   },
   "BATIMENT0000002009013201": {
-   "colour": "#cec9d3",
+   "colour": "#cdc6d3",
    "photos": 8
   },
   "BATIMENT0000002009013695": {
-   "colour": "#d5cbb6",
+   "colour": "#d5c7ab",
    "photos": 9
   },
   "BATIMENT0000002244941449": {
-   "colour": "#b8b39c",
+   "colour": "#b8b292",
    "photos": 7
   },
   "BATIMENT0000002244941699": {
-   "colour": "#d0bea7",
+   "colour": "#d0b799",
    "photos": 5
   }
  }
