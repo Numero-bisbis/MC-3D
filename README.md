@@ -119,9 +119,11 @@ one white shape in the photo are split into a row). Trees need a green crown
 in the photo and at least 6 m² of it, and none grow on pools, pool decks,
 sports grounds or piers. The Stade Nautique Rainier III gets its racing pool
 (coping, lane lines, lane ropes) and its diving tower, with boards from 1 to
-10 m. During the Legendary laps, about 5,700 spectators line the barriers
+10 m. During the Legendary laps, about 5,500 spectators line the barriers
 from the swimming pool to La Rascasse, on the start straight and at Sainte
-Dévote, the Casino and Tabac, hopping out of step; they are hidden in the
+Dévote, the Casino and Tabac, hopping out of step. Each is a smooth
+low-poly person (shoes, trousers or shorts, a shirt, arms down or raised,
+hair or a cap). They are hidden in the
 plain film set view. The water is the dark green-grey teal of the port in
 the IGN photo, with soft reflections. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
 streaks under the sills). Trees and moored

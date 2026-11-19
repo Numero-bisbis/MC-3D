@@ -2893,7 +2893,8 @@ def person_template(arms_up):
     """One standing person 1.72 m tall, x forward, y left, z up, made of
     smooth tubes: separate legs with shoes, a torso narrowing to the
     shoulders, a neck, a round head with hair or a cap, and arms down by
-    the sides or raised. About 150 vertices. Returns positions, smooth normals, the part of
+    the sides or raised. About 70 vertices and 120 triangles, so
+    5,000 of them stay light on a phone. Returns positions, smooth normals, the part of
     each vertex and the triangles."""
     if arms_up in _PERSON:
         return _PERSON[arms_up]
@@ -2935,24 +2936,24 @@ def person_template(arms_up):
     for sy in (-1, 1):
         y = 0.095 * sy
         # Leg: shoe, ankle, calf, knee, thigh, hip.
-        tube([(0.03, y, 0.04), (0.0, y, 0.11), (0.01, y, 0.46), (0.0, y, 0.7), (0.0, y * 0.9, 0.9)],
-             [(0.08, 0.05), (0.045, 0.045), (0.055, 0.055), (0.075, 0.07), (0.09, 0.09)],
-             [P_FEET, P_FEET, P_SHIN, P_LEGS, P_LEGS], 5, cap0=((0.04, y, 0.0), P_FEET))
+        tube([(0.03, y, 0.06), (0.01, y, 0.46), (0.0, y * 0.9, 0.9)],
+             [(0.075, 0.05), (0.06, 0.06), (0.095, 0.095)],
+             [P_FEET, P_SHIN, P_LEGS], 4, cap0=((0.05, y, 0.0), P_FEET), twist=np.pi / 4)
     # Torso: hips, waist, chest, shoulders, then the neck.
-    tube([(0.0, 0.0, 0.86), (0.0, 0.0, 1.04), (0.01, 0.0, 1.28), (0.0, 0.0, 1.41), (0.0, 0.0, 1.46), (0.0, 0.0, 1.52)],
-         [(0.12, 0.185), (0.11, 0.165), (0.125, 0.195), (0.1, 0.2), (0.05, 0.06), (0.048, 0.05)],
-         [P_LEGS, P_SHIRT, P_SHIRT, P_SHIRT, P_SKIN, P_SKIN], 7)
+    tube([(0.0, 0.0, 0.86), (0.01, 0.0, 1.27), (0.0, 0.0, 1.41), (0.0, 0.0, 1.5)],
+         [(0.12, 0.19), (0.125, 0.2), (0.1, 0.2), (0.05, 0.055)],
+         [P_LEGS, P_SHIRT, P_SHIRT, P_SKIN], 6)
     # Head, slightly forward of the neck; hair on the crown and back.
-    tube([(0.015, 0.0, 1.55), (0.012, 0.0, 1.62), (0.0, 0.0, 1.68)],
-         [(0.095, 0.08), (0.105, 0.09), (0.08, 0.075)],
-         [P_SKIN, P_HAIR, P_HAIR], 6, cap0=((0.02, 0.0, 1.505), P_SKIN), cap1=((0.0, 0.0, 1.72), P_HAIR))
+    tube([(0.015, 0.0, 1.565), (0.008, 0.0, 1.655)],
+         [(0.1, 0.085), (0.1, 0.09)],
+         [P_SKIN, P_HAIR], 5, cap0=((0.02, 0.0, 1.505), P_SKIN), cap1=((0.0, 0.0, 1.72), P_HAIR))
     for sy in (-1, 1):
         if arms_up:
-            pts = [(0.0, 0.17 * sy, 1.38), (0.02, 0.26 * sy, 1.5), (0.04, 0.3 * sy, 1.7), (0.03, 0.3 * sy, 1.95)]
+            pts = [(0.0, 0.18 * sy, 1.4), (0.04, 0.29 * sy, 1.66), (0.03, 0.3 * sy, 1.95)]
         else:
-            pts = [(0.0, 0.17 * sy, 1.38), (0.0, 0.235 * sy, 1.3), (-0.01, 0.255 * sy, 1.1), (0.05, 0.24 * sy, 0.86)]
-        tube(pts, [(0.055, 0.055), (0.05, 0.05), (0.04, 0.04), (0.035, 0.03)],
-             [P_SHIRT, P_SHIRT, P_SKIN, P_SKIN], 5, cap1=(pts[-1], P_SKIN))
+            pts = [(0.0, 0.2 * sy, 1.4), (-0.01, 0.255 * sy, 1.11), (0.05, 0.24 * sy, 0.86)]
+        tube(pts, [(0.055, 0.055), (0.045, 0.045), (0.035, 0.035)],
+             [P_SHIRT, P_SKIN, P_SKIN], 4, cap1=(pts[-1], P_SKIN), twist=np.pi / 4)
     pos = np.asarray(P, np.float32)
     tri = np.asarray(T, np.int64)
     # Smooth normals, area weighted; triangles wound outwards.
