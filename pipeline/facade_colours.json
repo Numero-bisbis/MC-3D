@@ -1,0 +1,118 @@
+{
+ "source": "Mapillary contributors (CC-BY-SA 4.0)",
+ "method": "median wall colour 4-12 m up, sky/trees/windows dropped; brightness mapped to V 0.72-0.95",
+ "buildings": {
+  "BATIMENT0000000074070420": {
+   "colour": "#e6dcd9",
+   "photos": 5
+  },
+  "BATIMENT0000000074074336": {
+   "colour": "#ecdcc4",
+   "photos": 14
+  },
+  "BATIMENT0000000074074340": {
+   "colour": "#ebe2d1",
+   "photos": 8
+  },
+  "BATIMENT0000000074074342": {
+   "colour": "#f2eae0",
+   "photos": 4
+  },
+  "BATIMENT0000000074074355": {
+   "colour": "#d9d0c5",
+   "photos": 32
+  },
+  "BATIMENT0000000074074356": {
+   "colour": "#efdfc6",
+   "photos": 11
+  },
+  "BATIMENT0000000074074359": {
+   "colour": "#adafb8",
+   "photos": 9
+  },
+  "BATIMENT0000000074074360": {
+   "colour": "#ddc8a7",
+   "photos": 9
+  },
+  "BATIMENT0000000074074361": {
+   "colour": "#e6e4d7",
+   "photos": 33
+  },
+  "BATIMENT0000000074074362": {
+   "colour": "#d4cfd0",
+   "photos": 9
+  },
+  "BATIMENT0000000074074370": {
+   "colour": "#cfcfcc",
+   "photos": 11
+  },
+  "BATIMENT0000000074074371": {
+   "colour": "#bdb9b0",
+   "photos": 15
+  },
+  "BATIMENT0000000074074373": {
+   "colour": "#d8d3c1",
+   "photos": 22
+  },
+  "BATIMENT0000000074074374": {
+   "colour": "#e3d1cc",
+   "photos": 7
+  },
+  "BATIMENT0000000074074377": {
+   "colour": "#d4d5d1",
+   "photos": 8
+  },
+  "BATIMENT0000000074074381": {
+   "colour": "#e4d2c4",
+   "photos": 13
+  },
+  "BATIMENT0000000074074396": {
+   "colour": "#bfa78f",
+   "photos": 10
+  },
+  "BATIMENT0000000074074430": {
+   "colour": "#d9c6b5",
+   "photos": 11
+  },
+  "BATIMENT0000000074074431": {
+   "colour": "#caa394",
+   "photos": 5
+  },
+  "BATIMENT0000000074074434": {
+   "colour": "#d9d0cb",
+   "photos": 4
+  },
+  "BATIMENT0000000074074436": {
+   "colour": "#ceb7b7",
+   "photos": 18
+  },
+  "BATIMENT0000000074074438": {
+   "colour": "#b4b8b2",
+   "photos": 8
+  },
+  "BATIMENT0000000074074452": {
+   "colour": "#ded9d1",
+   "photos": 9
+  },
+  "BATIMENT0000002009009982": {
+   "colour": "#b5bac1",
+   "photos": 4
+  },
+  "BATIMENT0000002009013201": {
+   "colour": "#cec9d3",
+   "photos": 8
+  },
+  "BATIMENT0000002009013695": {
+   "colour": "#d5cbb6",
+   "photos": 9
+  },
+  "BATIMENT0000002244941449": {
+   "colour": "#b8b39c",
+   "photos": 7
+  },
+  "BATIMENT0000002244941699": {
+   "colour": "#d0bea7",
+   "photos": 5
+  }
+ }
+}
