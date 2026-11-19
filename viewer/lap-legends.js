@@ -289,17 +289,94 @@
     return { kind: "modern", wb: 3.6, track: 1.62, rF: 0.36, rR: 0.36, wF: 0.3, wR: 0.405, len: 5.6, highNose: false, airbox: true, wideWing: true, halo: true, ground: true, lowProfile: true };
   }
 
+  // ---- Sculpted shapes -------------------------------------------------
+  // The bodies are lofts: a series of rounded cross-sections (superellipses)
+  // along the car, skinned into one smooth surface. Tyres are turned
+  // (lathed) profiles with rounded shoulders, wings are thin airfoils.
+  // Triangles are turned to face away from each section's centre, so the
+  // lighting is right whichever way they were listed.
+  function mesh(pos, centers, idx) {
+    const P = (i) => [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]];
+    for (let t = 0; t < idx.length; t += 3) {
+      const a = P(idx[t]), b = P(idx[t + 1]), c = P(idx[t + 2]);
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const m = idx[t], o = [a[0] - centers[3 * m], a[1] - centers[3 * m + 1], a[2] - centers[3 * m + 2]];
+      if (n[0] * o[0] + n[1] * o[1] + n[2] * o[2] < 0) { const k = idx[t + 1]; idx[t + 1] = idx[t + 2]; idx[t + 2] = k; }
+    }
+    const values = new Float64Array(pos);
+    const g = new Cesium.Geometry({
+      attributes: { position: new Cesium.GeometryAttribute({ componentDatatype: Cesium.ComponentDatatype.DOUBLE, componentsPerAttribute: 3, values }) },
+      indices: values.length / 3 > 65535 ? new Uint32Array(idx) : new Uint16Array(idx),
+      primitiveType: Cesium.PrimitiveType.TRIANGLES,
+      boundingSphere: Cesium.BoundingSphere.fromVertices(values),
+    });
+    return Cesium.GeometryPipeline.computeNormal(g);
+  }
+  // Stations: [s, u, v, a, b, p, bLow] = position along the axis, centre
+  // offsets (sideways u, up v), half width a, half height b (bLow below the
+  // centre line, default b) and roundness p (2 = ellipse, higher = squarer).
+  // axis "x" runs along the car, "y" across it (wings). t0..t1 limits the
+  // section to an arc (for colour bands); a full loop gets end caps.
+  function loft(st, color, { axis = "x", seg = 28, t0 = 0, t1 = 2 * Math.PI, grow = 1, at = [0, 0, 0], rot } = {}) {
+    const full = t1 - t0 >= 2 * Math.PI - 1e-6, ring = full ? seg : seg + 1, pos = [], cen = [], idx = [];
+    const put = (s, u, v, cs, cu, cv) => {
+      if (axis === "x") { pos.push(s, u, v); cen.push(cs, cu, cv); } else { pos.push(u, s, v); cen.push(cu, cs, cv); }
+    };
+    for (const [s, u, v, a, b, p = 2, bl] of st) {
+      for (let j = 0; j < ring; j++) {
+        const t = t0 + (t1 - t0) * j / (full ? seg : seg), c = Math.cos(t), sn = Math.sin(t), e = 2 / p;
+        const cu = Math.sign(c) * Math.abs(c) ** e, cv = Math.sign(sn) * Math.abs(sn) ** e;
+        put(s, u + a * grow * cu, v + (sn < 0 ? (bl ?? b) : b) * grow * cv, s, u, v);
+      }
+    }
+    for (let i = 0; i + 1 < st.length; i++) for (let j = 0; j < (full ? seg : seg); j++) {
+      const j2 = full ? (j + 1) % seg : j + 1, a = i * ring + j, b = i * ring + j2, c = (i + 1) * ring + j2, d = (i + 1) * ring + j;
+      idx.push(a, b, c, a, c, d);
+    }
+    if (full) for (const [k, dir] of [[0, -1], [st.length - 1, 1]]) {
+      const [s, u, v] = st[k], ci = pos.length / 3;
+      // The cap's centre sits a touch beyond the end, so it faces outwards.
+      put(s, u, v, s - dir * 0.05, u, v);
+      for (let j = 0; j < seg; j++) idx.push(ci, k * ring + j, k * ring + (j + 1) % seg);
+    }
+    return inst(mesh(pos, cen, idx), at, color, rot);
+  }
+  // A tyre: a profile turned around the axle, with rounded shoulders.
+  function tyre(at, R, rim, w, color) {
+    const sh = Math.min(0.06, (R - rim) * 0.45), prof = [
+      [rim, -w / 2], [R - sh, -w / 2], [R - sh * 0.3, -w / 2 + sh * 0.3], [R, -w / 2 + sh],
+      [R, w / 2 - sh], [R - sh * 0.3, w / 2 - sh * 0.3], [R - sh, w / 2], [rim, w / 2]];
+    const seg = 36, pos = [], cen = [], idx = [], rc = (R + rim) / 2;
+    for (let k = 0; k < seg; k++) {
+      const th = 2 * Math.PI * k / seg, c = Math.cos(th), s = Math.sin(th);
+      for (const [r, y] of prof) { pos.push(r * c, y, r * s); cen.push(rc * c, 0, rc * s); }
+    }
+    const n = prof.length;
+    for (let k = 0; k < seg; k++) for (let j = 0; j + 1 < n; j++) {
+      const k2 = (k + 1) % seg, a = k * n + j, b = k * n + j + 1, c = k2 * n + j + 1, d = k2 * n + j;
+      idx.push(a, b, c, a, c, d);
+    }
+    return inst(mesh(pos, cen, idx), at, color);
+  }
+  // A wing element: an airfoil (thicker at the front) across the car.
+  function wing(x, z, span, chord, thick, aoa, color, y = 0) {
+    const half = span / 2;
+    return loft([[-half + y, 0, 0, chord / 2, thick / 2, 2.4], [half + y, 0, 0, chord / 2, thick / 2, 2.4]], color,
+      { axis: "y", seg: 18, at: [x, 0, z], rot: pitch(aoa) });
+  }
+
   function wheels(e, parts) {
     const h = e.wb / 2;
     for (const [x, y, r, w] of [[h, e.track / 2, e.rF, e.wF], [h, -e.track / 2, e.rF, e.wF], [-h, e.track / 2, e.rR, e.wR], [-h, -e.track / 2, e.rR, e.wR]]) {
       const out = Math.sign(y);
-      parts.push(disc([x, y, r], r, w, COL.tyre));
-      // Sidewall bulge, then the rim: wire wheels on the old cars, big
-      // low-profile rims (and covers) on today's.
-      parts.push(disc([x, y, r], r * 0.97, w + 0.012, COL.tyre));
-      const rim = e.lowProfile ? 0.74 : e.kind === "cigar" ? 0.7 : 0.6;
-      parts.push(disc([x, y + out * 0.008, r], r * rim, w + 0.02, e.kind === "cigar" ? COL.wire : e.lowProfile ? COL.carbon : COL.rim));
-      parts.push(disc([x, y + out * 0.012, r], r * 0.16, w + 0.03, COL.metal));
+      const rim = e.lowProfile ? 0.74 : e.kind === "cigar" ? 0.68 : 0.6;
+      parts.push(tyre([x, y, r], r, r * rim * 0.98, w, COL.tyre));
+      // The rim: wire wheels on the old cars, big dark rims on today's.
+      parts.push(disc([x, y - out * 0.01, r], r * rim, w * 0.8, e.kind === "cigar" ? COL.wire : e.lowProfile ? COL.carbon : COL.rim));
+      parts.push(disc([x, y + out * (w * 0.4 - 0.01), r], r * rim * 0.55, 0.03, e.kind === "cigar" ? COL.metal : COL.carbon));
+      parts.push(disc([x, y + out * (w * 0.4), r], r * 0.14, 0.05, COL.metal));
+      if (e.lowProfile) parts.push(disc([x, y + out * (w * 0.4 + 0.012), r], r * rim * 0.95, 0.012, COL.carbon)); // wheel cover
     }
   }
   // Wishbones from the body to each wheel.
@@ -307,109 +384,129 @@
     const h = e.wb / 2;
     for (const [x, r] of [[h, e.rF], [-h, e.rR]]) for (const sy of [1, -1]) {
       const wy = sy * (e.track / 2 - 0.12);
-      parts.push(rod([x + 0.18, sy * bodyHalf, r + 0.05], [x, wy, r + 0.06], 0.018, color));
-      parts.push(rod([x - 0.18, sy * bodyHalf, r + 0.05], [x, wy, r + 0.06], 0.018, color));
-      parts.push(rod([x + 0.15, sy * bodyHalf, r - 0.1], [x, wy, r - 0.1], 0.018, color));
-      parts.push(rod([x - 0.15, sy * bodyHalf, r - 0.1], [x, wy, r - 0.1], 0.018, color));
+      parts.push(rod([x + 0.18, sy * bodyHalf, r + 0.05], [x, wy, r + 0.06], 0.016, color));
+      parts.push(rod([x - 0.18, sy * bodyHalf, r + 0.05], [x, wy, r + 0.06], 0.016, color));
+      parts.push(rod([x + 0.15, sy * bodyHalf, r - 0.1], [x, wy, r - 0.1], 0.016, color));
+      parts.push(rod([x - 0.15, sy * bodyHalf, r - 0.1], [x, wy, r - 0.1], 0.016, color));
     }
   }
+  // Colour bands laid over a body: the upper half, a centre stripe, a pair
+  // of pinstripes or a band round the nose.
+  const TOP = Math.PI / 2;
+  const stripe = (st, color, w = 0.1, off = 0) => loft(st, color, { t0: TOP + off - w, t1: TOP + off + w, seg: 4, grow: 1.012 });
+  const slice = (st, s0, s1) => st.filter(([s]) => s <= s0 && s >= s1);
 
   function carParts(lap) {
     const e = eraOf(lap.year), L = liveryOf(lap), h = e.wb / 2, parts = [];
     wheels(e, parts);
     if (e.kind === "cigar") {
       // 1950s – 60s: a slim cigar, open wheels on wire spokes.
-      parts.push(blob([0.05, 0, 0.42], [h + 0.62, 0.34, 0.27], L.body));
-      parts.push(blob([h + 0.62, 0, 0.4], [0.07, 0.17, 0.14], COL.carbon));                 // radiator grille
-      if (L.band) parts.push(blob([h + 0.4, 0, 0.42], [0.16, 0.2, 0.17], L.nose));           // nose band
-      if (L.stripes) for (const sy of [0.07, -0.07]) parts.push(box([0.35, sy, 0.69], [2.1, 0.05, 0.012], L.accent));
-      parts.push(box([0.15, 0, 0.72], [0.04, 0.36, 0.13], COL.glass));                       // screen
-      parts.push(blob([-0.2, 0, 0.82], [0.13, 0.12, 0.13], L.helmet));                      // helmet
-      parts.push(rod([-0.42, 0.16, 0.6], [-0.42, 0.16, 0.92], 0.02, COL.metal));             // roll hoop
-      parts.push(rod([-0.42, -0.16, 0.6], [-0.42, -0.16, 0.92], 0.02, COL.metal));
-      parts.push(rod([-0.42, 0.16, 0.92], [-0.42, -0.16, 0.92], 0.02, COL.metal));
-      for (const sy of [0.12, -0.12]) parts.push(rod([-0.5, sy, 0.32], [-h - 0.55, sy * 1.4, 0.36], 0.03, COL.metal, 0.036)); // exhausts
-      arms(e, parts, 0.25, COL.metal);
+      const B = [
+        [h + 0.66, 0, 0.4, 0.12, 0.11], [h + 0.45, 0, 0.42, 0.22, 0.2], [h + 0.1, 0, 0.44, 0.3, 0.25],
+        [0.3, 0, 0.45, 0.33, 0.26], [-0.1, 0, 0.45, 0.33, 0.25], [-0.7, 0, 0.44, 0.3, 0.24],
+        [-h - 0.15, 0, 0.42, 0.21, 0.19], [-h - 0.55, 0, 0.42, 0.06, 0.07]];
+      parts.push(loft(B, L.body, { seg: 32 }));
+      parts.push(inst(new Cesium.CylinderGeometry({ length: 0.02, topRadius: 0.11, bottomRadius: 0.11, slices: 28, vertexFormat: VF }), [h + 0.67, 0, 0.4], COL.carbon, Cesium.Matrix3.fromRotationY(Math.PI / 2)));
+      if (L.band) parts.push(loft(slice(B, h + 0.5, h + 0.1).length ? [[h + 0.5, 0, 0.42, 0.235, 0.215], [h + 0.25, 0, 0.43, 0.275, 0.235]] : [], L.nose, { seg: 32, grow: 1.02 }));
+      if (L.stripes) for (const off of [0.16, -0.16]) parts.push(stripe(B.slice(1, 6), L.accent, 0.05, off));
+      parts.push(box([0.12, 0, 0.73], [0.03, 0.34, 0.12], COL.glass, pitch(-25)));          // screen
+      parts.push(blob([-0.22, 0, 0.8], [0.13, 0.12, 0.13], L.helmet));                     // helmet
+      parts.push(rod([-0.45, 0.15, 0.62], [-0.45, 0.15, 0.9], 0.018, COL.metal));          // roll hoop
+      parts.push(rod([-0.45, -0.15, 0.62], [-0.45, -0.15, 0.9], 0.018, COL.metal));
+      parts.push(rod([-0.45, 0.15, 0.9], [-0.45, -0.15, 0.9], 0.018, COL.metal));
+      for (const sy of [0.12, -0.12]) parts.push(rod([-0.5, sy * 2.2, 0.32], [-h - 0.55, sy * 1.6, 0.34], 0.025, COL.metal, 0.034)); // exhausts
+      arms(e, parts, 0.22, COL.metal);
       return parts;
     }
     if (e.kind === "wedge") {
-      // 1968 – 77: wedge nose, side radiators, wings on tall struts.
-      parts.push(box([0.05, 0, 0.36], [e.wb * 0.85, 0.56, 0.34], L.body));                   // tub
-      parts.push(cone(0.45 * e.wb, h + 0.72, 0.4, 0.2, 0.25, 0.06, L.body, 1.6, 0.7));        // wedge nose
-      if (L.band) parts.push(cone(h + 0.3, h + 0.5, 0.29, 0.25, 0.17, 0.14, L.nose, 1.6, 0.75));
-      for (const sy of [1, -1]) parts.push(box([-0.15, sy * 0.44, 0.3], [1.3, 0.34, 0.3], L.body)); // radiator pods
-      parts.push(blob([-0.55, 0, 0.5], [0.75, 0.26, 0.2], L.body));                         // engine cover
-      parts.push(box([-h - 0.1, 0, 0.32], [0.55, 0.5, 0.3], COL.metal));                    // gearbox / engine
-      if (L.stripes || L.pin) for (const sy of L.pin ? [0.2, -0.2] : [0.06, -0.06]) parts.push(box([0.3, sy, 0.54], [2.0, L.pin ? 0.02 : 0.05, 0.012], L.pin ? L.gold : L.accent));
-      if (L.gold && !L.pin) parts.push(box([0.3, 0, 0.545], [2.0, 0.025, 0.014], L.gold));
-      parts.push(box([0.42, 0, 0.62], [0.05, 0.42, 0.12], COL.glass));
-      parts.push(blob([0.12, 0, 0.72], [0.14, 0.13, 0.14], L.helmet));
-      if (e.airbox) parts.push(blob([-0.2, 0, 0.9], [0.32, 0.17, 0.16], L.body, pitch(-6)));
-      parts.push(box([h + 0.7, 0, 0.2], [0.32, 1.25, 0.025], L.wing));                       // nose fins
+      // 1968 – 77: a wedge nose, radiators at the sides, wings on struts.
+      const B = [
+        [h + 0.78, 0, 0.17, 0.3, 0.025, 4], [h + 0.35, 0, 0.24, 0.3, 0.09, 4], [h - 0.1, 0, 0.32, 0.27, 0.15, 4],
+        [0.25, 0, 0.38, 0.28, 0.2, 4, 0.26], [-0.2, 0, 0.4, 0.29, 0.21, 4, 0.28], [-0.7, 0, 0.42, 0.26, 0.2, 3, 0.28],
+        [-h - 0.05, 0, 0.36, 0.2, 0.14, 3], [-h - 0.3, 0, 0.33, 0.12, 0.08, 3]];
+      parts.push(loft(B, L.body, { seg: 32 }));
+      if (L.band) parts.push(loft([[h + 0.5, 0, 0.21, 0.31, 0.06, 4], [h + 0.25, 0, 0.26, 0.31, 0.105, 4]], L.nose, { seg: 32, grow: 1.03 }));
+      if (L.stripes) for (const off of [0.12, -0.12]) parts.push(stripe(B.slice(0, 6), L.accent, 0.05, off));
+      if (L.gold && !L.pin) parts.push(stripe(B.slice(0, 6), L.gold, 0.03, 0));
+      if (L.pin) for (const off of [0.6, -0.6]) parts.push(stripe(B.slice(0, 7), L.gold, 0.025, off));
+      for (const sy of [1, -1]) parts.push(loft([[0.45, sy * 0.45, 0.3, 0.12, 0.13, 4], [0.2, sy * 0.47, 0.3, 0.17, 0.15, 4], [-0.6, sy * 0.45, 0.3, 0.16, 0.15, 4], [-0.85, sy * 0.38, 0.32, 0.08, 0.1, 3]], L.body)); // radiator pods
+      parts.push(box([-h - 0.05, 0, 0.32], [0.5, 0.48, 0.26], COL.metal));                 // engine / gearbox
+      parts.push(box([0.42, 0, 0.62], [0.03, 0.4, 0.12], COL.glass, pitch(-30)));
+      parts.push(blob([0.1, 0, 0.7], [0.14, 0.13, 0.14], L.helmet));
+      if (e.airbox) parts.push(loft([[0.0, 0, 0.84, 0.1, 0.09, 3], [-0.25, 0, 0.82, 0.17, 0.12, 3], [-0.55, 0, 0.66, 0.14, 0.06, 3]], L.body));
+      parts.push(wing(h + 0.72, 0.2, 1.2, 0.3, 0.025, -6, L.wing));                         // nose fins
       if (e.rearWing) {
-        parts.push(box([-h - 0.55, 0, 1.0], [0.42, 1.0, 0.035], L.wing));
+        parts.push(wing(-h - 0.55, 1.0, 1.0, 0.42, 0.04, -10, L.wing));
         for (const sy of [0.5, -0.5]) parts.push(box([-h - 0.55, sy, 0.95], [0.45, 0.02, 0.2], L.accent));
         for (const sy of [0.2, -0.2]) parts.push(rod([-h - 0.45, sy, 0.45], [-h - 0.55, sy, 0.98], 0.02, COL.carbon));
       }
       arms(e, parts, 0.28, COL.carbon);
       return parts;
     }
-    // 1978 onwards: monocoque, sidepods, front and rear wings.
-    const highZ = e.highNose ? 0.5 : e.noseZ || 0.32, tub = 0.6;
-    parts.push(box([-0.1 * e.wb, 0, 0.09], [e.wb + 0.55, e.track * 0.74, 0.04], COL.carbon)); // floor
-    parts.push(box([0.17 * e.wb, 0, 0.37], [e.wb * 0.62, tub, 0.4], L.body));               // tub
-    parts.push(box([0.17 * e.wb, 0, 0.58], [e.wb * 0.6, tub * 0.75, 0.04], L.top));          // tub top deck
-    parts.push(cone(0.45 * e.wb, h + 0.78, highZ + 0.05, e.highNose ? 0.33 : 0.18, 0.27, 0.07, L.body, 1.15, 0.85));
-    parts.push(cone(h + 0.45, h + 0.8, e.highNose ? 0.37 : 0.2, e.highNose ? 0.33 : 0.18, 0.11, 0.06, L.nose, 1.15, 0.85)); // nose tip
-    if (e.highNose) for (const sy of [0.12, -0.12]) parts.push(box([h + 0.6, sy, 0.22], [0.25, 0.03, 0.2], COL.carbon)); // wing pylons
-    // Sidepods: long and flat in the turbo years, rounder later.
-    const podY = tub / 2 + (e.kind === "turbo" ? 0.3 : 0.22), podL = e.kind === "turbo" ? 1.9 : 1.55;
+    // 1978 onwards: one sculpted body from nose tip to gearbox, sidepods,
+    // and front and rear wings.
+    const tip = h + (e.wideWing ? 0.92 : 0.8);
+    const nz = e.highNose ? [0.33, 0.42, 0.47] : e.ground ? [0.2, 0.27, 0.36] : [0.17, 0.24, 0.33];
+    const B = [
+      [tip, 0, nz[0], 0.06, 0.045, 2.5], [h + 0.45, 0, nz[1], 0.11, 0.08, 2.6], [h, 0, nz[2], 0.17, 0.12, 3],
+      [0.25 * e.wb, 0, 0.43, 0.27, 0.18, 3.5, 0.3], [0, 0, 0.43, 0.3, 0.18, 4, 0.31],
+      [-0.12 * e.wb, 0, 0.47, 0.29, e.airbox ? 0.3 : 0.2, 3, 0.35],
+      [-0.3 * e.wb, 0, 0.45, 0.24, e.airbox ? 0.23 : 0.17, 3, 0.33],
+      [-h + 0.1, 0, 0.37, 0.14, 0.13, 3], [-h - 0.28, 0, 0.33, 0.08, 0.08, 2.5]];
+    parts.push(loft(B, L.body, { seg: 36 }));
+    // Colours over the body: a different top deck, the nose tip, stripes.
+    if (!Cesium.Color.equals(L.top, L.body)) parts.push(loft(B.slice(1, 7), L.top, { t0: 0.35, t1: Math.PI - 0.35, seg: 16, grow: 1.01 }));
+    if (!Cesium.Color.equals(L.nose, L.body)) parts.push(loft([B[0], B[1], [h + 0.25, 0, (nz[1] + nz[2]) / 2, 0.14, 0.1, 2.8]], L.nose, { seg: 36, grow: 1.015 }));
+    if (L.pin) for (const off of [0.75, -0.75]) parts.push(stripe(B.slice(1, 8), L.gold, 0.02, off));
+    parts.push(stripe(B.slice(1, 5), L.accent, 0.07, 0));
+    // Sidepods: long and flat in the turbo years, shorter and rounder later.
+    const tb = e.kind === "turbo", podY = 0.3 + (tb ? 0.28 : 0.2), pa = tb ? 0.3 : 0.21, pb = e.ground ? 0.17 : 0.14;
     for (const sy of [1, -1]) {
-      parts.push(box([-0.12 * e.wb, sy * podY, 0.26], [podL * 0.8, e.kind === "turbo" ? 0.56 : 0.4, e.ground ? 0.3 : 0.26], L.body));
-      parts.push(blob([-0.12 * e.wb + podL * 0.4, sy * podY, 0.26], [0.2, e.kind === "turbo" ? 0.28 : 0.2, e.ground ? 0.15 : 0.13], L.body)); // rounded intake
-      parts.push(box([-0.12 * e.wb, sy * (podY + 0.01), 0.17], [podL * 0.8 + 0.01, e.kind === "turbo" ? 0.56 : 0.4, 0.1], L.lower));
-      parts.push(box([0.17 * e.wb, sy * (tub / 2 + 0.22), 0.6], [0.08, 0.1, 0.05], L.body)); // mirror
-      parts.push(rod([0.17 * e.wb, sy * (tub / 2), 0.55], [0.17 * e.wb, sy * (tub / 2 + 0.2), 0.6], 0.012, COL.carbon));
-      if (e.aero) parts.push(box([0.2 * e.wb, sy * (tub / 2 + 0.15), 0.3], [0.5, 0.02, 0.3], COL.carbon)); // bargeboards
+      const P = [
+        [0.2 * e.wb, sy * (podY - 0.04), 0.27, pa * 0.7, pb * 0.75, 4], [0.12 * e.wb, sy * podY, 0.27, pa, pb, 4],
+        [-0.12 * e.wb, sy * podY, 0.26, pa, pb, 4], [-0.32 * e.wb, sy * (podY - pa * 0.45), 0.25, pa * 0.55, pb * 0.8, 3.5],
+        [-h + 0.15, sy * 0.25, 0.24, 0.08, 0.08, 3]];
+      parts.push(loft(P, L.body, { seg: 24 }));
+      if (!Cesium.Color.equals(L.lower, L.body)) parts.push(loft(P.slice(1, 4), L.lower, { t0: Math.PI + 0.25, t1: 2 * Math.PI - 0.25, seg: 10, grow: 1.02 }));
+      parts.push(box([0.2 * e.wb, sy * 0.52, 0.6], [0.08, 0.1, 0.05], L.body));               // mirror
+      parts.push(rod([0.2 * e.wb, sy * 0.28, 0.55], [0.2 * e.wb, sy * 0.48, 0.6], 0.011, COL.carbon));
+      if (e.aero) parts.push(box([0.24 * e.wb, sy * 0.42, 0.25], [0.5, 0.015, 0.28], COL.carbon)); // bargeboards
     }
-    // Cockpit, helmet, engine cover and airbox.
-    parts.push(blob([-0.02 * e.wb, 0, 0.68], [0.14, 0.13, 0.14], L.helmet));
-    parts.push(box([-0.02 * e.wb + 0.05, 0, 0.6], [0.5, 0.36, 0.06], COL.carbon));            // cockpit rim
-    parts.push(blob([-0.32 * e.wb, 0, 0.45], [0.95, 0.25, e.airbox ? 0.27 : 0.22], L.body));
-    if (e.airbox) parts.push(blob([-0.13 * e.wb, 0, 0.74], [0.3, 0.12, 0.13], L.top));
-    if (e.airbox) parts.push(box([-0.13 * e.wb + 0.12, 0, 0.77], [0.05, 0.11, 0.08], COL.carbon)); // intake
-    if (e.fin) parts.push(box([-0.42 * e.wb, 0, 0.78], [1.0, 0.02, 0.22], L.body));
-    // Stripes along the top.
-    if (L.pin) for (const sy of [0.2, -0.2]) parts.push(box([0.17 * e.wb, sy, 0.605], [e.wb * 0.6, 0.015, 0.008], L.gold));
-    parts.push(box([0.3 * e.wb, 0, 0.606], [e.wb * 0.45, 0.06, 0.006], L.accent));
+    parts.push(box([-0.1 * e.wb, 0, 0.085], [e.wb + 0.55, e.track * 0.74, 0.035], COL.carbon)); // floor
+    // Cockpit: dark rim, helmet; airbox intake; fin.
+    parts.push(loft([[0.17 * e.wb, 0, 0.6, 0.2, 0.025, 3], [-0.03 * e.wb, 0, 0.62, 0.21, 0.03, 3]], COL.carbon, { seg: 20 }));
+    parts.push(blob([-0.01 * e.wb, 0, 0.7], [0.14, 0.13, 0.14], L.helmet));
+    if (e.airbox) parts.push(blob([-0.09 * e.wb, 0, 0.8], [0.03, 0.09, 0.07], COL.carbon));
+    if (e.fin) parts.push(box([-0.36 * e.wb, 0, 0.78], [1.0, 0.018, 0.2], L.body));
     // Front wing: narrow on older cars, the full width since 2009.
     const fw = e.wideWing ? e.track + e.wF * 0.6 : e.track - 0.15;
-    parts.push(box([h + 0.68, 0, 0.1], [0.5, fw, 0.03], L.wing));
-    parts.push(box([h + 0.58, 0, 0.17], [0.22, fw * (e.ground ? 0.92 : 0.95), 0.025], L.wing, pitch(-14)));
-    if (e.wideWing || e.aero) parts.push(box([h + 0.52, 0, 0.23], [0.15, fw * 0.9, 0.02], L.accent, pitch(-22)));
-    for (const sy of [fw / 2, -fw / 2]) parts.push(box([h + 0.65, sy, 0.16], [0.55, 0.02, 0.17], L.accent));
+    parts.push(wing(h + 0.66, 0.1, fw, 0.5, 0.03, -3, L.wing));
+    parts.push(wing(h + 0.56, 0.17, fw * 0.94, 0.24, 0.025, -16, L.wing));
+    if (e.wideWing || e.aero) parts.push(wing(h + 0.5, 0.23, fw * 0.88, 0.15, 0.02, -26, L.accent));
+    for (const sy of [fw / 2, -fw / 2]) parts.push(box([h + 0.62, sy, 0.16], [0.55, 0.02, 0.17], L.accent));
+    if (e.highNose) for (const sy of [0.12, -0.12]) parts.push(box([h + 0.6, sy, 0.22], [0.25, 0.02, 0.2], COL.carbon)); // wing pylons
     // Rear wing with endplates, a beam wing below, and the diffuser.
-    const rx = -h - 0.42, rwW = e.kind === "turbo" ? 1.05 : e.wideWing ? 0.95 : 1.0;
-    const rwZ = e.kind === "turbo" ? 0.9 : e.wideWing && !e.ground ? 0.92 : 0.86;
-    parts.push(box([rx, 0, rwZ], [0.34, rwW, 0.045], L.wing, pitch(-8)));
-    parts.push(box([rx - 0.12, 0, rwZ + 0.12], [0.2, rwW, 0.03], L.wing, pitch(-26)));
-    for (const sy of [rwW / 2, -rwW / 2]) parts.push(box([rx - 0.03, sy, rwZ - 0.14], [0.62, 0.025, e.ground ? 0.42 : 0.55], L.accent));
-    parts.push(box([rx + 0.18, 0, 0.42], [0.14, 0.06, rwZ - 0.4], COL.carbon));             // wing pillar
-    parts.push(box([rx + 0.05, 0, 0.35], [0.2, rwW * 0.7, 0.025], COL.carbon));             // beam wing
-    parts.push(box([-h - 0.05, 0, 0.16], [0.6, e.track * 0.62, 0.12], COL.carbon, pitch(10))); // diffuser
-    parts.push(box([-h - 0.2, 0, 0.3], [0.4, 0.4, 0.22], COL.carbon));                      // gearbox
+    const rx = -h - 0.42, rwW = tb ? 1.05 : e.wideWing ? 0.95 : 1.0;
+    const rwZ = tb ? 0.9 : e.wideWing && !e.ground ? 0.92 : 0.86;
+    parts.push(wing(rx, rwZ, rwW, 0.36, 0.05, -8, L.wing));
+    parts.push(wing(rx - 0.13, rwZ + 0.12, rwW, 0.2, 0.03, -28, L.wing));
+    for (const sy of [rwW / 2, -rwW / 2]) parts.push(box([rx - 0.03, sy, rwZ - 0.14], [0.62, 0.02, e.ground ? 0.42 : 0.55], L.accent));
+    parts.push(box([rx + 0.18, 0, 0.42], [0.12, 0.05, rwZ - 0.4], COL.carbon));             // wing pillar
+    parts.push(wing(rx + 0.05, 0.35, rwW * 0.7, 0.2, 0.025, -12, COL.carbon));              // beam wing
+    parts.push(box([-h - 0.05, 0, 0.16], [0.6, e.track * 0.62, 0.1], COL.carbon, pitch(10))); // diffuser
     if (e.halo) {
       const hx = 0.17 * e.wb + 0.3, top = 0.88, back = -0.02 * e.wb - 0.12;
-      parts.push(rod([hx + 0.06, 0, 0.62], [hx - 0.04, 0, top], 0.025, COL.carbon));
+      parts.push(rod([hx + 0.06, 0, 0.6], [hx - 0.04, 0, top], 0.025, COL.carbon));
       for (const sy of [1, -1]) {
         parts.push(rod([hx - 0.04, 0, top], [hx - 0.28, sy * 0.25, top - 0.02], 0.023, COL.carbon));
         parts.push(rod([hx - 0.28, sy * 0.25, top - 0.02], [back, sy * 0.26, top - 0.06], 0.023, COL.carbon));
         parts.push(rod([back, sy * 0.26, top - 0.06], [back - 0.05, sy * 0.27, 0.6], 0.023, COL.carbon));
       }
     }
-    arms(e, parts, tub / 2, COL.carbon);
+    arms(e, parts, 0.28, COL.carbon);
     return parts;
   }
+
   const cars = {};
   function makeCar(lap) {
     if (cars[lap.id]) return cars[lap.id];
