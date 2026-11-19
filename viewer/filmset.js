@@ -461,6 +461,16 @@
             // Spectators: matte clothes, dimmer at night.
             material.diffuse = base * mix(1.0, 0.35, u_night);
             material.roughness = 0.9;
+          } else if (st > 4.5 && st < 5.5) {
+            // Polished steel (Sky Mirror, Chrome Ball): mirrors the sky.
+            material.diffuse = base * 0.25;
+            material.specular = vec3(0.85);
+            material.roughness = 0.12;
+          } else if (st > 5.5 && st < 6.5) {
+            // Bronze statues: dark, with a warm sheen.
+            material.diffuse = base;
+            material.specular = vec3(0.32, 0.24, 0.14);
+            material.roughness = 0.42;
           } else {
             material.diffuse = base;
           }

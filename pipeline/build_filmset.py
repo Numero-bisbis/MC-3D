@@ -2274,6 +2274,188 @@ def pool_features(m, ways, mnt):
     return n_
 
 
+# PLAIN styles drawn by the viewer: 5 polished steel, 6 bronze.
+METAL, BRONZE = 5, 6
+
+
+def _box(m, cx, cy, ax, w, d, z0, z1, col, kind=PLAIN, style=None, top=True):
+    """An upright box centred on (cx, cy), w along ax and d across."""
+    ax = np.asarray(ax, float) / (np.linalg.norm(ax) + 1e-9)
+    sd = np.array([-ax[1], ax[0]])
+    c = np.array([cx, cy])
+    pts = [c - ax * w / 2 - sd * d / 2, c + ax * w / 2 - sd * d / 2, c + ax * w / 2 + sd * d / 2, c - ax * w / 2 + sd * d / 2]
+    poly = orient(Polygon(pts), 1.0)
+    add_walls(m, poly, z0, z1, z0, 100, col, kind, style=style)
+    if top:
+        P = enu_fast(np.array([p[0] for p in pts]), np.array([p[1] for p in pts]), np.full(4, z1))
+        m.tri(P[[0, 0]], P[[1, 2]], P[[2, 3]], col, kind, style=style)
+
+
+def _ball(m, cx, cy, z, r, col, style, nu=10, nv=6):
+    v, t = unit_sphere(nu, nv)
+    P = enu_fast(cx + v[:, 0] * r, cy + v[:, 1] * r, z + v[:, 2] * r)
+    Q = enu_fast(cx + v[:, 0] * (r + 1), cy + v[:, 1] * (r + 1), z + v[:, 2] * (r + 1))
+    nrm = Q - P
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+    m.add(P, nrm, col, PLAIN, idx=t, style=style)
+
+
+def street_features(m, ways, pts, mnt, stats):
+    """The furniture of the streets around the circuit, from OpenStreetMap:
+    fountain basins with a stone rim and water jets, the bronze statues and
+    busts on their plinths (Fangio, Louis Chiron, Massenet, Berlioz...),
+    Anish Kapoor's Sky Mirror on Casino square, the Chrome Ball, and the
+    rows of flagpoles flying Monaco's red and white. Small things, but from
+    the lap camera they give the streets their scale and depth."""
+    mntR = Raster(mnt)
+    xmin, ymin, xmax, ymax = X0, Y1 - mnt.shape[0] * RES, X0 + mnt.shape[1] * RES, Y1
+    inside = lambda x, y: xmin + 5 < x < xmax - 5 and ymin + 5 < y < ymax - 5
+
+    def gz(x, y):
+        z = mntR.sample(np.array([x]), np.array([y]))
+        z = float(z[0]) if np.size(z) else float("nan")
+        return z
+
+    stone, rimc = np.array(hexrgb("#ddd5c4")), np.array(hexrgb("#cfc5b0"))
+    water, jet = np.array(hexrgb("#3f9fae")), np.array(hexrgb("#eef6f7"))
+    bronze, steel = np.array(hexrgb("#6a5638")), np.array(hexrgb("#d8dee4"))
+    n = {"fountains": 0, "statues": 0, "flags": 0, "sky_mirror": 0}
+
+    # Fountains: a stone rim round the basin, water just below its top and,
+    # in the bigger ones, a cluster of jets.
+    for t, p_, closed in ways:
+        if not closed or len(p_) < 4 or t.get("amenity") != "fountain":
+            continue
+        g = Polygon(p_).buffer(0)
+        c = g.centroid
+        if g.area < 4 or not inside(c.x, c.y) or not off_track(c.x, c.y, 1.0):
+            continue
+        ring = np.asarray(g.exterior.coords)
+        zr = mntR.sample(ring[:, 0], ring[:, 1])
+        if not np.isfinite(zr).any():
+            continue
+        z0 = float(np.nanmedian(zr))
+        inner = g.buffer(-0.45)
+        if inner.is_empty or inner.geom_type != "Polygon":
+            continue
+        rim = 0.55
+        add_walls(m, orient(g, 1.0), z0 - 0.3, z0 + rim, z0, 100, rimc, PLAIN)
+        add_walls(m, orient(inner, 1.0), z0, z0 + rim, z0, 100, rimc * 0.93, PLAIN, inward=True)
+        for poly, z, col in ((g.difference(inner), z0 + rim, stone), (inner, z0 + rim - 0.12, water)):
+            tr = triangulate(poly)
+            if tr is None:
+                continue
+            v, tri = tr
+            P = enu_fast(v[:, 0], v[:, 1], np.full(len(v), z))
+            m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, PLAIN)
+        if g.area > 30 and not any(tt.get("name") == "Sky Mirror" and g.buffer(1).contains(Point(*xy))
+                                   for xy, tt in pts):
+            r = math.sqrt(inner.area / math.pi)
+            _box(m, c.x, c.y, (1, 0), 0.9, 0.9, z0, z0 + 0.9, stone)
+            for k in range(7):
+                a = 2 * math.pi * k / 7
+                rr = 0 if k == 0 else r * 0.45
+                h = 2.6 if k == 0 else 1.2
+                x, y = c.x + rr * math.cos(a), c.y + rr * math.sin(a)
+                P = enu_fast(x + CONE_V[:, 0] * 0.12, y + CONE_V[:, 1] * 0.12, z0 + rim - 0.12 + CONE_V[:, 2] * h)
+                m.tri(P[CONE_T[:, 0]], P[CONE_T[:, 1]], P[CONE_T[:, 2]], jet, PLAIN)
+        n["fountains"] += 1
+
+    for (x, y), t in pts:
+        if not inside(x, y):
+            continue
+        name = t.get("name") or ""
+        typ = t.get("artwork_type") or t.get("memorial") or ""
+        z0 = gz(x, y)
+        if not np.isfinite(z0) or not off_track(x, y, 0.5):
+            continue
+        # Face the nearest stretch of the circuit (or south, to the sea).
+        if TRACK is not None:
+            q = TRACK["line"].interpolate(TRACK["line"].project(shapely.Point(x, y)))
+            fa = np.array([q.x - x, q.y - y])
+        else:
+            fa = np.array([0.0, -1.0])
+        fa = fa / (np.linalg.norm(fa) + 1e-9)
+        sd = np.array([-fa[1], fa[0]])
+        if name == "Sky Mirror":
+            # A 5.5 m concave disc of polished steel, tilted back to the sky,
+            # turned to the cars coming round the square from Massenet.
+            fa = np.array([1.0, 0.25]) / math.hypot(1.0, 0.25)
+            sd = np.array([-fa[1], fa[0]])
+            R, depth, tilt = 2.75, 0.45, math.radians(20)
+            zc = z0 + 0.6 + R
+            up = np.array([0.0, 0.0, 1.0])
+            nrm_ax = np.array([fa[0] * math.cos(tilt), fa[1] * math.cos(tilt), math.sin(tilt)])
+            e1 = np.array([sd[0], sd[1], 0.0])
+            e2 = np.cross(nrm_ax, e1)
+            e2 /= np.linalg.norm(e2)
+            nr, nu_ = 6, 32
+            V, N = [], []
+            for i in range(nr + 1):
+                rr = R * i / nr
+                for j in range(nu_):
+                    a = 2 * math.pi * j / nu_
+                    off = e1 * rr * math.cos(a) + e2 * rr * math.sin(a) + nrm_ax * depth * (rr / R) ** 2
+                    V.append(off)
+                    sl = 2 * depth * rr / R ** 2
+                    rad = e1 * math.cos(a) + e2 * math.sin(a)
+                    nv = nrm_ax - rad * sl
+                    N.append(nv / np.linalg.norm(nv))
+            V, N = np.array(V), np.array(N)
+            P = enu_fast(x + V[:, 0], y + V[:, 1], zc + V[:, 2])
+            Q = enu_fast(x + V[:, 0] + N[:, 0], y + V[:, 1] + N[:, 1], zc + V[:, 2] + N[:, 2])
+            nn = (Q - P) / np.linalg.norm(Q - P, axis=1, keepdims=True)
+            idx = []
+            for i in range(nr):
+                for j in range(nu_):
+                    a_, b_ = i * nu_ + j, i * nu_ + (j + 1) % nu_
+                    c_, d_ = a_ + nu_, b_ + nu_
+                    idx += [a_, c_, b_, b_, c_, d_]
+            idx = np.array(idx)
+            # Front: concave mirror; back: the same surface, reversed.
+            m.add(P, nn, steel, PLAIN, idx=idx, style=METAL)
+            m.add(P, -nn, steel * 0.8, PLAIN, idx=idx.reshape(-1, 3)[:, ::-1], style=METAL)
+            _box(m, x - fa[0] * 0.25, y - fa[1] * 0.25, sd, 0.7, 0.45, z0, zc - 0.05, steel * 0.7, style=METAL)
+            n["sky_mirror"] += 1
+        elif name == "Chrome Ball":
+            _ball(m, x, y, z0 + 1.0, 1.0, steel, METAL)
+            n["statues"] += 1
+        elif typ == "bust" and name:
+            _box(m, x, y, fa, 0.6, 0.6, z0, z0 + 1.45, stone)
+            _box(m, x, y, sd, 0.58, 0.3, z0 + 1.45, z0 + 1.78, bronze, style=BRONZE)
+            _ball(m, x, y, z0 + 1.97, 0.15, bronze, BRONZE, 8, 5)
+            n["statues"] += 1
+        elif typ == "statue":
+            # Plinth, then a standing figure in bronze, facing the street.
+            ph = 1.4
+            _box(m, x, y, fa, 1.3, 1.3, z0, z0 + ph, stone)
+            _box(m, x, y, fa, 1.45, 1.45, z0 + ph, z0 + ph + 0.12, rimc)
+            zb = z0 + ph + 0.12
+            for s_ in (-1, 1):
+                lx, ly = x + sd[0] * 0.12 * s_, y + sd[1] * 0.12 * s_
+                _box(m, lx, ly, fa, 0.2, 0.17, zb, zb + 0.9, bronze, style=BRONZE)
+            _box(m, x, y, sd, 0.5, 0.3, zb + 0.9, zb + 1.52, bronze, style=BRONZE)
+            for s_ in (-1, 1):
+                ax_, ay_ = x + sd[0] * 0.31 * s_, y + sd[1] * 0.31 * s_
+                _box(m, ax_, ay_, fa, 0.13, 0.12, zb + 0.95, zb + 1.5, bronze, style=BRONZE)
+            _ball(m, x, y, zb + 1.7, 0.14, bronze, BRONZE, 8, 5)
+            n["statues"] += 1
+        elif t.get("man_made") == "flagpole":
+            H = 9.0
+            _box(m, x, y, (1, 0), 0.12, 0.12, z0, z0 + H, np.array(hexrgb("#f0f0ee")))
+            _ball(m, x, y, z0 + H + 0.08, 0.1, np.array(hexrgb("#e2c46a")), METAL, 6, 4)
+            # Monaco: red over white, flying downwind of the sea breeze.
+            fw, fh = 1.5, 1.0
+            wdir = np.array([-0.3, 1.0]) / math.hypot(0.3, 1.0)
+            fx, fy = x + wdir[0] * (fw / 2 + 0.06), y + wdir[1] * (fw / 2 + 0.06)
+            top = z0 + H - 0.15
+            _box(m, fx, fy, wdir, fw, 0.03, top - fh / 2, top, np.array(hexrgb("#ce1126")))
+            _box(m, fx, fy, wdir, fw, 0.03, top - fh, top - fh / 2, np.array(hexrgb("#f7f7f5")), top=False)
+            n["flags"] += 1
+    stats.update(n)
+    return n
+
+
 def pavements(m, sea, bmask, stats):
     """A raised pavement behind the barriers on both sides of the circuit:
     pale stone, 12 cm above the road, from just behind the barrier to
@@ -2781,6 +2963,7 @@ def main():
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
     pavements(bm, sea, bmask, stats)
+    print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))
