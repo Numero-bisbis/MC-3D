@@ -342,6 +342,30 @@ def sun_shadows(mns, sea):
     return shade.astype(np.float32)
 
 
+def harbour_shadow_surface(mns, mnt, bgrow):
+    """The surface that casts the baked shadows, without the Grand Prix
+    grandstands and cabins the 2021 LiDAR caught on the harbour quays
+    (they cast big dark blotches over quays that are open in the film
+    set): along the harbour stretch, only buildings stand above ground."""
+    if TRACK is None:
+        return mns
+    t = TRACK
+    n = len(t["x"])
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    s_ = np.arange(n) * step
+    tb = TUNNEL["tb"] if TUNNEL is not None else -1
+    sel = (t["z"] < 8.0) & (s_ > tb + 30)
+    if sel.sum() < 10:
+        return mns
+    from scipy.spatial import cKDTree
+    kd = cKDTree(np.column_stack([t["x"][sel], t["y"][sel]]))
+    rows, cols = np.mgrid[0:mns.shape[0], 0:mns.shape[1]]
+    cx, cy = cell_xy(rows.ravel(), cols.ravel())
+    d, _ = kd.query(np.column_stack([cx, cy]), distance_upper_bound=60)
+    zone = np.isfinite(d).reshape(mns.shape) & ~bgrow
+    return np.where(zone & np.isfinite(mnt), mnt, mns)
+
+
 # ----------------------------------------------------------------- ground ----
 def ground_mesh(mnt, sea):
     nx = int((X1 - X0) / GRID) + 1
@@ -467,7 +491,14 @@ def race_pool(d, xy, pts, px):
 def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     S = 6144
     px = S / (X1 - X0)
-    img = Image.new("RGB", (S, S), tuple(hexrgb("#d3c6ae")))
+    # Monaco is paved almost everywhere: pale stone, not sand.
+    img = Image.new("RGB", (S, S), tuple(hexrgb("#cdc7bb")))
+    # Steep ground with nothing on it is bare limestone (the Rock, the
+    # cliffs under the Moyenne Corniche).
+    gy_, gx_ = np.gradient(np.nan_to_num(mnt, nan=0.0), RES)
+    steep = (np.hypot(gx_, gy_) > 0.9) & np.isfinite(mnt)
+    st_ = Image.fromarray((steep * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR).filter(ImageFilter.GaussianBlur(4))
+    img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#b9ae99"))), img, st_.point(lambda v: int(v * 0.8)))
     d = ImageDraw.Draw(img)
 
     def xy(pts):
@@ -495,6 +526,16 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         k = t.get("leisure") or t.get("landuse") or t.get("natural")
         if k in GREEN:
             poly(pts, GREEN[k])
+    # Lawns, planters and verges nobody mapped: green in the aerial photo
+    # (low plants; the LiDAR canopy below handles trees).
+    if ortho is not None:
+        o = ortho.astype(np.float32)
+        exg = 2 * o[..., 1] - o[..., 0] - o[..., 2]
+        veg = (exg > 16) & (o.mean(2) < 170)
+        veg = ndimage.binary_opening(veg, iterations=1)
+        vi = Image.fromarray((veg * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2))
+        img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#86a65a"))), img, vi.point(lambda v: int(v * 0.85)))
+        d = ImageDraw.Draw(img)
     # Ground under the LiDAR tree canopy: a darker garden green.
     can = Image.fromarray((canopy * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
     can = can.filter(ImageFilter.GaussianBlur(3))
@@ -505,7 +546,7 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     for t, pts, closed in ways:
         if closed and (t.get("area") == "yes" or t.get("area:highway")) and t.get("highway") in (
                 "pedestrian", "footway", "service") or t.get("place") == "square" and closed:
-            poly(pts, "#e6dac3")
+            poly(pts, "#dfd9cd")
         if closed and t.get("amenity") == "parking" and t.get("parking") != "underground":
             poly(pts, "#9a9690")
     # Roads: pavement first, asphalt on top, markings last.
@@ -517,7 +558,7 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
              and t.get("area") != "yes" and t.get("layer", "0") not in ("-1", "-2", "-3")
              and not t.get("bridge")]          # bridges get decks of their own
     for t, pts in roads:
-        line(pts, "#e2d7c4", WIDTH[t["highway"]] + 4.5)
+        line(pts, "#dcd6ca", WIDTH[t["highway"]] + 4.5)
     for t, pts in roads:
         line(pts, "#cfc4b2", WIDTH[t["highway"]] + 1.2)       # kerb
     for t, pts in roads:
@@ -527,6 +568,14 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         if hw in ("footway", "pedestrian", "path", "steps", "cycleway") and t.get("area") != "yes" \
                 and t.get("tunnel") != "yes" and t.get("layer", "0") not in ("-1", "-2"):
             line(pts, "#cdbb9c" if hw == "steps" else "#e8dcc6", 3.0 if hw == "pedestrian" else 2.0)
+    # Jetties and pontoons: pale concrete, as in the photo (their service
+    # lanes are not asphalt roads).
+    for t, pts, closed in ways:
+        if t.get("man_made") in ("pier", "breakwater") or t.get("floating") == "yes":
+            if closed and len(pts) > 3:
+                poly(pts, "#cfcac0")
+            elif len(pts) >= 2:
+                line(pts, "#cfcac0", 2.6)
     # Dashed centre lines on the larger roads.
     for t, pts in roads:
         if t["highway"] not in ("primary", "secondary", "tertiary", "trunk"):
@@ -558,6 +607,10 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         arr *= 1 - sh[..., None] * (1 - tint[None, None])
     # Shore: wet stone colour where the ground drops into the sea.
     seai = np.asarray(Image.fromarray((sea * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)) / 255
+    # Quays: a band of pale dressed stone (the coping) along the water's edge.
+    sea_hard = seai > 0.5
+    cop = ndimage.binary_dilation(sea_hard, iterations=max(2, int(0.9 * px))) & ~sea_hard
+    arr[cop] = arr[cop] * 0.3 + np.array(hexrgb("#ebe6da"), np.float32) * 0.7
     arr = arr * (1 - seai[..., None]) + np.array(hexrgb("#2f6f86"))[None, None] * seai[..., None]
     # Paper-like grain so large areas do not look flat.
     g = np.random.default_rng(3).normal(0, 4, (S // 4, S // 4))
@@ -2867,6 +2920,92 @@ def coast_land(ways, sea):
     return np.asarray(img) > 0
 
 
+def quay_walls(m, sea, mnt, stats):
+    """Port Hercule's quays end in a vertical stone wall at the water, not
+    in a slope: the 3 m ground grid ramps from the quay down to the sea
+    floor and reads as a beach from the car. Along the harbour, a 4 m band
+    of quay is laid as a flat stone slab at the quay's own height, with
+    its face dropping straight into the water and a pale coping on top."""
+    if TRACK is None:
+        return 0
+    t = TRACK
+    n = len(t["x"])
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    s_ = np.arange(n) * step
+    tb = TUNNEL["tb"] if TUNNEL is not None else -1
+    sel = (t["z"] < 8.0) & (s_ > tb + 30)
+    if sel.sum() < 10:
+        return 0
+    zone = LineString(np.column_stack([t["x"][sel], t["y"][sel]])).buffer(160)
+    land = ~sea
+    dist = ndimage.distance_transform_edt(land) * RES
+    band = land & (dist <= 4.0)
+    # Quay height: the land's own height just inland, spread to the edge.
+    m_ = np.where(land & (dist > 4.5) & (dist < 9) & np.isfinite(mnt), mnt, np.nan)
+    idx = ndimage.distance_transform_edt(np.isnan(m_), return_distances=False, return_indices=True)
+    qz = ndimage.median_filter(m_[idx[0], idx[1]], size=9)
+    qR = Raster(qz.astype(np.float32))
+    seaR = Raster(sea.astype(np.float32))
+    rr, cc = np.nonzero(band)
+    xs, ys = cell_xy(rr, cc)
+    inz = contains_xy(zone, xs, ys)
+    bm = np.zeros_like(band)
+    bm[rr[inz], cc[inz]] = True
+    lab, nl = ndimage.label(bm)
+    stone, coping, wall = np.array(hexrgb("#d3cdc1")), np.array(hexrgb("#ece7db")), np.array(hexrgb("#a79f90"))
+    keep = TRACK["line"].buffer(TRACK_HALF + 1.0)
+    total = 0.0
+    for j, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        sub = lab[sl] == j
+        if sub.sum() < 40:
+            continue
+        x0 = X0 + sl[1].start * RES
+        y1 = Y1 - sl[0].start * RES
+        poly = cells_to_poly(sub, x0, y1, RES)
+        poly = poly.difference(keep)
+        for pg in to_polys(poly):
+            if pg.area < 8:
+                continue
+            pg = orient(pg.simplify(0.3), 1.0)
+            tr = triangulate(pg, area=6)
+            if tr is None:
+                continue
+            v, tri = tr
+            z = qR.sample(v[:, 0], v[:, 1])
+            z = np.where(np.isfinite(z), z, 1.5) + 0.06
+            P = enu_fast(v[:, 0], v[:, 1], z)
+            m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], stone, PLAIN)
+            # The wall: every ring edge with water just outside it.
+            ring = np.asarray(pg.exterior.coords)[:, :2]
+            a, b = ring[:-1], ring[1:]
+            L = np.linalg.norm(b - a, axis=1)
+            ok = L > 0.05
+            a, b, L = a[ok], b[ok], L[ok]
+            u = (b - a) / L[:, None]
+            out = np.column_stack([u[:, 1], -u[:, 0]])
+            mid = (a + b) / 2
+            wet = seaR.sample(mid[:, 0] + out[:, 0] * 1.2, mid[:, 1] + out[:, 1] * 1.2) > 0.5
+            if not wet.any():
+                continue
+            a, b, out = a[wet], b[wet], out[wet]
+            za = np.nan_to_num(qR.sample(a[:, 0], a[:, 1]), nan=1.5) + 0.06
+            zb = np.nan_to_num(qR.sample(b[:, 0], b[:, 1]), nan=1.5) + 0.06
+            k = len(a)
+            A0 = enu_fast(a[:, 0], a[:, 1], np.full(k, -1.5)); B0 = enu_fast(b[:, 0], b[:, 1], np.full(k, -1.5))
+            A1 = enu_fast(a[:, 0], a[:, 1], za); B1 = enu_fast(b[:, 0], b[:, 1], zb)
+            m.tri(A0, B0, B1, wall, PLAIN); m.tri(A0, B1, A1, wall, PLAIN)
+            # Coping: a 0.7 m pale stone strip along the edge, a hair higher.
+            ai, bi = a - out * 0.7, b - out * 0.7
+            C0 = enu_fast(a[:, 0], a[:, 1], za + 0.04); C1 = enu_fast(b[:, 0], b[:, 1], zb + 0.04)
+            D0 = enu_fast(ai[:, 0], ai[:, 1], za + 0.04); D1 = enu_fast(bi[:, 0], bi[:, 1], zb + 0.04)
+            m.tri(C0, C1, D1, coping, PLAIN); m.tri(C0, D1, D0, coping, PLAIN)
+            total += float(np.linalg.norm(b - a, axis=1).sum())
+    stats["quay_wall_m"] = int(total)
+    return int(total)
+
+
 def piers(m, ways, sea):
     seaR = Raster(sea.astype(np.float32))
     for t, pts, closed in ways:
@@ -2879,8 +3018,8 @@ def piers(m, ways, sea):
             if seaR.sample(np.array([c.x]), np.array([c.y]))[0] < 0.5:
                 continue      # on land already
             p = orient(p.simplify(0.3), 1.0)
-            add_walls(m, p, -0.5, 0.9, -0.5, 10, hexrgb("#9a8a74"), PLAIN)
-            add_roof(m, p, 0.9, hexrgb("#b9a487"), False)
+            add_walls(m, p, -0.5, 0.9, -0.5, 10, hexrgb("#8f8b82"), PLAIN)
+            add_roof(m, p, 0.9, hexrgb("#cfcac0"), False)
 
 
 def sea_plane(m):
@@ -3163,6 +3302,7 @@ def main():
     hm = Mesh()
     yachts(hm, ortho, sea, stats, ways)
     piers(hm, ways, sea)
+    print("quay walls…", quay_walls(hm, sea, mnt_f, stats))
     stats["bridges"] = bridges(bm, ways, mns, mnt)
     stats["diving_towers"] = pool_features(bm, ways, mnt_f)
     sm = Mesh()
@@ -3180,7 +3320,7 @@ def main():
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
-                       sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))
+                       sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
 
     audit = [("ground", gm), ("buildings", bm), ("trees", tm), ("harbour", hm)]
     if photo and photo["mesh"].p:

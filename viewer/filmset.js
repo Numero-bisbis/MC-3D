@@ -93,7 +93,32 @@
               float joint = 1.0 - box(pv, vec2(0.04), vec2(0.96), pw);
               d *= grain;
               d *= 1.0 - 0.12 * joint * paleStone * (1.0 - smoothstep(0.03, 0.08, px));
+              // Lawns: clumps, darker tufts and fine blades instead of a
+              // flat green wash; a little lighter in mown stripes.
+              float grass = smoothstep(0.02, 0.07, d.g - max(d.r, d.b));
+              if (grass > 0.0) {
+                float clump = vnoise(gp * 2.3) * 0.6 + vnoise(gp * 6.1) * 0.4;
+                float blade = hash12(floor(gp * 28.0));
+                float bladeFade = 1.0 - smoothstep(0.015, 0.05, px);
+                float stripe = step(0.5, fract(dot(gp, vec2(0.71, 0.71)) / 3.2));
+                vec3 g = d * mix(0.78, 1.12, clump);
+                g = mix(g, g * vec3(1.08, 1.06, 0.82), smoothstep(0.62, 0.8, vnoise(gp * 0.9)) * 0.6);
+                g *= mix(1.0, mix(0.86, 1.1, blade), bladeFade);
+                g *= 1.0 + 0.05 * stripe;
+                d = mix(d, g, grass);
+              }
               material.diffuse = mix(material.diffuse, d, near);
+            }
+            {
+              // Further out (to ~60 m from the car), keep some grass texture
+              // so lawns do not turn into a flat smear.
+              vec3 d = material.diffuse;
+              float grass = smoothstep(0.02, 0.07, d.g - max(d.r, d.b));
+              float mid = smoothstep(0.3, 0.5, px) * (1.0 - smoothstep(1.5, 3.0, px));
+              if (grass * mid > 0.0) {
+                float clump = vnoise(gp * 0.8) * 0.6 + vnoise(gp * 2.3) * 0.4;
+                material.diffuse = mix(d, d * mix(0.82, 1.1, clump), grass * mid);
+              }
             }
           }
           if (u_night > 0.0) {
