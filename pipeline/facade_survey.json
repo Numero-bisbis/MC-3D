@@ -1,0 +1,113 @@
+{
+ "source": "Looked at in Mapillary street photos (CC-BY-SA 4.0), 2026-11-19; style names are build_filmset.py S_* facade types",
+ "buildings": {
+  "BATIMENT0000000074070420": {
+   "style": "loggia",
+   "seen": "1970s pink tiles, blue-striped balcony awnings"
+  },
+  "BATIMENT0000000074074336": {
+   "style": "belle",
+   "seen": "Belle Epoque, iron balconettes, arched ground floor"
+  },
+  "BATIMENT0000000074074340": {
+   "style": "belle",
+   "seen": "Beaux-Arts, tall arched windows"
+  },
+  "BATIMENT0000000074074355": {
+   "style": "belle",
+   "seen": "Belle Epoque villa, stone balconies"
+  },
+  "BATIMENT0000000074074356": {
+   "style": "belle",
+   "seen": "Belle Epoque, balustraded balconies"
+  },
+  "BATIMENT0000000074074359": {
+   "style": "ribbon",
+   "seen": "white curved bands of windows",
+   "colour": "#efeee9"
+  },
+  "BATIMENT0000000074074360": {
+   "style": "loggia",
+   "seen": "1960s balconies, yellow awnings"
+  },
+  "BATIMENT0000000074074361": {
+   "style": "loggia",
+   "seen": "1960s balconies with awnings"
+  },
+  "BATIMENT0000000074074370": {
+   "style": "loggia",
+   "seen": "1960s balconies, green awnings"
+  },
+  "BATIMENT0000000074074373": {
+   "style": "loggia",
+   "seen": "1960s recessed loggias"
+  },
+  "BATIMENT0000000074074374": {
+   "style": "ribbon",
+   "seen": "1970s, bronze window bands"
+  },
+  "BATIMENT0000000074074381": {
+   "style": "ribbon",
+   "seen": "1970s balcony bands, orange edges"
+  },
+  "BATIMENT0000000074074386": {
+   "style": "belle",
+   "seen": "Belle Epoque villa"
+  },
+  "BATIMENT0000000074074396": {
+   "style": "ribbon",
+   "seen": "curved 1970s tower, balconies all round"
+  },
+  "BATIMENT0000000074074412": {
+   "style": "belle",
+   "seen": "Belle Epoque, stone balconies"
+  },
+  "BATIMENT0000000074074430": {
+   "style": "deco",
+   "seen": "1930s rounded corner, roller shutters",
+   "colour": "#e6c39c"
+  },
+  "BATIMENT0000000074074431": {
+   "style": "shutter",
+   "seen": "terracotta walls, green shutters",
+   "colour": "#d48d70"
+  },
+  "BATIMENT0000000074074436": {
+   "style": "loggia",
+   "seen": "1970s pink stone, balcony bands"
+  },
+  "BATIMENT0000000074074438": {
+   "style": "shutter",
+   "seen": "terracotta walls, green shutters",
+   "colour": "#d48d70"
+  },
+  "BATIMENT0000000074074449": {
+   "style": "belle",
+   "seen": "Belle Epoque arcades"
+  },
+  "BATIMENT0000000074074452": {
+   "style": "loggia",
+   "seen": "1960s balconies, blue awnings"
+  },
+  "BATIMENT0000002009009982": {
+   "style": "belle",
+   "seen": "white Belle Epoque"
+  },
+  "BATIMENT0000002009013201": {
+   "style": "belle",
+   "seen": "white Belle Epoque"
+  },
+  "BATIMENT0000002009013695": {
+   "style": "belle",
+   "seen": "white Belle Epoque"
+  },
+  "BATIMENT0000002244941449": {
+   "style": "modern",
+   "seen": "white, curved glass balconies"
+  },
+  "BATIMENT0000002244941764": {
+   "style": "modern",
+   "seen": "curved glass balconies"
+  }
+ }
+}

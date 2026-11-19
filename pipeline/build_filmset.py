@@ -471,7 +471,7 @@ def race_pool(d, xy, pts, px):
     L, W = np.linalg.norm(e1), np.linalg.norm(e2)
     u, v = e1 / L, e2 / W
     d.polygon(xy(np.asarray(g.buffer(1.2, join_style=2).exterior.coords)), fill=(236, 233, 224))
-    for k, col in enumerate([(52, 178, 206), (44, 160, 196), (38, 146, 186)]):
+    for k, col in enumerate([(46, 132, 150), (40, 120, 140), (35, 108, 130)]):
         q = g.buffer(-0.6 * k, join_style=2)
         if not q.is_empty and isinstance(q, Polygon):
             d.polygon(xy(np.asarray(q.exterior.coords)), fill=col)
@@ -596,7 +596,7 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             if t.get("leisure") == "swimming_pool" and t.get("sport") == "swimming":
                 race_pool(d, xy, pts, px)
             else:
-                poly(pts, "#45bfd0")
+                poly(pts, "#3e98a8")
     # Soft shade at the foot of buildings (baked ambient occlusion).
     bm = Image.fromarray((bmask * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
     ao = bm.filter(ImageFilter.GaussianBlur(int(4.5 * px)))
@@ -1026,6 +1026,14 @@ class FacadeData:
         self.photo_colours = ({k: v["colour"] for k, v in json.load(open(f))["buildings"].items()}
                               if f.exists() else {})
         self.used_photo_colours = 0
+        # What the street photos show of each building facing the circuit:
+        # its façade type (and a colour where the sampling went wrong).
+        f = Path(__file__).resolve().parent / "facade_survey.json"
+        names = {"shutter": S_SHUTTER, "belle": S_BELLE, "arch": S_ARCH, "villa": S_VILLA, "loggia": S_LOGGIA,
+                 "ribbon": S_RIBBON, "glass": S_GLASS, "modern": S_MODERN, "deco": S_DECO}
+        self.survey = {k: {"style": names[v["style"]], "colour": v.get("colour")}
+                       for k, v in (json.load(open(f))["buildings"].items() if f.exists() else [])}
+        self.used_survey = 0
 
     def get(self, poly, props):
         out = {"levels": None, "year": None, "name": None, "style": None, "colour": None}
@@ -1056,6 +1064,11 @@ class FacadeData:
         if not out["year"] and (props.get("date_d_apparition") or "")[:4].isdigit():
             out["year"] = int(props["date_d_apparition"][:4])
         pc = self.photo_colours.get(props.get("cleabs"))
+        sv = self.survey.get(props.get("cleabs"))
+        if sv:
+            out["style"] = sv["style"]
+            pc = sv["colour"] or pc
+            self.used_survey += 1
         if pc:
             out["colour"] = pc
         for pt, name, st, colour in self.marks:
@@ -1636,6 +1649,39 @@ def flatten_harbour(mnt):
     cap = zt_all[j[near]] + 0.5 + 0.03 * np.maximum(0, d[near] - 6)
     out[zr, zc] = np.minimum(out[zr, zc], cap)
     return out
+
+
+# Port Hercule's quays, jetties and car parks (lon/lat box). The 2021 LiDAR
+# was flown while Grand Prix stands, cabins and cranes stood there.
+PORT_BOX = (7.4205, 43.7325, 7.4285, 43.7372)
+
+
+def flatten_port(mnt, sea):
+    """Away from the circuit too, the port's quays and car parks are flat:
+    any isolated hump of LiDAR "ground" (more than 1.5 m above the quay
+    around it, with flat surroundings) is levelled to the quay."""
+    tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    x0, y0 = tl.transform(PORT_BOX[0], PORT_BOX[1])
+    x1, y1 = tl.transform(PORT_BOX[2], PORT_BOX[3])
+    c0, c1 = int((x0 - X0) / RES), int((x1 - X0) / RES)
+    r0, r1 = int((Y1 - y1) / RES), int((Y1 - y0) / RES)
+    A = mnt[r0:r1, c0:c1]
+    land = np.isfinite(A)
+    F = np.where(land, A, 0.8)
+    k = 4                                   # work at 2 m: percentile filters are slow
+    h, w = F.shape[0] // k * k, F.shape[1] // k * k
+    Fs = F[:h, :w].reshape(h // k, k, w // k, k).min(axis=(1, 3))
+    up = lambda a: np.pad(np.kron(a, np.ones((k, k))), ((0, F.shape[0] - h), (0, F.shape[1] - w)), mode="edge")
+    quay = up(ndimage.percentile_filter(Fs, 20, size=15))       # 30 m
+    around = up(ndimage.percentile_filter(Fs, 75, size=31))     # 60 m
+    near_sea = ndimage.distance_transform_edt(~sea[r0:r1, c0:c1]) * RES < 90
+    hump = land & near_sea & (quay < 4.0) & (F - quay > 1.5) & (around < quay + 2.5)
+    hump = ndimage.binary_dilation(hump, iterations=3) & land
+    out = mnt.copy()
+    sub = out[r0:r1, c0:c1]
+    sub[hump] = np.minimum(sub[hump], quay[hump] + 0.15)
+    sub[:] = np.where(hump, ndimage.uniform_filter(np.nan_to_num(sub, nan=0.8), 5), sub)
+    return out, int(hump.sum() * RES * RES)
 
 
 def track_dist(x, y):
@@ -3271,6 +3317,8 @@ def main():
     TRACK = load_track()
     if TRACK is not None:
         flat = flatten_harbour(mnt_f)
+        flat, port_m2 = flatten_port(flat, sea)
+        print("port humps levelled:", port_m2, "m2")
         # Lower the surface model by as much, so what stands there keeps
         # its height (and the humps do not turn into trees).
         mns = mns - np.nan_to_num(mnt_f - flat, nan=0.0)
@@ -3297,6 +3345,7 @@ def main():
     facades = FacadeData(ways)
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     stats["photo_facade_colours"] = facades.used_photo_colours
+    stats["photo_facade_types"] = facades.used_survey
     stats["photo_roofs"] = len(photo["polys"]) if photo else 0
     stats["photo_lean"] = photo["lean"] if photo else None
     # Building mask at 50 cm for trees and the ground shade.

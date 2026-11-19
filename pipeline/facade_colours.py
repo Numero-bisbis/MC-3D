@@ -353,7 +353,10 @@ def main():
         V = float(np.interp(np.median(v[lit]) / 255, [0.35, 0.9], [V_MIN, V_MAX]))
         # Walls here are not blue or green: those come from glass, sky and
         # trees left in the patch, so keep only a hint of them.
-        s = min(s, 0.06 if 0.2 < h < 0.8 else 0.42)
+        # Street photos wash colour out (haze, overexposed walls): the pink
+        # and terracotta fronts came out greyish next to the photos, so
+        # saturation is lifted by a third.
+        s = min(s * 1.35, 0.06 if 0.2 < h < 0.8 else 0.42)
         rgb = np.array(colorsys.hsv_to_rgb(h, s, V)) * 255
         result[cl] = {"colour": to_hex(rgb), "photos": len(ss)}
     print(len(result), "buildings coloured of", len({w[0] for w in walls}))

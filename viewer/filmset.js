@@ -27,6 +27,8 @@
       u_crowd: { type: Cesium.UniformType.FLOAT, value: 0 },
       // 0 day, 1 night: lit windows, street lamps and their pools of light.
       u_night: { type: Cesium.UniformType.FLOAT, value: 0 },
+      // Cesium flips a uniform texture's rows on upload (a glTF's own
+      // texture is not), so it is read at (u, 1 - v) below.
       u_lights: { type: Cesium.UniformType.SAMPLER_2D, value: new Cesium.TextureUniform({ url: `${URL_BASE}-night.jpg` }) },
     },
     // Spectators (plain, style 4): uv.y = 1 marks the parts that jump and
@@ -122,7 +124,7 @@
             }
           }
           if (u_night > 0.0) {
-            float L = texture(u_lights, fsInput.attributes.texCoord_0).r;
+            float L = texture(u_lights, vec2(fsInput.attributes.texCoord_0.x, 1.0 - fsInput.attributes.texCoord_0.y)).r;
             material.emissive = material.diffuse * vec3(1.0, 0.78, 0.5) * L * 2.4 * u_night;
           }
           return;
@@ -445,32 +447,55 @@
           vec3 nMC = normalize(vec3(0.12 * g.x * near, 1.0, 0.12 * g.y * near));
           material.normalEC = normalize(czm_normal * nMC);
           float far = clamp(length(fsInput.attributes.positionEC) / 3000.0, 0.0, 1.0);
-          // The colour of the Riviera in the IGN aerial photo: a deep navy
-          // teal (about #18243a from above), a little bluer far out.
-          // Port Hercule is a dark green-grey teal (IGN photo), the open sea
-          // a little bluer. Weak, slightly blurred reflections: a mirror of
-          // the bright sky made the whole port read pale blue.
-          vec3 deepSea = vec3(0.011, 0.032, 0.042);
-          material.diffuse = mix(deepSea, vec3(0.010, 0.030, 0.055), far) * mix(1.0, 0.4, u_night);
-          material.roughness = 0.22;
-          material.specular = vec3(0.02);
+          // The water is shaded here, not by the PBR model: with a sky
+          // that bright, PBR's Fresnel turned the whole port pale grey at
+          // the low angles the cars and the phone camera see it from.
+          // Colours from the IGN aerial photo and street photos: Port
+          // Hercule a dark green-grey teal, the open sea a deep navy (about
+          // #10324a), with only a soft, darkened reflection of the sky.
+          vec3 nEC = material.normalEC;
+          vec3 vEC = normalize(-fsInput.attributes.positionEC);
+          float cosv = clamp(dot(nEC, vEC), 0.0, 1.0);
+          float fres = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
+          // Emissive is linear (0.055 shows as about 32/255 with HDR on desktop,
+          // 66/255 on phones, which render without HDR).
+          vec3 water = mix(vec3(0.014, 0.055, 0.066), vec3(0.010, 0.045, 0.095), far);
+          vec3 skyRef = vec3(0.050, 0.100, 0.140);    // the sky, dimmed: water is never a mirror here
+          vec3 wc = mix(water, skyRef, fres * 0.6);
           // Along the shore: clearer, lighter water, a line of foam where
           // it meets the quays and rocks, and small waves lapping in.
+          float foam = 0.0;
           vec2 suv = fsInput.attributes.texCoord_0;
           if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0) {
-            float d = texture(u_lights, suv).g * 20.0;           // metres from the shore
+            // Read the right way up: the shore distance was sampled mirrored
+            // north-south, so the harbour read "at the shore" and turned to
+            // pale foam all over.
+            float d = texture(u_lights, vec2(suv.x, 1.0 - suv.y)).g * 20.0;   // metres from the shore
             if (d < 19.0) {
               float shallow = 1.0 - smoothstep(2.0, 16.0, d);
-              material.diffuse = mix(material.diffuse, vec3(0.016, 0.060, 0.070) * mix(1.0, 0.4, u_night), shallow * 0.5);
+              wc = mix(wc, vec3(0.022, 0.080, 0.085), shallow * 0.5);
               float br = vnoise(q * 0.9 + vec2(t * 0.15, -t * 0.1));
               float line = (1.0 - smoothstep(0.4, 1.8 + 0.8 * br, d));
               float lap = smoothstep(0.75, 0.95, 0.5 + 0.5 * sin(d * 1.3 - t * 1.6 + br * 2.0))
                         * (1.0 - smoothstep(1.5, 7.0, d)) * smoothstep(0.35, 0.65, vnoise(q * 1.7 - t * 0.2));
-              float foam = clamp(line * (0.55 + 0.45 * vnoise(q * 3.0 + t * 0.4)) + lap * 0.55, 0.0, 1.0) * near;
-              material.diffuse = mix(material.diffuse, vec3(0.80, 0.86, 0.88) * mix(1.0, 0.25, u_night), foam * 0.85);
-              material.roughness = mix(material.roughness, 0.7, foam);
+              foam = clamp(line * (0.55 + 0.45 * vnoise(q * 3.0 + t * 0.4)) + lap * 0.55, 0.0, 1.0) * near;
+              wc = mix(wc, vec3(0.55, 0.60, 0.62), foam * 0.85);
             }
           }
+          // Sun glints on the ripples.
+          vec3 rEC = reflect(-vEC, nEC);
+          float glint = pow(max(dot(rEC, czm_lightDirectionEC), 0.0), 400.0) * (1.0 - foam);
+          wc += vec3(1.0, 0.92, 0.78) * glint * 1.5;
+          material.diffuse = vec3(0.0);
+          material.specular = vec3(0.0);
+          material.roughness = 1.0;
+          // Cesium's lighting still adds a grey sheen with no diffuse or
+          // specular colour: Fresnel on the sun, and the sky light. A normal
+          // turned away from the sun zeroes the first, zero occlusion the
+          // second, so the water shows only the colour worked out here.
+          material.normalEC = -normalize(czm_lightDirectionEC);
+          material.occlusion = 0.0;
+          material.emissive = wc * mix(1.0, 0.3, u_night);
         } else {
           float st = a255 - kind * 16.0;
           if (st > 0.5 && st < 2.5) {
