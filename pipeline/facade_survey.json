@@ -1,5 +1,5 @@
 {
- "source": "Looked at in Mapillary street photos (CC-BY-SA 4.0), 2026-11-19; style names are build_filmset.py S_* facade types",
+ "source": "Looked at in Mapillary street photos (CC-BY-SA 4.0), 2026-11-19; style names are build_filmset.py S_* facade types; levels = storeys counted in the photos, bay = window spacing (m), balconies = continuous bands / small single balconies / none, depth (m)",
  "buildings": {
   "BATIMENT0000000074070420": {
    "style": "loggia",
@@ -7,11 +7,15 @@
   },
   "BATIMENT0000000074074336": {
    "style": "belle",
-   "seen": "Belle Epoque, iron balconettes, arched ground floor"
+   "seen": "Belle Epoque, iron balconettes, arched ground floor",
+   "bay": 3.0,
+   "balconies": "small"
   },
   "BATIMENT0000000074074340": {
-   "style": "belle",
-   "seen": "Beaux-Arts, tall arched windows"
+   "style": "arch",
+   "seen": "Beaux-Arts, tall arched windows, no balconies",
+   "bay": 4.5,
+   "balconies": "none"
   },
   "BATIMENT0000000074074355": {
    "style": "belle",
@@ -24,7 +28,10 @@
   "BATIMENT0000000074074359": {
    "style": "ribbon",
    "seen": "white curved bands of windows",
-   "colour": "#efeee9"
+   "colour": "#efeee9",
+   "levels": 17,
+   "balconies": "continuous",
+   "depth": 1.4
   },
   "BATIMENT0000000074074360": {
    "style": "loggia",
@@ -32,15 +39,24 @@
   },
   "BATIMENT0000000074074361": {
    "style": "loggia",
-   "seen": "1960s balconies with awnings"
+   "seen": "1960s balconies with awnings",
+   "levels": 7,
+   "balconies": "continuous",
+   "depth": 1.3
   },
   "BATIMENT0000000074074370": {
    "style": "loggia",
-   "seen": "1960s balconies, green awnings"
+   "seen": "1960s balconies, green awnings",
+   "levels": 8,
+   "balconies": "continuous",
+   "depth": 1.4
   },
   "BATIMENT0000000074074373": {
    "style": "loggia",
-   "seen": "1960s recessed loggias"
+   "seen": "1960s recessed loggias",
+   "levels": 7,
+   "bay": 3.0,
+   "balconies": "none"
   },
   "BATIMENT0000000074074374": {
    "style": "ribbon",
@@ -48,15 +64,23 @@
   },
   "BATIMENT0000000074074381": {
    "style": "ribbon",
-   "seen": "1970s balcony bands, orange edges"
+   "seen": "1970s balcony bands, orange edges",
+   "levels": 17,
+   "balconies": "continuous",
+   "depth": 1.3
   },
   "BATIMENT0000000074074386": {
-   "style": "belle",
-   "seen": "Belle Epoque villa"
+   "style": "villa",
+   "seen": "Belle Epoque villa",
+   "bay": 2.8,
+   "balconies": "small"
   },
   "BATIMENT0000000074074396": {
    "style": "ribbon",
-   "seen": "curved 1970s tower, balconies all round"
+   "seen": "curved 1970s tower, balconies all round",
+   "levels": 13,
+   "balconies": "continuous",
+   "depth": 1.8
   },
   "BATIMENT0000000074074412": {
    "style": "belle",
@@ -65,21 +89,28 @@
   "BATIMENT0000000074074430": {
    "style": "deco",
    "seen": "1930s rounded corner, roller shutters",
-   "colour": "#e6c39c"
+   "colour": "#e6c39c",
+   "levels": 5,
+   "balconies": "none"
   },
   "BATIMENT0000000074074431": {
    "style": "shutter",
    "seen": "terracotta walls, green shutters",
-   "colour": "#d48d70"
+   "colour": "#d48d70",
+   "balconies": "none"
   },
   "BATIMENT0000000074074436": {
    "style": "loggia",
-   "seen": "1970s pink stone, balcony bands"
+   "seen": "1970s pink stone, balcony bands",
+   "balconies": "continuous",
+   "depth": 1.3,
+   "levels": 8
   },
   "BATIMENT0000000074074438": {
    "style": "shutter",
    "seen": "terracotta walls, green shutters",
-   "colour": "#d48d70"
+   "colour": "#d48d70",
+   "balconies": "none"
   },
   "BATIMENT0000000074074449": {
    "style": "belle",
@@ -87,7 +118,10 @@
   },
   "BATIMENT0000000074074452": {
    "style": "loggia",
-   "seen": "1960s balconies, blue awnings"
+   "seen": "1960s balconies, blue awnings",
+   "levels": 6,
+   "balconies": "continuous",
+   "depth": 1.4
   },
   "BATIMENT0000002009009982": {
    "style": "belle",
@@ -108,6 +142,25 @@
   "BATIMENT0000002244941764": {
    "style": "modern",
    "seen": "curved glass balconies"
+  },
+  "BATIMENT0000000074074377": {
+   "levels": 7,
+   "balconies": "continuous",
+   "depth": 1.0,
+   "seen": "light balcony bands",
+   "style": "loggia"
+  },
+  "BATIMENT0000000074074389": {
+   "levels": 18,
+   "balconies": "small",
+   "seen": "tower, small balconies",
+   "style": "modern"
+  },
+  "BATIMENT0000000074074407": {
+   "balconies": "continuous",
+   "depth": 1.3,
+   "seen": "45 m tower, balcony bands",
+   "style": "ribbon"
   }
  }
 }

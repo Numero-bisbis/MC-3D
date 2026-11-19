@@ -711,6 +711,9 @@ def triangulate(poly, area=None):
     return t["vertices"], t["triangles"]
 
 
+BAY_NOW = None    # window spacing measured in the photos for the building being built
+
+
 def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None):
     poly = orient(poly, -1.0 if inward else 1.0)
     for ring in [poly.exterior] + list(poly.interiors):
@@ -722,7 +725,7 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None):
         if not len(a):
             continue
         k = len(a)
-        bay = STYLE_BAY[style] if style is not None else {WALL_OLD: 3.2, WALL_NEW: 3.4, WALL_GLASS: 2.2}.get(kind, 3.0)
+        bay = BAY_NOW or STYLE_BAY[style] if style is not None else {WALL_OLD: 3.2, WALL_NEW: 3.4, WALL_GLASS: 2.2}.get(kind, 3.0)
         nb = np.maximum(1, np.round(L / bay))
         P = enu_fast(np.column_stack([a[:, 0], b[:, 0], b[:, 0], a[:, 0]]).ravel(),
                      np.column_stack([a[:, 1], b[:, 1], b[:, 1], a[:, 1]]).ravel(),
@@ -1031,12 +1034,15 @@ class FacadeData:
         f = Path(__file__).resolve().parent / "facade_survey.json"
         names = {"shutter": S_SHUTTER, "belle": S_BELLE, "arch": S_ARCH, "villa": S_VILLA, "loggia": S_LOGGIA,
                  "ribbon": S_RIBBON, "glass": S_GLASS, "modern": S_MODERN, "deco": S_DECO}
-        self.survey = {k: {"style": names[v["style"]], "colour": v.get("colour")}
+        # Also storeys, window spacing and balconies counted in the photos.
+        self.survey = {k: {"style": names[v["style"]], "colour": v.get("colour"), "levels": v.get("levels"),
+                           "bay": v.get("bay"), "balconies": v.get("balconies"), "depth": v.get("depth")}
                        for k, v in (json.load(open(f))["buildings"].items() if f.exists() else [])}
         self.used_survey = 0
 
     def get(self, poly, props):
-        out = {"levels": None, "year": None, "name": None, "style": None, "colour": None}
+        out = {"levels": None, "year": None, "name": None, "style": None, "colour": None,
+               "bay": None, "balconies": None, "depth": None}
         for i in self.tree.query(poly):
             g, t = self.osm[i]
             inter = g.intersection(poly).area
@@ -1061,6 +1067,9 @@ class FacadeData:
                 out["style"] = S_BELLE
         if not out["levels"] and props.get("nombre_d_etages"):
             out["levels"] = float(props["nombre_d_etages"]) + 1   # BD TOPO counts floors above the ground floor
+        if sv0 := self.survey.get(props.get("cleabs")):
+            out["levels"] = sv0["levels"] or out["levels"]
+            out["photo_levels"] = sv0["levels"]
         if not out["year"] and (props.get("date_d_apparition") or "")[:4].isdigit():
             out["year"] = int(props["date_d_apparition"][:4])
         pc = self.photo_colours.get(props.get("cleabs"))
@@ -1068,6 +1077,7 @@ class FacadeData:
         if sv:
             out["style"] = sv["style"]
             pc = sv["colour"] or pc
+            out.update({k: sv[k] for k in ("bay", "balconies", "depth") if sv[k]})
             self.used_survey += 1
         if pc:
             out["colour"] = pc
@@ -1186,7 +1196,7 @@ def tribune_steps(m, poly, mntR, H):
 AWNINGS = ["#2f5d4a", "#7a2630", "#e8dfc8", "#24344f", "#b5532f", "#3c3c3c", "#d8c27a"]
 
 
-def facade_depth(m, poly, base, H, fh, style, col, rnd):
+def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=None):
     """Real relief on the façades that face the circuit, where the lap
     camera sees them: continuous balconies with their railings on the
     1960s-80s blocks (Boulevard Albert Ier, the port), small stone
@@ -1198,8 +1208,11 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd):
     keep = TRACK["line"].buffer(TRACK_HALF + 1.2)
     ring = np.asarray(orient(poly, 1.0).exterior.coords)[:, :2]
     modern = style in (S_LOGGIA, S_RIBBON, S_MODERN)
-    old = style in (S_SHUTTER, S_BELLE, S_DECO)
-    if not (modern or old):
+    old = style in (S_SHUTTER, S_BELLE, S_DECO, S_VILLA)
+    if balconies:
+        # What the street photos show wins over the guess from the style.
+        modern, old = balconies == "continuous", balconies == "small"
+    if not (modern or old) and balconies != "none":
         return 0
     n_ = 0
     pale = np.minimum(np.asarray(col) * 1.06 + 10, 252)
@@ -1228,7 +1241,7 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd):
         floors = int(H / fh)
         if modern:
             rail = np.array(hexrgb(rnd.choice(["#f4f2ec", "#e9e6de", "#5f6a6e", "#d9d4c8"])))
-            dep = rnd.uniform(1.0, 1.5)
+            dep = depth or rnd.uniform(1.0, 1.5)
             for k in range(1, floors):
                 z = base + k * fh
                 if z > base + H - 1.5:
@@ -1241,11 +1254,11 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd):
                         add_walls(m, orient(qq, 1.0), z, z + 1.0, z, 100, rail, PLAIN)
                         add_roof(m, orient(qq, 1.0), z + 1.0, rail, False)
                 n_ += 1
-        else:
+        elif old:
             # A balcony under every other bay on the first floors.
-            bay = STYLE_BAY.get(style, 3.2)
+            bay = BAY_NOW or STYLE_BAY.get(style, 3.2)
             nb = max(1, int(round(L / bay)))
-            for k in range(1, min(floors, 6)):
+            for k in range(1, floors if balconies == "small" else min(floors, 6)):
                 z = base + k * fh
                 if z > base + H - 2:
                     break
@@ -1292,6 +1305,7 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd):
 
 
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
+    global BAY_NOW
     mntR = Raster(mnt)
     extent = box(X0, Y0, X1, Y1)
     footprint = []
@@ -1420,6 +1434,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             grand = not post_scan and (rk == "copper" or (not tiled and H < 30 and poly.area > 500
                                                           and rnd.random() < 0.35))
             info = facades.get(poly, props)
+            BAY_NOW = None if hero else info["bay"]
             style = S_ARCH if hero else pick_style(info, H, tiled, grand, post_scan, rnd)
             if info["style"] == S_BELLE and not tiled and not post_scan and poly.area > 200:
                 grand = True        # a real palace: stone, mansard roof
@@ -1442,7 +1457,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             # building gets its own number of rows of windows.
             hwall = max(2.5, float(np.percentile(hrel, 40))) if tiled else H
             fh = STYLE_FH[style]
-            if info["levels"] and 2.5 <= hwall / info["levels"] <= 5.8:
+            pl = info.get("photo_levels")
+            if pl and 2.7 <= (hwall - 1.5) / pl <= 3.9:
+                # Storeys counted in the street photos; the LiDAR height
+                # also holds a parapet or roof plant of a metre or two.
+                fh = (hwall - 1.5) / pl
+                stats["real_floors"] += 1
+            elif info["levels"] and 2.5 <= hwall / info["levels"] <= 5.8:
                 fh = hwall / info["levels"]
                 stats["real_floors"] += 1
             elif len(levels) == 1:
@@ -1581,12 +1602,14 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     stats["towers"] += 1
             if props.get("cleabs") == CASINO_FRONT:
                 casino_front(m, poly, base, H, fh, col, kind, style, rcol, mntR)
-            elif not hero and not post_scan and not tiled:
+            elif not hero and not post_scan and (not tiled or info["balconies"]):
                 stats["balconies"] = stats.get("balconies", 0) + facade_depth(
-                    m, levels[0][0], base, levels[0][1], fh, style, col, rnd)
+                    m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
+                    info["balconies"], info["depth"])
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
+    BAY_NOW = None
     return footprint
 
 

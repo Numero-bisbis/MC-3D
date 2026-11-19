@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 1544705,
+ "triangles": 1549834,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -63,22 +63,22 @@
  "towers": 10,
  "trees": 1435,
  "yachts": 505,
- "real_floors": 722,
+ "real_floors": 727,
  "styles": [
   266,
-  215,
-  5,
-  326,
-  222,
-  79,
+  212,
+  6,
+  327,
+  221,
+  80,
   0,
-  78,
+  79,
   184
  ],
- "balconies": 1067,
+ "balconies": 1140,
  "photo_facade_colours": 26,
- "photo_facade_types": 26,
- "photo_roofs": 1325,
+ "photo_facade_types": 29,
+ "photo_roofs": 1326,
  "photo_lean": [
   0.04000000000000037,
   -0.009999999999999676
