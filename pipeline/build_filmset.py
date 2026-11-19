@@ -2274,6 +2274,64 @@ def pool_features(m, ways, mnt):
     return n_
 
 
+def pavements(m, sea, bmask, stats):
+    """A raised pavement behind the barriers on both sides of the circuit:
+    pale stone, 12 cm above the road, from just behind the barrier to
+    2.6 m out, with its kerb face down to the ground. Up close at street
+    level it gives the edge of the track height and a crisp line, where
+    the painted ground was soft. Not over water, buildings, the tunnel,
+    other stretches of the lap, or the Nouvelle Chicane's open side."""
+    if TRACK is None:
+        return 0
+    t = TRACK
+    n = len(t["x"])
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    seaR, bR = Raster(sea.astype(np.float32)), Raster(bmask.astype(np.float32))
+    stone = np.array(hexrgb("#d4cbb8"))
+    kerb = np.array(hexrgb("#bdb3a0"))
+    d0, d1 = TRACK_HALF + 0.45, TRACK_HALF + 2.6
+    count = 0
+    dx = np.gradient(t["x"]); dy = np.gradient(t["y"])
+    ln = np.hypot(dx, dy) + 1e-9
+    nx, ny = -dy / ln, dx / ln
+    s_ = np.arange(n) * step
+    for side in (1, -1):
+        ok = np.ones(n, bool)
+        for k_, d in enumerate((d0, (d0 + d1) / 2, d1)):
+            px, py = t["x"] + side * nx * d, t["y"] + side * ny * d
+            ok &= (seaR.sample(px, py) < 0.5) & (bR.sample(px, py) < 0.5)
+            ok &= track_dist(px, py) > TRACK_HALF + 0.3
+        if TUNNEL is not None:
+            ok &= ~((s_ > TUNNEL["ta"] - 6) & (s_ < TUNNEL["tb"] + 6))
+        if side == -1:
+            ok &= ~((s_ > 2072) & (s_ < 2164))            # the chicane's escape road (clean-track OPEN)
+        # Runs of at least 6 m.
+        lab, nr = ndimage.label(ok)
+        for r in range(1, nr + 1):
+            idx = np.nonzero(lab == r)[0]
+            if len(idx) < 4:
+                continue
+            xs_i = t["x"][idx] + side * nx[idx] * d0; ys_i = t["y"][idx] + side * ny[idx] * d0
+            xs_o = t["x"][idx] + side * nx[idx] * d1; ys_o = t["y"][idx] + side * ny[idx] * d1
+            z = t["z"][idx]
+            pi = enu_fast(xs_i, ys_i, z + 0.12); po = enu_fast(xs_o, ys_o, z + 0.12)
+            pk = enu_fast(xs_o, ys_o, z - 0.3)
+            a, b = pi[:-1], pi[1:]; c, d_ = po[1:], po[:-1]
+            if side == 1:
+                m.tri(a, d_, c, stone, PLAIN); m.tri(a, c, b, stone, PLAIN)
+            else:
+                m.tri(a, b, c, stone, PLAIN); m.tri(a, c, d_, stone, PLAIN)
+            # Kerb face on the outer edge, facing away from the track.
+            ka, kb, kc, kd = po[:-1], po[1:], pk[1:], pk[:-1]
+            if side == 1:
+                m.tri(ka, kb, kc, kerb, PLAIN); m.tri(ka, kc, kd, kerb, PLAIN)
+            else:
+                m.tri(ka, kc, kb, kerb, PLAIN); m.tri(ka, kd, kc, kerb, PLAIN)
+            count += len(idx)
+    stats["pavement_m"] = int(count * step)
+    return count
+
+
 # ----------------------------------------------------------------- crowds ----
 CROWD = 4                            # PLAIN style: spectators (the viewer animates them)
 # Grand Prix crowds standing behind the barriers: lap metres (from, to).
@@ -2313,7 +2371,7 @@ def crowds(m, mnt, sea, bmask, stats):
             ln = math.hypot(dx, dy) or 1
             nx, ny = -dy / ln, dx / ln
             for side in (1, -1):
-                for d in np.arange(TRACK_HALF + 1.9, TRACK_HALF + 7.2, 1.05):
+                for d in np.arange(TRACK_HALF + 2.9, TRACK_HALF + 8.2, 1.05):
                     jx, jy = rnd.normal(0, 0.18, 2)
                     P.append((t["x"][i] + side * nx * d + jx, t["y"][i] + side * ny * d + jy, t["z"][i], s, side * nx, side * ny))
     P = np.array(P)
@@ -2722,6 +2780,7 @@ def main():
     drive = drive_map(gz, bmask, sea)
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
+    pavements(bm, sea, bmask, stats)
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))

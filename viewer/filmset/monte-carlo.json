@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 1323295,
+ "triangles": 1328149,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -83,7 +83,8 @@
  "bridges": 19,
  "diving_towers": 1,
  "lamps": 996,
- "spectators": 5746,
+ "spectators": 5597,
+ "pavement_m": 5147,
  "track_clear": true,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
