@@ -35,7 +35,7 @@ lap**: one lap of the Circuit de Monaco along the real route, with corner names,
 play/pause and a progress bar you can drag. Add `?tour=lap` to start it straight
 away. Tours register themselves with `MC3D.tours.register` (see `viewer/tours.js`).
 
-**Legendary laps** rides along behind a single-seater shaped for its era (1950s cigar to today's halo cars) in the colours its team ran that year (colour schemes only, no sponsor marks) on the
+**Legendary laps** rides along behind a single-seater shaped for its era (1950s cigar to today's halo cars) in the colours its team ran that year, with the driver's race number at that Monaco Grand Prix and the team's sponsors of the time lettered on the bodywork (names only, no logo artwork; tobacco and alcohol brands left out under French law; `?sponsors=invented` swaps in made-up sponsors named after places in Monaco) on the
 three fastest Monaco laps of each decade since the 1950s (official pole laps
 and race fastest laps). Each replay takes exactly the real lap time; the speed
 in each corner is estimated from the shape of the road. A camera button
