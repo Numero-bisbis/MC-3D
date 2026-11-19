@@ -421,8 +421,55 @@ def ground_mesh(mnt, sea):
             cap_k = np.where(ok, zk + 0.6 + 1.5 * np.maximum(0, dk - (TRACK_HALF + 6.5)), np.inf)
             flat = np.where(inner_k, zk - 0.15, np.inf).min(1)
             inner = np.isfinite(flat)
+            # The lowest of the neighbours is right where another leg of
+            # the lap passes below, but on a climb (Avenue d'Ostende, 7 %)
+            # it is the road 16 m further down: the ground sank a metre
+            # under the road and the pavements stood up as steps. Take
+            # the nearest point's height unless another leg is far lower.
+            near = np.where(inner_k[:, 0], zk[:, 0] - 0.15, np.inf)
+            flat = np.where(np.isfinite(near) & (near - flat < 2.0), near, flat)
             cap = cap_k.min(1)
             Z[band] = np.where(inner, np.minimum(flat, cap), np.minimum(zb, cap))
+            if PROM is not None:
+                # Avenue d'Ostende: the ground stays under the pavements,
+                # out to the parapet on the sea side and 7 m past the edge
+                # under the buildings on the other.
+                xb, yb = X[band], Y[band]
+                d1, j1 = TRACK["kd"].query(np.column_stack([xb, yb]))
+                on = (j1 >= PROM["i0"]) & (j1 < PROM["i1"])
+                k_ = np.clip(j1 - PROM["i0"], 0, len(PROM["idx"]) - 1)
+                sea_side = ((xb - TRACK["x"][j1]) * PROM["nx"][k_] + (yb - TRACK["y"][j1]) * PROM["ny"][k_]) > 0
+                lim = np.where(sea_side, PROM["pd"][k_] + 0.3, TRACK_HALF + 7.0)
+                low = on & (d1 < lim)
+                zz = Z[band]
+                zz[low] = np.minimum(zz[low], TRACK["z"][j1[low]] - 0.1)
+                # Past the parapet, down to the foot of its wall.
+                past = on & sea_side & (d1 >= lim) & (d1 < lim + 8)
+                hm_ = PROM["hmin"][r[band][past], c[band][past]]
+                zz[past] = np.minimum(zz[past], np.maximum(hm_, TRACK["z"][j1[past]] - PROM_WALL) + 0.3)
+                Z[band] = zz
+    if PROM is not None:
+        # Below Avenue d'Ostende the LiDAR ground between the buildings on
+        # the slope (steps, walls, courtyards) turns into needles on the
+        # 3 m grid: level any node more than 2.5 m above the median of
+        # its neighbours.
+        xs_, ys_ = TRACK["x"][PROM["idx"]], TRACK["y"][PROM["idx"]]
+        zone = (X > xs_.min() - 70) & (X < xs_.max() + 70) & (Y > ys_.min() - 70) & (Y < ys_.max() + 70)
+        d2, j2 = TRACK["kd"].query(np.column_stack([X[zone], Y[zone]]))
+        k2 = np.clip(j2 - PROM["i0"], 0, len(PROM["idx"]) - 1)
+        side2 = ((X[zone] - TRACK["x"][j2]) * PROM["nx"][k2] + (Y[zone] - TRACK["y"][j2]) * PROM["ny"][k2]) > 0
+        sel = (j2 >= PROM["i0"]) & (j2 < PROM["i1"]) & side2 & (d2 > PROM["pd"][k2] + 1.0) & (d2 < 70)
+        med = ndimage.median_filter(Z, 3)
+        zz = Z[zone]
+        mz = med[zone]
+        spike = sel & (zz > mz + 2.5)
+        zz[spike] = mz[spike]
+        # Ground under the buildings on the slope is interpolated up to
+        # their street doors: no node more than 3 m above the lowest
+        # ground within 6 m.
+        h2 = PROM["hmin2"][r[zone], c[zone]]
+        zz[sel] = np.minimum(zz[sel], np.where(h2[sel] < 900, h2[sel] + 3.0, zz[sel]))
+        Z[zone] = zz
     if TUNNEL is not None and "open_ground" in TUNNEL:
         # Outside the gallery the ground stays below the road, so the view
         # through the pillars is open to the shore.
@@ -712,12 +759,53 @@ def triangulate(poly, area=None):
 
 
 BAY_NOW = None    # window spacing measured in the photos for the building being built
+GROUND_R = None   # the terrain, while buildings() runs: street level along each wall
+
+
+def street_rise(a, b, base, z0, z1, fh):
+    """Where the street outside a wall climbs above the building's base (a
+    building on a hill: its base is the lowest ground round it), the
+    shops follow the street: the ground-floor row starts at the pavement
+    all along the wall, and the floors above stay level. Returns the wall
+    split into pieces (a, b, rise at a, rise at b), or None when the street
+    is level with the base."""
+    if GROUND_R is None or z0 > base + 0.5 or z1 - base < 2 * fh:
+        return None
+    L = np.linalg.norm(b - a, axis=1)
+    u = (b - a) / np.maximum(L, 1e-9)[:, None]
+    out = np.column_stack([u[:, 1], -u[:, 0]])
+    res = []
+    any_ = False
+    for i in range(len(a)):
+        n = max(1, int(math.ceil(L[i] / 3.0)))
+        t = np.linspace(0, 1, n + 1)
+        p = a[i] + t[:, None] * (b[i] - a[i])
+        q = p + out[i] * 1.5
+        g = GROUND_R.sample(q[:, 0], q[:, 1]) - base
+        g = np.where(np.isfinite(g), g, 0.0)
+        # A wall against a cliff or a retaining wall is not a street.
+        g = np.where(g > 6.0, 0.0, np.clip(g, 0.0, None))
+        g = np.minimum(g, z1 - base - fh - 0.5)
+        if g.max() < 0.4:
+            res.append((a[i], b[i], 0.0, 0.0, 0.0, 1.0))
+            continue
+        any_ = True
+        for j in range(n):
+            res.append((p[j], p[j + 1], float(g[j]), float(g[j + 1]), t[j], t[j + 1]))
+    return res if any_ else None
 
 
 def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None):
     poly = orient(poly, -1.0 if inward else 1.0)
     for ring in [poly.exterior] + list(poly.interiors):
         pts = np.asarray(ring.coords)[:, :2]
+        if style is not None and not inward:
+            a_, b_ = pts[:-1], pts[1:]
+            okk = np.linalg.norm(b_ - a_, axis=1) > 0.3
+            pieces = street_rise(a_[okk], b_[okk], base, z0, z1, fh)
+            if pieces is not None:
+                sloped_walls(m, pieces, a_[okk], b_[okk], z0, z1, base, fh, col, kind, style)
+                continue
         a, b = pts[:-1], pts[1:]
         L = np.linalg.norm(b - a, axis=1)
         ok = L > 0.3
@@ -737,6 +825,42 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None):
                        np.column_stack([np.full(k, v0), np.full(k, v0), np.full(k, v1), np.full(k, v1)])], -1)
         idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
         m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style)
+
+
+def sloped_walls(m, pieces, A, B, z0, z1, base, fh, col, kind, style):
+    """Walls whose shop floor climbs with the street (street_rise): per
+    piece, the ground-floor band from the pavement up one storey, its
+    window rows measured from the pavement, then the level floors above."""
+    bay = BAY_NOW or STYLE_BAY[style]
+    quads, uvs = [], []
+    for (p, q, ga, gb, t0, t1) in pieces:
+        # The bay count of the whole wall the piece belongs to.
+        L = float(np.linalg.norm(q - p) / max(t1 - t0, 1e-9))
+        nb = max(1.0, round(L / bay))
+        u0, u1 = nb * t0, nb * t1
+        ta, tb = base + ga + fh, base + gb + fh
+        if ga < 0.01 and gb < 0.01:
+            quads.append((p, q, (z0, z0, z1, z1)))
+            uvs.append(((u0, (z0 - base) / fh), (u1, (z0 - base) / fh), (u1, (z1 - base) / fh), (u0, (z1 - base) / fh)))
+            continue
+        quads.append((p, q, (z0, z0, tb, ta)))
+        uvs.append(((u0, (z0 - base - ga) / fh), (u1, (z0 - base - gb) / fh), (u1, 1.0), (u0, 1.0)))
+        quads.append((p, q, (ta, tb, z1, z1)))
+        uvs.append(((u0, (ta - base) / fh), (u1, (tb - base) / fh), (u1, (z1 - base) / fh), (u0, (z1 - base) / fh)))
+    k = len(quads)
+    xs = np.array([[p[0], q[0], q[0], p[0]] for p, q, _ in quads]).ravel()
+    ys = np.array([[p[1], q[1], q[1], p[1]] for p, q, _ in quads]).ravel()
+    zs = np.array([z for _, _, z in quads]).ravel()
+    P = enu_fast(xs, ys, zs).reshape(k, 4, 3)
+    # Normal from the piece's horizontal direction (the quads are not all
+    # rectangles: the top of the shop band slopes).
+    H = P[:, 1] - P[:, 0]
+    Up = enu_fast(xs[:1], ys[:1], np.array([1.0]))[0] - enu_fast(xs[:1], ys[:1], np.array([0.0]))[0]
+    nrm = np.cross(H, np.broadcast_to(Up, H.shape))
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+    idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
+    m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=np.array(uvs, np.float64).reshape(-1, 2),
+          idx=idx, style=style)
 
 
 # Roofs are painted with the aerial photo itself: real tiles, skylights,
@@ -1305,8 +1429,9 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
 
 
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
-    global BAY_NOW
+    global BAY_NOW, GROUND_R
     mntR = Raster(mnt)
+    GROUND_R = mntR
     extent = box(X0, Y0, X1, Y1)
     footprint = []
     for f in feats:
@@ -1609,7 +1734,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
-    BAY_NOW = None
+    BAY_NOW = GROUND_R = None
     return footprint
 
 
@@ -1645,6 +1770,148 @@ def load_track():
     from scipy.spatial import cKDTree
     return {"x": x, "y": y, "z": z, "line": line, "kd": cKDTree(np.column_stack([x, y])),
             "keep_out": line.buffer(TRACK_HALF + 0.8)}
+
+
+# Avenue d'Ostende, the climb from Sainte-Dévote to the Casino (lap metres):
+# on its sea side a brick pavement and a stone parapet over the drop to
+# the port, as in the street photos.
+OSTENDE = (232, 652)
+OSTENDE_SIDE = -1                     # the sea is on the right going up
+PROM = None
+PROM_WALL = 25.0                      # m, the most retaining wall shown below the parapet
+
+
+def ostende_setup(mnt):
+    """Where the parapet stands, lap point by lap point: at the edge of the
+    drop the LiDAR sees beside the road, between 1.6 and 4.8 m past the
+    track's edge."""
+    t = TRACK
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    i0, i1 = int(OSTENDE[0] / step), int(OSTENDE[1] / step) + 1
+    idx = np.arange(i0, i1)
+    dx = np.gradient(t["x"]); dy = np.gradient(t["y"])
+    ln = np.hypot(dx, dy) + 1e-9
+    nx, ny = OSTENDE_SIDE * -dy / ln, OSTENDE_SIDE * dx / ln
+    R = Raster(mnt)
+    pd = np.full(len(idx), TRACK_HALF + 4.5)
+    for k, i in enumerate(idx):
+        for d in np.arange(TRACK_HALF + 1.0, TRACK_HALF + 6.0, 0.25):
+            g = R.sample(np.array([t["x"][i] + nx[i] * d]), np.array([t["y"][i] + ny[i] * d]))[0]
+            if not np.isfinite(g) or g < t["z"][i] - 0.8:
+                pd[k] = d - 0.5
+                break
+    pd = np.clip(pd, TRACK_HALF + 1.6, TRACK_HALF + 4.8)
+    pd = ndimage.uniform_filter1d(ndimage.median_filter(pd, 9, mode="nearest"), 7, mode="nearest")
+    # The lowest ground within 3 m: below the parapet the 3 m ground grid
+    # would otherwise mix the road's level and the drop into spikes.
+    hmin = ndimage.minimum_filter(np.where(np.isfinite(mnt), mnt, 1e3), 13)
+    # And within 6 m, for the needles further down the slope.
+    hmin2 = ndimage.minimum_filter(hmin, 13)
+    return {"hmin2": hmin2, "idx": idx, "pd": pd, "nx": nx[idx], "ny": ny[idx], "i0": i0, "i1": i1, "hmin": hmin}
+
+
+def ostende_promenade(m, mnt, stats):
+    """The sea side of Avenue d'Ostende: red brick pavement from behind the
+    barrier to a stone parapet a metre high, its outer face a retaining
+    wall down to the slope below, with a pale coping on top."""
+    if PROM is None:
+        return 0
+    t, P_ = TRACK, PROM
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    idx, pd, nx, ny = P_["idx"], P_["pd"], P_["nx"], P_["ny"]
+    x, y, z = t["x"][idx], t["y"][idx], t["z"][idx]
+    R = Raster(mnt)
+    brick = np.array(hexrgb("#93604f"))
+    # Warm limestone, a slightly different tint every few metres of wall
+    # (stones laid in runs), so the long wall does not read as one slab.
+    tint = 0.95 + 0.08 * np.random.default_rng(7).random(len(idx) - 1)[:, None]
+    stone = np.array(hexrgb("#e2d6bc"))[None] * tint
+    cope = np.array(hexrgb("#efe7d6"))
+    d0 = TRACK_HALF + 0.45
+
+    def at(d, zz):
+        return enu_fast(x + nx * d, y + ny * d, zz)
+    # Facing outward (right of travel for OSTENDE_SIDE -1): triangles
+    # wound as pavements() does for side -1.
+    pi, po = at(d0, z + 0.12), at(pd, z + 0.12)
+    a, b, c, d_ = pi[:-1], pi[1:], po[1:], po[:-1]
+    # Both faces: the pavement must show whichever way it is wound.
+    m.tri(a, b, c, brick, PLAIN); m.tri(a, c, d_, brick, PLAIN)
+    m.tri(a, c, b, brick, PLAIN); m.tri(a, d_, c, brick, PLAIN)
+    # Ground beyond the parapet (the lowest within 3 m, as ground_mesh()
+    # lowers it): the foot of the retaining wall.
+    gx, gy = x + nx * (pd + 2.0), y + ny * (pd + 2.0)
+    g = Raster(PROM["hmin"]).sample(gx, gy)
+    foot = np.minimum(np.where(np.isfinite(g) & (g < 900), g, z - 6), z - 0.5)
+    # The wall goes down to the slope below (on the 3 m grid a steep
+    # slope would be a curtain of stretched photo).
+    foot = np.maximum(foot, z - PROM_WALL) - 0.5
+    foot = ndimage.minimum_filter1d(foot, 3)
+    top = z + 0.95
+    w = 0.45
+    inner_lo, inner_hi = at(pd, z + 0.12), at(pd, top)
+    outer_lo, outer_hi = at(pd + w, foot), at(pd + w, top)
+
+    def quad(p0, p1, p2, p3, col):     # p0-p1 bottom run, p3-p2 top run
+        A, B, C, D = p0[:-1], p0[1:], p2[1:], p2[:-1]
+        m.tri(A, B, C, col, PLAIN); m.tri(A, C, D, col, PLAIN)
+    # Inner face (seen from the road) and outer face, each wound to face
+    # its own way.
+    A, B, C, D = inner_lo[:-1], inner_lo[1:], inner_hi[1:], inner_hi[:-1]
+    m.tri(A, C, B, stone, PLAIN); m.tri(A, D, C, stone, PLAIN)
+    A, B, C, D = outer_lo[:-1], outer_lo[1:], outer_hi[1:], outer_hi[:-1]
+    m.tri(A, B, C, stone * 0.92, PLAIN); m.tri(A, C, D, stone * 0.92, PLAIN)
+    # Coping: a slab a little wider than the wall.
+    ci, co = at(pd - 0.06, top + 0.08), at(pd + w + 0.06, top + 0.08)
+    A, B, C, D = ci[:-1], ci[1:], co[1:], co[:-1]
+    m.tri(A, B, C, cope, PLAIN); m.tri(A, C, D, cope, PLAIN)
+    ci0, co0 = at(pd - 0.06, top), at(pd + w + 0.06, top)
+    A, B, C, D = ci0[:-1], ci0[1:], ci[1:], ci[:-1]
+    m.tri(A, C, B, cope * 0.9, PLAIN); m.tri(A, D, C, cope * 0.9, PLAIN)
+    A, B, C, D = co0[:-1], co0[1:], co[1:], co[:-1]
+    m.tri(A, B, C, cope * 0.9, PLAIN); m.tri(A, C, D, cope * 0.9, PLAIN)
+    # The retaining wall's masonry: a pilaster every 6 m and a string
+    # course a metre under the coping.
+    for k in range(2, len(idx) - 2, max(1, int(round(6 / step)))):
+        if top[k] - foot[k] < 2.5:
+            continue
+        ux, uy = -ny[k], nx[k]
+        cx, cy = x[k] + nx[k] * (pd[k] + w), y[k] + ny[k] * (pd[k] + w)
+        q = Polygon([(cx - ux * 0.35, cy - uy * 0.35), (cx + ux * 0.35, cy + uy * 0.35),
+                     (cx + ux * 0.35 + nx[k] * 0.3, cy + uy * 0.35 + ny[k] * 0.3),
+                     (cx - ux * 0.35 + nx[k] * 0.3, cy - uy * 0.35 + ny[k] * 0.3)])
+        add_walls(m, orient(q, 1.0), foot[k], top[k] - 1.2, foot[k], 100, np.array(hexrgb("#d8ccb2")), PLAIN)
+        add_roof(m, orient(q, 1.0), top[k] - 1.2, np.array(hexrgb("#d8ccb2")), False)
+    sc_lo, sc_hi = at(pd + w, top - 1.0), at(pd + w + 0.15, top - 1.0)
+    sc_tlo, sc_thi = at(pd + w, top - 0.8), at(pd + w + 0.15, top - 0.8)
+    A, B, C, D = sc_lo[:-1], sc_lo[1:], sc_hi[1:], sc_hi[:-1]
+    m.tri(A, B, C, cope * 0.85, PLAIN); m.tri(A, C, D, cope * 0.85, PLAIN)
+    m.tri(A, C, B, cope * 0.85, PLAIN); m.tri(A, D, C, cope * 0.85, PLAIN)
+    A, B, C, D = sc_hi[:-1], sc_hi[1:], sc_thi[1:], sc_thi[:-1]
+    m.tri(A, B, C, cope * 0.9, PLAIN); m.tri(A, C, D, cope * 0.9, PLAIN)
+    A, B, C, D = sc_tlo[:-1], sc_tlo[1:], sc_thi[1:], sc_thi[:-1]
+    m.tri(A, B, C, cope * 0.95, PLAIN); m.tri(A, C, D, cope * 0.95, PLAIN)
+    m.tri(A, C, B, cope * 0.95, PLAIN); m.tri(A, D, C, cope * 0.95, PLAIN)
+    # Lamp posts on the parapet every 25 m, a pair of lanterns on each,
+    # as along the avenue.
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    post_c, head_c = np.array(hexrgb("#262c29")), np.array(hexrgb("#fff1c8"))
+    tx = np.gradient(x); ty = np.gradient(y); tl = np.hypot(tx, ty) + 1e-9
+    for k in range(4, len(idx) - 4, int(round(25 / step))):
+        px, py = x[k] + nx[k] * (pd[k] + w / 2), y[k] + ny[k] * (pd[k] + w / 2)
+        zb = top[k] + 0.08
+        add_walls(m, box(px - 0.18, py - 0.18, px + 0.18, py + 0.18), zb, zb + 0.5, zb, 10, post_c, PLAIN)
+        add_walls(m, box(px - 0.07, py - 0.07, px + 0.07, py + 0.07), zb + 0.5, zb + 3.6, zb, 10, post_c, PLAIN)
+        ux, uy = tx[k] / tl[k], ty[k] / tl[k]
+        arm = LineString([(px - ux * 0.55, py - uy * 0.55), (px + ux * 0.55, py + uy * 0.55)]).buffer(0.04, cap_style=2)
+        add_walls(m, orient(arm, 1.0), zb + 3.45, zb + 3.53, zb, 10, post_c, PLAIN)
+        for sgn in (-1, 1):
+            hx, hy = px + sgn * ux * 0.55, py + sgn * uy * 0.55
+            head = box(hx - 0.16, hy - 0.16, hx + 0.16, hy + 0.16)
+            add_walls(m, head, zb + 3.0, zb + 3.45, zb, 10, head_c, PLAIN, style=LAMP_HEAD)
+            add_roof(m, box(hx - 0.2, hy - 0.2, hx + 0.2, hy + 0.2), zb + 3.5, post_c, False)
+    stats["ostende_parapet_m"] = int(len(idx) * step)
+    return len(idx)
 
 
 def flatten_harbour(mnt):
@@ -2838,6 +3105,8 @@ def pavements(m, sea, bmask, stats):
             ok &= ~((s_ > TUNNEL["ta"] - 6) & (s_ < TUNNEL["tb"] + 6))
         if side == -1:
             ok &= ~((s_ > 2072) & (s_ < 2164))            # the chicane's escape road (clean-track OPEN)
+        if PROM is not None and side == OSTENDE_SIDE:
+            ok[PROM["i0"]:PROM["i1"]] = False             # ostende_promenade()
         # Runs of at least 6 m.
         lab, nr = ndimage.label(ok)
         for r in range(1, nr + 1):
@@ -3412,7 +3681,7 @@ def main():
         tunnel_open(sea)
         if "open" in TUNNEL:
             print("tunnel open on the sea side from", TUNNEL["open"])
-    global TRACK
+    global TRACK, PROM
     TRACK = load_track()
     if TRACK is not None:
         flat = flatten_harbour(mnt_f)
@@ -3422,6 +3691,7 @@ def main():
         # its height (and the humps do not turn into trees).
         mns = mns - np.nan_to_num(mnt_f - flat, nan=0.0)
         mnt_f = flat
+        PROM = ostende_setup(mnt_f)
     mnt_ground = mnt_f
     if TUNNEL is not None:
         timg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
@@ -3482,6 +3752,7 @@ def main():
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
     pavements(bm, sea, bmask, stats)
+    ostende_promenade(bm, mnt_f, stats)
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,

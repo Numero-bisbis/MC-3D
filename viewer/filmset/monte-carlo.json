@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 1549834,
+ "triangles": 2183858,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -88,7 +88,8 @@
  "diving_towers": 1,
  "lamps": 996,
  "spectators": 5452,
- "pavement_m": 5147,
+ "pavement_m": 4826,
+ "ostende_parapet_m": 421,
  "fountains": 5,
  "statues": 14,
  "flags": 20,
