@@ -2,7 +2,9 @@
 """Build our own stylised 3D model of Monte-Carlo, like an animated-film set.
 
 Nothing here comes from Google: every shape is derived from open data and
-every colour is authored by us.
+every colour is authored by us, except the walls facing the circuit, whose
+colours are sampled from Mapillary street photos (facade_colours.py, cached
+in pipeline/facade_colours.json).
 
   ground     IGN LiDAR HD terrain model (MNT, 50 cm), meshed at 3 m and
              draped with a painted map: OpenStreetMap roads, pavements,
@@ -31,6 +33,8 @@ Inputs (downloaded by --fetch into data/raw/filmset/):
                      roof's patch is shifted back by the photo's lean)
   bdtopo.json        IGN BD TOPO building outlines
   osm.xml            OpenStreetMap extract (api.openstreetmap.org /map)
+  facade_colours.json (committed, next to this script) wall colours by
+                     BD TOPO cleabs, from Mapillary (CC-BY-SA 4.0)
 
 Usage:
   python pipeline/build_filmset.py --fetch
@@ -1016,6 +1020,12 @@ class FacadeData:
                 x, y = tl.transform(lon, lat)
                 self.wd.append((shapely.Point(x, y), g("itemLabel"), g("inc")[:4], g("styleLabel"), g("floors")))
         self.marks = [(shapely.Point(*xy), name, st, colour) for name, xy, st, colour in LANDMARKS]
+        # Real wall colours of the buildings facing the circuit, sampled from
+        # Mapillary street photos by facade_colours.py.
+        f = Path(__file__).resolve().parent / "facade_colours.json"
+        self.photo_colours = ({k: v["colour"] for k, v in json.load(open(f))["buildings"].items()}
+                              if f.exists() else {})
+        self.used_photo_colours = 0
 
     def get(self, poly, props):
         out = {"levels": None, "year": None, "name": None, "style": None, "colour": None}
@@ -1045,9 +1055,14 @@ class FacadeData:
             out["levels"] = float(props["nombre_d_etages"]) + 1   # BD TOPO counts floors above the ground floor
         if not out["year"] and (props.get("date_d_apparition") or "")[:4].isdigit():
             out["year"] = int(props["date_d_apparition"][:4])
+        pc = self.photo_colours.get(props.get("cleabs"))
+        if pc:
+            out["colour"] = pc
         for pt, name, st, colour in self.marks:
             if poly.buffer(3).contains(pt):
                 out.update(style=st, colour=colour, name=name)
+        if pc and out["colour"] == pc:
+            self.used_photo_colours += 1
         return out
 
 
@@ -3279,7 +3294,9 @@ def main():
         lean = estimate_lean(edges, feats, mns, mnt)
         print("photo lean per metre of height (east, north):", lean)
         photo = {"mesh": Mesh(), "polys": [], "lean": lean, "edges": edges}
-    fps = buildings(bm, feats, mns, mnt_f, ortho, stats, FacadeData(ways), photo)
+    facades = FacadeData(ways)
+    fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
+    stats["photo_facade_colours"] = facades.used_photo_colours
     stats["photo_roofs"] = len(photo["polys"]) if photo else 0
     stats["photo_lean"] = photo["lean"] if photo else None
     # Building mask at 50 cm for trees and the ground shade.
@@ -3370,7 +3387,7 @@ def main():
         **stats,
         "sources": ["IGN LiDAR HD MNT/MNS (Etalab 2.0)", "IGN BD TOPO (Etalab 2.0)",
                     "IGN BD ORTHO 20 cm, roofs (Etalab 2.0)", "OpenStreetMap contributors (ODbL)",
-                    "Wikidata (CC0)"],
+                    "Wikidata (CC0)", "Mapillary contributors (CC-BY-SA 4.0), facade colours"],
     }
     (OUT / "monte-carlo.json").write_text(json.dumps(meta, indent=1))
     print(json.dumps(meta), f"{time.time() - t0:.0f}s", f"{out.stat().st_size / 1e6:.1f} MB")

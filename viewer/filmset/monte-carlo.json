@@ -76,6 +76,7 @@
   183
  ],
  "balconies": 1066,
+ "photo_facade_colours": 26,
  "photo_roofs": 1330,
  "photo_lean": [
   0.04000000000000037,
@@ -97,6 +98,7 @@
   "IGN BD TOPO (Etalab 2.0)",
   "IGN BD ORTHO 20 cm, roofs (Etalab 2.0)",
   "OpenStreetMap contributors (ODbL)",
-  "Wikidata (CC0)"
+  "Wikidata (CC0)",
+  "Mapillary contributors (CC-BY-SA 4.0), facade colours"
  ]
 }
