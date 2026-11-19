@@ -22,6 +22,9 @@
     lightingModel: Cesium.LightingModel.PBR,
     uniforms: {
       u_time: { type: Cesium.UniformType.FLOAT, value: 0 },
+      // 1 while the Legendary laps run: the Grand Prix crowd is there only
+      // for the race.
+      u_crowd: { type: Cesium.UniformType.FLOAT, value: 0 },
       // 0 day, 1 night: lit windows, street lamps and their pools of light.
       u_night: { type: Cesium.UniformType.FLOAT, value: 0 },
       u_lights: { type: Cesium.UniformType.SAMPLER_2D, value: new Cesium.TextureUniform({ url: `${URL_BASE}-night.jpg` }) },
@@ -32,6 +35,7 @@
       void vertexMain(VertexInput vsInput, inout czm_modelVertexOutput vsOutput) {
         float a255 = floor(vsInput.attributes.color_0.a * 255.0 + 0.5);
         if (abs(a255 - 148.0) < 0.5) {
+          if (u_crowd < 0.5) { vsOutput.positionMC = vec3(0.0); return; }   // folded away
           vec2 uv = vsInput.attributes.texCoord_0;
           float ph = uv.x * 6.2832;
           float hop = max(0.0, sin(u_time * 6.0 + ph * 3.0)) * 0.12 * (0.5 + 0.5 * sin(ph * 7.0));
@@ -418,10 +422,13 @@
           float far = clamp(length(fsInput.attributes.positionEC) / 3000.0, 0.0, 1.0);
           // The colour of the Riviera in the IGN aerial photo: a deep navy
           // teal (about #18243a from above), a little bluer far out.
-          vec3 deepSea = vec3(0.010, 0.032, 0.058);
-          material.diffuse = mix(deepSea, deepSea * vec3(0.85, 0.95, 1.1), far) * mix(1.0, 0.4, u_night);
-          material.roughness = 0.08;
-          material.specular = vec3(0.04);
+          // Port Hercule is a dark green-grey teal (IGN photo), the open sea
+          // a little bluer. Weak, slightly blurred reflections: a mirror of
+          // the bright sky made the whole port read pale blue.
+          vec3 deepSea = vec3(0.011, 0.032, 0.042);
+          material.diffuse = mix(deepSea, vec3(0.010, 0.030, 0.055), far) * mix(1.0, 0.4, u_night);
+          material.roughness = 0.22;
+          material.specular = vec3(0.02);
           // Along the shore: clearer, lighter water, a line of foam where
           // it meets the quays and rocks, and small waves lapping in.
           vec2 suv = fsInput.attributes.texCoord_0;
@@ -558,6 +565,7 @@
   const t0 = performance.now();
   scene.preRender.addEventListener(() => {
     if (active) shader.setUniform("u_time", (performance.now() - t0) / 1000);
+    if (active) shader.setUniform("u_crowd", M.tours && M.tours.isActive("legends") ? 1 : 0);
   });
 
   // Shadows sell the film look. On phones they start on and switch off by

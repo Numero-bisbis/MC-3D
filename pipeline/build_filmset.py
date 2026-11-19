@@ -2028,28 +2028,60 @@ def yachts(m, ortho, sea, stats, ways=()):
                 return
         placed.append(hull)
         hull_h = min(0.8 + 0.045 * L, 4.5)
-        white = np.array(hexrgb("#f6f5f1"))
-        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#f6f5f1", "#6d7780", "#0e3a5c"])))
-        add_walls(m, hull, -0.4, 0.35, -0.4, 100, stripe * 0.9, HULL)
-        add_walls(m, hull, 0.35, hull_h, -0.4, 100, white, HULL)
-        deck = hull.buffer(-0.25)
-        add_roof(m, hull, hull_h, white * 0.97, False)
-        if L > 9 and not deck.is_empty:
-            aft = plan(0.03 * L, 0.2 * L, W * 0.42).intersection(deck)
+        white = np.array(hexrgb(rnd.choice(["#f6f5f1"] * 5 + ["#eceae4", "#eceae4", "#2a3c55"])))
+        dark_hull = white.mean() < 100
+        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#0e3a5c", "#6d7780"]))) if not dark_hull else np.array(hexrgb("#f2efe8"))
+        top = np.array(hexrgb("#f6f5f1"))
+        glass = np.array(hexrgb("#1a2430"))
+        # The hull, lofted: narrower at the waterline than at the deck (the
+        # sides flare out and catch the light), the sheer rising to the bow,
+        # a dark boot stripe at the water, a bulwark round the deck.
+        n_ = len(hull_outline(L, W))
+        wl = np.array(hull_outline(L * 0.96, W * 0.84)) + [0.02 * L, 0]
+        dk = np.array(hull_outline(L, W))
+        sheer = lambda u: hull_h + 0.22 * hull_h * np.clip(u / L, 0, 1) ** 2
+        to_xy = lambda q: stern[None] + q[:, :1] * ax[None] + q[:, 1:2] * side[None]
+        WL, DK = to_xy(wl), to_xy(dk)
+        loft(m, WL, np.full(n_, -0.4), WL, np.full(n_, 0.3), stripe * 0.9, HULL)
+        loft(m, WL, np.full(n_, 0.3), DK, sheer(dk[:, 0]), white, HULL)
+        zdk = sheer(dk[:, 0])
+        cen = to_xy(np.array([[0.45 * L, 0.0]]))[0]
+        fan(m, DK, zdk, cen, hull_h + 0.06 * hull_h, hexrgb("#e9e6de") if not dark_hull else hexrgb("#d9d4c8"), HULL)
+        if L > 8:
+            inner = to_xy(np.array(hull_outline(L * 0.985, W * 0.94)) + [0.01 * L, 0])
+            loft(m, DK, zdk, DK, zdk + 0.55, white, HULL)
+            loft(m, inner, zdk + 0.55, inner, zdk, white * 0.92, HULL)     # inside face
+        if L > 9:
+            aft = plan(0.03 * L, 0.2 * L, W * 0.4).intersection(hull.buffer(-0.4))
             for q in to_polys(aft):
-                add_roof(m, orient(q, 1.0), hull_h + 0.03, hexrgb("#b88a5c"), False)   # teak
+                add_roof(m, orient(q, 1.0), hull_h + 0.05, hexrgb("#b88a5c"), False)   # teak
+        # Superstructure: tiers stepping back, each tapering and raked at the
+        # front, a band of dark glass running round (the shader's window
+        # band on HULL walls), a fly bridge, and a mast on the bigger ones.
         tiers = 1 if L < 14 else 2 if L < 30 else 3 if L < 55 else 4
-        z = hull_h
-        for t in range(tiers):
-            a0, a1 = (0.2 + 0.05 * t) * L, (0.66 - 0.07 * t) * L
-            half = W / 2 * (0.8 - 0.1 * t)
+        z = hull_h + 0.05
+        for t_ in range(tiers):
+            a0, a1 = (0.18 + 0.06 * t_) * L, (0.68 - 0.08 * t_) * L
+            half = W / 2 * (0.82 - 0.1 * t_)
             if a1 - a0 < 2 or half < 0.6:
                 break
-            th = 2.4 if L > 14 else 1.5
-            q = plan(a0, a1, half)
-            add_walls(m, q, z, z + th, z, th, white, HULL)
-            add_roof(m, q, z + th, white * 0.95, False)
-            z += th
+            th = 2.5 if L > 14 else 1.6
+            rake = min(1.2, 0.35 * th)
+            lo = to_xy(np.array([[a0, -half], [a1, -half], [a1, half], [a0, half]]))
+            hi = to_xy(np.array([[a0 + 0.15, -(half - 0.2)], [a1 - rake, -(half - 0.2)], [a1 - rake, half - 0.2], [a0 + 0.15, half - 0.2]]))
+            loft(m, np.vstack([lo, lo[:1]]), np.full(5, z), np.vstack([hi, hi[:1]]), np.full(5, z + th),
+                 top if t_ else white if not dark_hull else top, HULL, band=True)
+            roof = orient(Polygon(hi), 1.0)
+            add_roof(m, roof, z + th, top * 0.96, False)
+            # The roof's overhang: a thin slab a little wider than the tier.
+            ov = orient(Polygon(hi).buffer(0.25, join_style=2), 1.0)
+            add_walls(m, ov, z + th, z + th + 0.12, z, 100, top * 0.9, PLAIN)
+            add_roof(m, ov, z + th + 0.12, top * 0.97, False)
+            z += th + 0.12
+        if L > 20:
+            c_ = to_xy(np.array([[0.5 * L, 0.0]]))[0]
+            mast = orient(Polygon([c_ + ax * dx + side * dy for dx, dy in [(-0.4, -0.2), (0.4, -0.2), (0.4, 0.2), (-0.4, 0.2)]]), 1.0)
+            add_walls(m, mast, z, z + min(4.0, 0.08 * L), z, 100, np.array(hexrgb("#dedad2")), PLAIN)
         stats["yachts"] += 1
 
     lab, n = ndimage.label(boat)
@@ -2080,6 +2112,44 @@ def yachts(m, ortho, sea, stats, ways=()):
         mid = cen + ax * (proj.max() + proj.min()) / 2
         for stern, ax_, L_, W_ in moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
             build(stern, ax_, L_, W_)
+
+
+def loft(m, A, za, B, zb, col, kind, band=False):
+    """Side walls between two rings of the same length (closed: first point
+    repeated or not): A at heights za, B at zb. band=True gives the wall the
+    0..1 height coordinate that draws the window band on HULL walls."""
+    A, B = np.asarray(A, float), np.asarray(B, float)
+    za, zb = np.broadcast_to(np.asarray(za, float), (len(A),)), np.broadcast_to(np.asarray(zb, float), (len(B),))
+    if not np.allclose(A[0], A[-1]):
+        A, B = np.vstack([A, A[:1]]), np.vstack([B, B[:1]])
+        za, zb = np.append(za, za[0]), np.append(zb, zb[0])
+    # Outward winding: counter-clockwise ring (shapely orient sign=1).
+    area = 0.5 * np.sum(A[:-1, 0] * A[1:, 1] - A[1:, 0] * A[:-1, 1])
+    if area < 0:
+        A, B, za, zb = A[::-1], B[::-1], za[::-1], zb[::-1]
+    k = len(A) - 1
+    pa = enu_fast(A[:, 0], A[:, 1], za)
+    pb = enu_fast(B[:, 0], B[:, 1], zb)
+    P = np.stack([pa[:-1], pa[1:], pb[1:], pb[:-1]], 1)
+    nrm = np.cross(P[:, 1] - P[:, 0], P[:, 3] - P[:, 0])
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+    v = np.array([0.0, 0.0, 1.0, 1.0]) if band else np.zeros(4)
+    uv = np.stack([np.tile([0.0, 1.0, 1.0, 0.0], (k, 1)), np.tile(v, (k, 1))], -1)
+    idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
+    m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx)
+
+
+def fan(m, ring, z, centre, zc, col, kind):
+    """A deck: triangles from a centre point to each edge of the ring."""
+    ring = np.asarray(ring, float)
+    z = np.broadcast_to(np.asarray(z, float), (len(ring),))
+    area = 0.5 * np.sum(ring[:, 0] * np.roll(ring[:, 1], -1) - np.roll(ring[:, 0], -1) * ring[:, 1])
+    if area < 0:
+        ring, z = ring[::-1], z[::-1]
+    p = enu_fast(ring[:, 0], ring[:, 1], z)
+    c = enu_fast(np.array([centre[0]]), np.array([centre[1]]), np.array([zc]))
+    a, b = p, np.roll(p, -1, 0)
+    m.tri(np.repeat(c, len(p), 0), a, b, col, kind)
 
 
 def moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
