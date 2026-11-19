@@ -245,7 +245,12 @@
   };
 
   const VF = Cesium.PerInstanceColorAppearance.VERTEX_FORMAT;
+  // The finish of each part rides in the colour's alpha (the car primitive
+  // is opaque): 1 glossy paint, 0.9 glass, 0.8 carbon, 0.65 bare metal,
+  // 0.5 rubber. CAR_FS below turns it into shine and reflections.
+  const FINISH = new Map([[COL.tyre, 0.5], [COL.carbon, 0.8], [COL.rim, 0.65], [COL.metal, 0.65], [COL.wire, 0.65], [COL.glass, 0.9]]);
   const inst = (geometry, at, color, rot) => {
+    if (color.alpha === 1) color = color.withAlpha(FINISH.get(color) ?? 1);
     let mm = Cesium.Matrix4.fromTranslation(new Cesium.Cartesian3(...at));
     if (rot) mm = Cesium.Matrix4.multiply(mm, Cesium.Matrix4.fromRotation(rot), new Cesium.Matrix4());
     return new Cesium.GeometryInstance({
@@ -507,13 +512,56 @@
     return parts;
   }
 
+  // Car finish: sun or moon light, a sky-and-road ambient, a tight
+  // highlight and a clear-coat reflection of the sky on the paint, softer
+  // sheen on carbon, a broad dull one on rubber. Without it Cesium's plain
+  // shading made the cars look like painted blocks.
+  const CAR_FS = `
+    in vec3 v_positionEC;
+    in vec3 v_normalEC;
+    in vec4 v_color;
+    void main() {
+      vec3 V = normalize(-v_positionEC);
+      vec3 N = normalize(v_normalEC);
+      if (dot(N, V) < 0.0) N = -N;                 // thin wings seen from below
+      vec3 up = normalize(czm_viewRotation * normalize(czm_viewerPositionWC));
+      vec3 L = normalize(czm_lightDirectionEC);
+      vec3 lc = czm_lightColorHdr * 0.5;
+      float day = clamp(dot(czm_lightColorHdr, vec3(0.333)) / 2.0, 0.0, 1.0);
+      float f = v_color.a;
+      vec3 base = czm_gammaCorrect(v_color).rgb;
+      // ks: highlight strength, pw: tightness, kr: reflection, metal tints it.
+      float ks = 0.05, pw = 10.0, kr = 0.0, metal = 0.0;
+      if (f > 0.95) { ks = 0.55; pw = 90.0; kr = 0.55; }
+      else if (f > 0.85) { ks = 0.8; pw = 120.0; kr = 0.8; }
+      else if (f > 0.72) { ks = 0.22; pw = 36.0; kr = 0.18; }
+      else if (f > 0.6) { ks = 0.9; pw = 40.0; kr = 0.7; metal = 1.0; }
+      vec3 sky = mix(vec3(0.83, 0.89, 0.95), vec3(0.32, 0.52, 0.82), 0.6);
+      vec3 groundC = vec3(0.30, 0.29, 0.28);
+      float hu = dot(N, up);
+      vec3 amb = mix(groundC * 0.55, sky * 0.75, 0.5 + 0.5 * hu) * mix(0.25, 1.0, day);
+      float nl = max(dot(N, L), 0.0);
+      vec3 col = base * (amb * 0.55 + lc * nl * 0.8);
+      vec3 H = normalize(L + V);
+      float sp = pow(max(dot(N, H), 0.0), pw) * ks * (pw + 8.0) / 40.0;
+      col += mix(lc, lc * base * 2.0, metal) * sp * step(0.0, dot(N, L));
+      vec3 R = reflect(-V, N);
+      float e = dot(R, up);
+      vec3 env = mix(vec3(0.22, 0.22, 0.23),
+        mix(vec3(0.86, 0.91, 0.96), vec3(0.26, 0.48, 0.82), smoothstep(0.02, 0.6, e)),
+        smoothstep(-0.12, 0.04, e)) * mix(0.12, 1.0, day);
+      float fr = 0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+      col = mix(col, env * mix(vec3(1.0), base * 1.6, metal), clamp(kr * mix(fr, 0.6, metal), 0.0, 1.0));
+      out_FragColor = vec4(col, 1.0);
+    }
+  `;
   const cars = {};
   function makeCar(lap) {
     if (cars[lap.id]) return cars[lap.id];
     const e = eraOf(lap.year);
     const body = scene.primitives.add(new Cesium.Primitive({
       geometryInstances: carParts(lap),
-      appearance: new Cesium.PerInstanceColorAppearance({ flat: false, translucent: false }),
+      appearance: new Cesium.PerInstanceColorAppearance({ flat: false, translucent: false, fragmentShaderSource: CAR_FS }),
       asynchronous: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
     }));
     // A soft dark patch under the car, so it sits on the road.

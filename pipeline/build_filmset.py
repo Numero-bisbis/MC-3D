@@ -2882,12 +2882,96 @@ def crowd_free(s0, s1, width):
     return LineString(np.column_stack([t["x"][i0:i1], t["y"][i0:i1]])).buffer(width)
 
 
+
+# Parts of a spectator, for colours: trousers, shins (trousers or bare
+# legs), shoes, shirt, skin, hair (or cap).
+P_LEGS, P_SHIN, P_FEET, P_SHIRT, P_SKIN, P_HAIR = range(6)
+_PERSON = {}
+
+
+def person_template(arms_up):
+    """One standing person 1.72 m tall, x forward, y left, z up, made of
+    smooth tubes: separate legs with shoes, a torso narrowing to the
+    shoulders, a neck, a round head with hair or a cap, and arms down by
+    the sides or raised. About 150 vertices. Returns positions, smooth normals, the part of
+    each vertex and the triangles."""
+    if arms_up in _PERSON:
+        return _PERSON[arms_up]
+    P, part, T = [], [], []
+
+    def tube(centers, radii, parts, sides, cap0=None, cap1=None, twist=0.0):
+        """Rings around the polyline `centers` (radii (rx, ry) each, rx along
+        the body's x), joined into a tube; cap0/cap1 close an end with a
+        pole at that point, in that part."""
+        C = np.asarray(centers, np.float64)
+        d = np.gradient(C, axis=0)
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        start = len(P)
+        if cap0 is not None:
+            P.append(cap0[0]); part.append(cap0[1])
+        th = np.arange(sides) * 2 * np.pi / sides + twist
+        for c, dd, (rx, ry), pt in zip(C, d, radii, parts):
+            ref = np.array([0.0, 0.0, 1.0]) if abs(dd[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+            u = np.cross(ref, dd); u /= np.linalg.norm(u)
+            if abs(dd[2]) >= 0.9:                       # vertical: u along x
+                u = np.array([1.0, 0.0, 0.0]) - dd * dd[0]; u /= np.linalg.norm(u)
+            v = np.cross(dd, u)
+            for t in th:
+                P.append(c + np.cos(t) * rx * u + np.sin(t) * ry * v); part.append(pt)
+        r0 = start + (1 if cap0 is not None else 0)
+        nr = len(C)
+        for i in range(nr - 1):
+            for j in range(sides):
+                a, b = r0 + i * sides + j, r0 + i * sides + (j + 1) % sides
+                c2, d2 = a + sides, b + sides
+                T.extend([(a, b, d2), (a, d2, c2)])
+        if cap0 is not None:
+            T.extend([(start, r0 + (j + 1) % sides, r0 + j) for j in range(sides)])
+        if cap1 is not None:
+            pole = len(P); P.append(cap1[0]); part.append(cap1[1])
+            last = r0 + (nr - 1) * sides
+            T.extend([(last + j, last + (j + 1) % sides, pole) for j in range(sides)])
+
+    for sy in (-1, 1):
+        y = 0.095 * sy
+        # Leg: shoe, ankle, calf, knee, thigh, hip.
+        tube([(0.03, y, 0.04), (0.0, y, 0.11), (0.01, y, 0.46), (0.0, y, 0.7), (0.0, y * 0.9, 0.9)],
+             [(0.08, 0.05), (0.045, 0.045), (0.055, 0.055), (0.075, 0.07), (0.09, 0.09)],
+             [P_FEET, P_FEET, P_SHIN, P_LEGS, P_LEGS], 5, cap0=((0.04, y, 0.0), P_FEET))
+    # Torso: hips, waist, chest, shoulders, then the neck.
+    tube([(0.0, 0.0, 0.86), (0.0, 0.0, 1.04), (0.01, 0.0, 1.28), (0.0, 0.0, 1.41), (0.0, 0.0, 1.46), (0.0, 0.0, 1.52)],
+         [(0.12, 0.185), (0.11, 0.165), (0.125, 0.195), (0.1, 0.2), (0.05, 0.06), (0.048, 0.05)],
+         [P_LEGS, P_SHIRT, P_SHIRT, P_SHIRT, P_SKIN, P_SKIN], 7)
+    # Head, slightly forward of the neck; hair on the crown and back.
+    tube([(0.015, 0.0, 1.55), (0.012, 0.0, 1.62), (0.0, 0.0, 1.68)],
+         [(0.095, 0.08), (0.105, 0.09), (0.08, 0.075)],
+         [P_SKIN, P_HAIR, P_HAIR], 6, cap0=((0.02, 0.0, 1.505), P_SKIN), cap1=((0.0, 0.0, 1.72), P_HAIR))
+    for sy in (-1, 1):
+        if arms_up:
+            pts = [(0.0, 0.17 * sy, 1.38), (0.02, 0.26 * sy, 1.5), (0.04, 0.3 * sy, 1.7), (0.03, 0.3 * sy, 1.95)]
+        else:
+            pts = [(0.0, 0.17 * sy, 1.38), (0.0, 0.235 * sy, 1.3), (-0.01, 0.255 * sy, 1.1), (0.05, 0.24 * sy, 0.86)]
+        tube(pts, [(0.055, 0.055), (0.05, 0.05), (0.04, 0.04), (0.035, 0.03)],
+             [P_SHIRT, P_SHIRT, P_SKIN, P_SKIN], 5, cap1=(pts[-1], P_SKIN))
+    pos = np.asarray(P, np.float32)
+    tri = np.asarray(T, np.int64)
+    # Smooth normals, area weighted; triangles wound outwards.
+    fn = np.cross(pos[tri[:, 1]] - pos[tri[:, 0]], pos[tri[:, 2]] - pos[tri[:, 0]])
+    nrm = np.zeros_like(pos)
+    for i in range(3):
+        np.add.at(nrm, tri[:, i], fn)
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+    _PERSON[arms_up] = (pos, nrm.astype(np.float32), np.asarray(part), tri.astype(np.uint32))
+    return _PERSON[arms_up]
+
+
 def crowds(m, mnt, sea, bmask, stats):
     """Spectators on foot behind the barriers: a band from 1.5 m to about
     9 m beyond the barrier, on open, fairly flat ground (no buildings, no
-    water, not on another stretch of the track). Each one is a few boxes:
-    legs, a shirt in a bright colour (some in team red), a head, and for
-    many, arms up. uv.y = 1 marks the parts that jump and wave, uv.x
+    water, not on another stretch of the track). Each one is a smooth
+    low-poly person (person_template): legs and shoes, trousers or shorts,
+    a shirt in a bright colour (some in team red), a head with hair or a
+    cap, and for many, arms up. uv.y = 1 marks the parts that jump and wave, uv.x
     the phase, so the viewer can animate the crowd."""
     if TRACK is None:
         return 0
@@ -2931,55 +3015,46 @@ def crowds(m, mnt, sea, bmask, stats):
     shirts = np.array([hexrgb(c) for c in ["#d0202a", "#d0202a", "#f2f2f2", "#1d3f8f", "#f4c20d", "#1a1a1a",
                                          "#2e8b57", "#ff7a00", "#e83e8c", "#7fb3e6", "#d0202a", "#ffffff"]], np.float32)
     skin = np.array([hexrgb(c) for c in ["#f1c7a5", "#d9a47c", "#a8724c", "#6b4630", "#e8b896"]], np.float32)
-    trousers = np.array([hexrgb(c) for c in ["#2a3346", "#3b3b3b", "#c9b48a", "#1d2a44", "#5a6b7d"]], np.float32)
+    trousers = np.array([hexrgb(c) for c in ["#2a3346", "#3b3b3b", "#c9b48a", "#1d2a44", "#5a6b7d", "#e8e4da"]], np.float32)
+    hairs = np.array([hexrgb(c) for c in ["#2b1d14", "#14110f", "#5a3a22", "#b08a4e", "#8a8580", "#3b2a1c"]], np.float32)
+    shoes = np.array([hexrgb(c) for c in ["#f2f2f2", "#1a1a1a", "#4a3a2c", "#d8d8d8"]], np.float32)
     shirt = shirts[rnd.integers(0, len(shirts), n)]
     face = skin[rnd.integers(0, len(skin), n)]
     legs = trousers[rnd.integers(0, len(trousers), n)]
+    hair = hairs[rnd.integers(0, len(hairs), n)]
+    feet = shoes[rnd.integers(0, len(shoes), n)]
+    # Shorts for some (bare shins), team caps for some.
+    shorts = rnd.random(n) < 0.35
+    shin = np.where(shorts[:, None], face, legs)
+    caps = rnd.random(n) < 0.25
+    hair = np.where(caps[:, None], np.where((rnd.random(n) < 0.6)[:, None], hexrgb("#d0202a"), shirt), hair)
     phase = rnd.random(n)
     arms_up = rnd.random(n) < 0.4
+    # Part colours, in PERSON part order.
+    palette = np.stack([legs, shin, feet, shirt, face, hair], 1)          # (n, 6, 3)
 
-    def boxes(sel, cx, cy, cz, hx, hy, hz, col, jump):
-        """Axis boxes turned by ang about each person's base; (cx, cy) in the
-        person's frame (x forward, y left)."""
+    scale = (h / 1.72).astype(np.float32)
+    ca, sa = np.cos(ang).astype(np.float32), np.sin(ang).astype(np.float32)
+    for up in (False, True):
+        sel = arms_up == up
         k = int(sel.sum())
         if not k:
-            return
-        cx, cy, cz, hx, hy, hz = (np.broadcast_to(np.asarray(v, np.float32).reshape(-1), (n,))[sel][:, None]
-                                  for v in (cx, cy, cz, hx, hy, hz))
-        a = ang[sel]
-        ca, sa = np.cos(a), np.sin(a)
-        corners = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], np.float32)
-        lx = cx + corners[None, :, 0] * hx
-        ly = cy + corners[None, :, 1] * hy
-        lz = cz + corners[None, :, 2] * hz
-        V = np.empty((k, 8, 3), np.float32)
-        V[..., 0] = base[sel, 0, None] + lx * ca[:, None] - ly * sa[:, None]
-        V[..., 1] = base[sel, 1, None] + lx * sa[:, None] + ly * ca[:, None]
-        V[..., 2] = base[sel, 2, None] + lz
-        # Five faces (the underside is never seen), four shared corners
-        # each: indexed quads keep the download small.
-        faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (1, 5, 7, 3)]
-        pos = np.concatenate([V[:, list(f)] for f in faces], 1)          # (k, 20, 3)
-        nr = np.cross(pos[:, 1::4] - pos[:, 0::4], pos[:, 2::4] - pos[:, 0::4])
-        nr /= np.maximum(np.linalg.norm(nr, axis=-1, keepdims=True), 1e-9)
-        nrm = np.repeat(nr, 4, axis=1)
-        cols = np.repeat(col[sel][:, None], 20, 1)
-        up = np.broadcast_to(np.asarray(jump, np.float32), (k,))
-        uv = np.stack([np.repeat(phase[sel][:, None], 20, 1), np.repeat(up[:, None], 20, 1)], -1)
-        q = np.array([0, 1, 2, 0, 2, 3])
-        idx = (np.arange(5)[:, None] * 4 + q[None]).ravel()
-        idx = (np.arange(k)[:, None] * 20 + idx[None]).ravel()
+            continue
+        tp, tn, part, tidx = person_template(up)
+        lx, ly, lz = (tp[None, :, i] * scale[sel, None] for i in range(3))
+        c, sn = ca[sel, None], sa[sel, None]
+        pos = np.empty((k, len(tp), 3), np.float32)
+        pos[..., 0] = base[sel, 0, None] + lx * c - ly * sn
+        pos[..., 1] = base[sel, 1, None] + lx * sn + ly * c
+        pos[..., 2] = base[sel, 2, None] + lz
+        nrm = np.empty_like(pos)
+        nrm[..., 0] = tn[None, :, 0] * c - tn[None, :, 1] * sn
+        nrm[..., 1] = tn[None, :, 0] * sn + tn[None, :, 1] * c
+        nrm[..., 2] = np.broadcast_to(tn[None, :, 2], (k, len(tp)))
+        cols = palette[sel][:, part]                                        # (k, V, 3)
+        uv = np.stack([np.repeat(phase[sel][:, None], len(tp), 1), np.ones((k, len(tp)), np.float32)], -1)
+        idx = (np.arange(k)[:, None] * len(tp) + tidx.ravel()[None]).ravel()
         m.add(pos.reshape(-1, 3), nrm.reshape(-1, 3), cols.reshape(-1, 3), PLAIN, uv=uv.reshape(-1, 2), idx=idx, style=CROWD)
-
-    al = np.ones(n, bool)
-    hh = h
-    # Trousers from the ground to the hips, the shirt above; the whole
-    # person hops.
-    boxes(al, 0.0, 0.0, hh * 0.24, 0.11, 0.18, hh * 0.24, legs, 1.0)
-    boxes(al, 0.0, 0.0, hh * 0.64, 0.13, 0.25, hh * 0.17, shirt, 1.0)
-    boxes(al, 0.0, 0.0, hh * 0.89, 0.10, 0.09, 0.11, face, 1.0)
-    for sgn in (-1, 1):
-        boxes(arms_up, 0.0, sgn * 0.27, hh * 0.92, 0.05, 0.05, hh * 0.15, shirt, 1.0)
     stats["spectators"] = int(n)
     return int(n)
 
