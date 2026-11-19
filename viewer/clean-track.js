@@ -32,8 +32,9 @@
   const [TA, TB] = TUN[0] || [1e9, -1e9];
   // Stretches with no barrier on one side: [s from, s to, side (+1 left, -1 right)].
   // The Nouvelle Chicane has no barrier on the right as the cars arrive from
-  // the tunnel; the left keeps its rail, and so do the straights either side.
-  const OPEN = [[2072, 2122, -1]];
+  // the tunnel, through the whole chicane until the road runs straight again;
+  // the left keeps its rail, and so do the straights either side.
+  const OPEN = [[2072, 2164, -1]];
   const openAt = (s, side) => OPEN.some(([a, b, sd]) => sd === side && s > a && s < b);
 
   // The same smoothed line as the car (lap-legends.js), so it sits on the track.

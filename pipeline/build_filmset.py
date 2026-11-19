@@ -1368,7 +1368,7 @@ def off_track(x, y, margin=0.0):
     return bool(track_dist(x, y)[0] > TRACK_HALF + 0.8 + margin)
 
 
-def track_audit(named, half=TRACK_HALF - 0.2, lift=0.1, tol=0.08, over=4.5):
+def track_audit(named, half=TRACK_HALF - 0.2, lift=0.1, tol=-0.08, over=4.5):
     """Look along the whole lap for anything of the film set standing on the
     modelled road (5 m either side of the centre line, 10 cm above the
     terrain): ground, roofs, trees or boats poking up through the tarmac.
@@ -1878,6 +1878,9 @@ def no_tree_zones(ways):
             g = Polygon(pts).buffer(0)
             if g.area > 4:
                 out.append(g.buffer(1.0))
+    if TRACK is not None:
+        out += [crowd_free(a, b, 32.0) for a, b in TREELESS]
+        out += [crowd_free(a, b, TRACK_HALF + 10.0) for a, b in CROWD_ZONES]
     return unary_union(out) if out else None
 
 
@@ -2201,6 +2204,125 @@ def pool_features(m, ways, mnt):
     return n_
 
 
+# ----------------------------------------------------------------- crowds ----
+CROWD = 4                            # PLAIN style: spectators (the viewer animates them)
+# Grand Prix crowds standing behind the barriers: lap metres (from, to).
+# The harbour quay from the swimming pool to La Rascasse first (Fly), then
+# the start straight, Sainte Dévote, Casino square, Tabac and Anthony Noghes.
+CROWD_ZONES = [(2640, 2965), (3170, 3316), (0, 95), (165, 265), (815, 905), (2240, 2350)]
+TREELESS = [(2630, 2990)]            # the quay after the pool has no trees
+
+
+def crowd_free(s0, s1, width):
+    """The track stretch s0..s1 (lap metres) buffered by `width`."""
+    t = TRACK
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    i0, i1 = int(s0 / step), int(s1 / step) + 1
+    return LineString(np.column_stack([t["x"][i0:i1], t["y"][i0:i1]])).buffer(width)
+
+
+def crowds(m, mnt, sea, bmask, stats):
+    """Spectators on foot behind the barriers: a band from 1.5 m to about
+    9 m beyond the barrier, on open, fairly flat ground (no buildings, no
+    water, not on another stretch of the track). Each one is a few boxes:
+    legs, a shirt in a bright colour (some in team red), a head, and for
+    many, arms up. uv.y = 1 marks the parts that jump and wave, uv.x
+    the phase, so the viewer can animate the crowd."""
+    if TRACK is None:
+        return 0
+    t = TRACK
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    rnd = np.random.default_rng(11)
+    mntR, seaR, bR = Raster(mnt), Raster(sea.astype(np.float32)), Raster(bmask.astype(np.float32))
+    P = []
+    for s0, s1 in CROWD_ZONES:
+        for s in np.arange(s0, s1, 1.05):
+            i = int(s / step) % len(t["x"])
+            j = (i + 1) % len(t["x"])
+            dx, dy = t["x"][j] - t["x"][i], t["y"][j] - t["y"][i]
+            ln = math.hypot(dx, dy) or 1
+            nx, ny = -dy / ln, dx / ln
+            for side in (1, -1):
+                for d in np.arange(TRACK_HALF + 1.9, TRACK_HALF + 7.2, 1.05):
+                    jx, jy = rnd.normal(0, 0.18, 2)
+                    P.append((t["x"][i] + side * nx * d + jx, t["y"][i] + side * ny * d + jy, t["z"][i], s, side * nx, side * ny))
+    P = np.array(P)
+    x, y, zt = P[:, 0], P[:, 1], P[:, 2]
+    zg = mntR.sample(x, y)
+    ok = np.isfinite(zg) & (seaR.sample(x, y) < 0.5) & (bR.sample(x, y) < 0.5)
+    ok &= np.abs(zg - zt) < 1.2                      # standing at the level of the road
+    ok &= track_dist(x, y) > TRACK_HALF + 1.7        # not on any other stretch
+    if TUNNEL is not None:
+        ok &= ~contains_xy(TUNNEL["ground"].buffer(4), x, y)
+    keep = ok & (rnd.random(len(P)) < 0.75)
+    P, zg = P[keep], zg[keep]
+    n = len(P)
+    if not n:
+        return 0
+    base = enu_fast(P[:, 0], P[:, 1], zg)
+    # Facing the track (towards -normal), a little turned either way.
+    fx, fy = -P[:, 4], -P[:, 5]
+    ang = np.arctan2(fy, fx) + rnd.normal(0, 0.35, n)
+    # Normal vector in ENU from Lambert (the grid is turned about 3 degrees).
+    rot = math.atan2(AFF[0, 1], AFF[0, 0])
+    ang = ang + rot
+    h = rnd.normal(1.72, 0.08, n).clip(1.5, 1.95)
+    shirts = np.array([hexrgb(c) for c in ["#d0202a", "#d0202a", "#f2f2f2", "#1d3f8f", "#f4c20d", "#1a1a1a",
+                                         "#2e8b57", "#ff7a00", "#e83e8c", "#7fb3e6", "#d0202a", "#ffffff"]], np.float32)
+    skin = np.array([hexrgb(c) for c in ["#f1c7a5", "#d9a47c", "#a8724c", "#6b4630", "#e8b896"]], np.float32)
+    trousers = np.array([hexrgb(c) for c in ["#2a3346", "#3b3b3b", "#c9b48a", "#1d2a44", "#5a6b7d"]], np.float32)
+    shirt = shirts[rnd.integers(0, len(shirts), n)]
+    face = skin[rnd.integers(0, len(skin), n)]
+    legs = trousers[rnd.integers(0, len(trousers), n)]
+    phase = rnd.random(n)
+    arms_up = rnd.random(n) < 0.4
+
+    def boxes(sel, cx, cy, cz, hx, hy, hz, col, jump):
+        """Axis boxes turned by ang about each person's base; (cx, cy) in the
+        person's frame (x forward, y left)."""
+        k = int(sel.sum())
+        if not k:
+            return
+        cx, cy, cz, hx, hy, hz = (np.broadcast_to(np.asarray(v, np.float32).reshape(-1), (n,))[sel][:, None]
+                                  for v in (cx, cy, cz, hx, hy, hz))
+        a = ang[sel]
+        ca, sa = np.cos(a), np.sin(a)
+        corners = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], np.float32)
+        lx = cx + corners[None, :, 0] * hx
+        ly = cy + corners[None, :, 1] * hy
+        lz = cz + corners[None, :, 2] * hz
+        V = np.empty((k, 8, 3), np.float32)
+        V[..., 0] = base[sel, 0, None] + lx * ca[:, None] - ly * sa[:, None]
+        V[..., 1] = base[sel, 1, None] + lx * sa[:, None] + ly * ca[:, None]
+        V[..., 2] = base[sel, 2, None] + lz
+        # Five faces (the underside is never seen), four shared corners
+        # each: indexed quads keep the download small.
+        faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (1, 5, 7, 3)]
+        pos = np.concatenate([V[:, list(f)] for f in faces], 1)          # (k, 20, 3)
+        nr = np.cross(pos[:, 1::4] - pos[:, 0::4], pos[:, 2::4] - pos[:, 0::4])
+        nr /= np.maximum(np.linalg.norm(nr, axis=-1, keepdims=True), 1e-9)
+        nrm = np.repeat(nr, 4, axis=1)
+        cols = np.repeat(col[sel][:, None], 20, 1)
+        up = np.broadcast_to(np.asarray(jump, np.float32), (k,))
+        uv = np.stack([np.repeat(phase[sel][:, None], 20, 1), np.repeat(up[:, None], 20, 1)], -1)
+        q = np.array([0, 1, 2, 0, 2, 3])
+        idx = (np.arange(5)[:, None] * 4 + q[None]).ravel()
+        idx = (np.arange(k)[:, None] * 20 + idx[None]).ravel()
+        m.add(pos.reshape(-1, 3), nrm.reshape(-1, 3), cols.reshape(-1, 3), PLAIN, uv=uv.reshape(-1, 2), idx=idx, style=CROWD)
+
+    al = np.ones(n, bool)
+    hh = h
+    # Trousers from the ground to the hips, the shirt above; the whole
+    # person hops.
+    boxes(al, 0.0, 0.0, hh * 0.24, 0.11, 0.18, hh * 0.24, legs, 1.0)
+    boxes(al, 0.0, 0.0, hh * 0.64, 0.13, 0.25, hh * 0.17, shirt, 1.0)
+    boxes(al, 0.0, 0.0, hh * 0.89, 0.10, 0.09, 0.11, face, 1.0)
+    for sgn in (-1, 1):
+        boxes(arms_up, 0.0, sgn * 0.27, hh * 0.92, 0.05, 0.05, hh * 0.15, shirt, 1.0)
+    stats["spectators"] = int(n)
+    return int(n)
+
+
 def coast_land(ways, sea):
     """Raster (50 cm) of the land side of the OpenStreetMap coastline."""
     from shapely.ops import polygonize
@@ -2302,8 +2424,13 @@ def write_glb(path, prims, ground_jpg):
         meshes_p.append({"attributes": attrs, "indices": idx, "material": 1 if textured else 0})
     gltf = {
         "asset": {"version": "2.0", "generator": "MC-3D build_filmset.py"},
-        "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": meshes_p}],
+        # One mesh (and node) per primitive: the compressor quantises each
+        # mesh within its own bounds, and the 40 km sea plane must not share
+        # them with the district (16 bits over 40 km is 60 cm steps, enough
+        # to lift the ground through the road).
+        "scene": 0, "scenes": [{"nodes": list(range(len(meshes_p)))}],
+        "nodes": [{"mesh": k} for k in range(len(meshes_p))],
+        "meshes": [{"primitives": [q]} for q in meshes_p],
         "materials": materials,
         "images": [{"bufferView": tex_view, "mimeType": "image/jpeg"}],
         "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}],
@@ -2524,11 +2651,15 @@ def main():
     gm, gz = ground_mesh(mnt_ground, sea)
     drive = drive_map(gz, bmask, sea)
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
+    print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))
 
-    hits = track_audit([("ground", gm), ("buildings", bm), ("trees", tm), ("harbour", hm)])
+    audit = [("ground", gm), ("buildings", bm), ("trees", tm), ("harbour", hm)]
+    if photo and photo["mesh"].p:
+        audit.append(("photo roofs", photo["mesh"]))
+    hits = track_audit(audit)
     stats["track_clear"] = not hits
     if hits:
         print(f"track audit: {len(hits)} spots stand on the road")
@@ -2554,8 +2685,8 @@ def main():
     if args.no_compress:
         raw.replace(out)
     else:
-        # Draco: decoded by Cesium in a web worker; 16-bit positions keep
-        # about 2 cm precision over the district.
+        # meshopt: 16-bit positions within each mesh's own bounds keep about
+        # 2 cm precision over the district (see write_glb).
         subprocess.run(["npx", "--yes", "@gltf-transform/cli@4.1.1", "meshopt", str(raw), str(out),
                         "--quantize-position", "16", "--quantize-texcoord", "14",
                         "--quantize-normal", "8"], check=True)

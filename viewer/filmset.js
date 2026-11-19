@@ -26,6 +26,21 @@
       u_night: { type: Cesium.UniformType.FLOAT, value: 0 },
       u_lights: { type: Cesium.UniformType.SAMPLER_2D, value: new Cesium.TextureUniform({ url: `${URL_BASE}-night.jpg` }) },
     },
+    // Spectators (plain, style 4): uv.y = 1 marks the parts that jump and
+    // wave, uv.x the phase, so the crowd bounces out of step.
+    vertexShaderText: `
+      void vertexMain(VertexInput vsInput, inout czm_modelVertexOutput vsOutput) {
+        float a255 = floor(vsInput.attributes.color_0.a * 255.0 + 0.5);
+        if (abs(a255 - 148.0) < 0.5) {
+          vec2 uv = vsInput.attributes.texCoord_0;
+          float ph = uv.x * 6.2832;
+          float hop = max(0.0, sin(u_time * 6.0 + ph * 3.0)) * 0.12 * (0.5 + 0.5 * sin(ph * 7.0));
+          // positionMC is in the mesh's quantised units: metres / node scale.
+          float sc = length(czm_model[0].xyz);
+          vsOutput.positionMC.y += uv.y * hop / max(sc, 1e-6);
+        }
+      }
+    `,
     fragmentShaderText: `
       float hash12(vec2 p) {
         vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -401,7 +416,10 @@
           vec3 nMC = normalize(vec3(0.12 * g.x * near, 1.0, 0.12 * g.y * near));
           material.normalEC = normalize(czm_normal * nMC);
           float far = clamp(length(fsInput.attributes.positionEC) / 3000.0, 0.0, 1.0);
-          material.diffuse = mix(base, base * vec3(0.8, 0.95, 1.05), far) * 0.55 * mix(1.0, 0.4, u_night);
+          // The colour of the Riviera in the IGN aerial photo: a deep navy
+          // teal (about #18243a from above), a little bluer far out.
+          vec3 deepSea = vec3(0.010, 0.032, 0.058);
+          material.diffuse = mix(deepSea, deepSea * vec3(0.85, 0.95, 1.1), far) * mix(1.0, 0.4, u_night);
           material.roughness = 0.08;
           material.specular = vec3(0.04);
           // Along the shore: clearer, lighter water, a line of foam where
@@ -411,7 +429,7 @@
             float d = texture(u_lights, suv).g * 20.0;           // metres from the shore
             if (d < 19.0) {
               float shallow = 1.0 - smoothstep(2.0, 16.0, d);
-              material.diffuse = mix(material.diffuse, material.diffuse * vec3(1.15, 1.45, 1.35) + vec3(0.0, 0.03, 0.03), shallow * 0.6);
+              material.diffuse = mix(material.diffuse, vec3(0.016, 0.060, 0.070) * mix(1.0, 0.4, u_night), shallow * 0.5);
               float br = vnoise(q * 0.9 + vec2(t * 0.15, -t * 0.1));
               float line = (1.0 - smoothstep(0.4, 1.8 + 0.8 * br, d));
               float lap = smoothstep(0.75, 0.95, 0.5 + 0.5 * sin(d * 1.3 - t * 1.6 + br * 2.0))
@@ -432,6 +450,10 @@
             // Street lamp head: lights up at night.
             material.diffuse = base * mix(0.8, 0.2, u_night);
             material.emissive = vec3(1.0, 0.88, 0.62) * 1.6 * u_night;
+          } else if (st > 3.5 && st < 4.5) {
+            // Spectators: matte clothes, dimmer at night.
+            material.diffuse = base * mix(1.0, 0.35, u_night);
+            material.roughness = 0.9;
           } else {
             material.diffuse = base;
           }
