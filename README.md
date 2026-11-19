@@ -46,7 +46,8 @@ tunnel, so the scan's parked cars and roadworks disappear (`viewer/clean-track.j
 add `?clean=0` to see the raw scan). In the Surface view the ground model is
 pressed down under the whole circuit, so distant, coarse terrain tiles cannot
 fold the hillside over the road. The Nouvelle Chicane has no barrier on
-the right as the cars arrive from the tunnel; the left side keeps its rail.
+the right as the cars arrive from the tunnel, through the whole chicane
+until the road runs straight again; the left side keeps its rail.
 
 **Street View stops**: in the lap tours, the pegman button pauses the lap and
 opens Google's own 360° Street View panorama of the corner you are at; ‹ and ›
