@@ -479,6 +479,10 @@ def ground_mesh(mnt, sea):
             _, j = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]])).query(np.column_stack([X[og], Y[og]]))
             Z[og] = np.minimum(Z[og], TUNNEL["z"][j] - 1.2)
     land = valid[r, c] > 0.5
+    # A lone land node among sea nodes (the end of a jetty, a quay corner)
+    # would stand up from the sea floor as a needle: leave it to the sea.
+    nb = ndimage.convolve(land.astype(np.int32), np.ones((3, 3), np.int32), mode="nearest") - land
+    land &= nb >= 3
     Z = np.where(land, Z, SEA_FLOOR)
     P = enu_fast(X.ravel(), Y.ravel(), Z.ravel())
     # Smooth normals from the height grid.
@@ -3670,6 +3674,14 @@ def main():
     sizes = ndimage.sum(~sea, lab, np.arange(1, n + 1))
     sea |= np.isin(lab, np.nonzero(sizes < 8000)[0] + 1)
     sea = ndimage.binary_opening(sea, iterations=2)
+    # And the other way round: dark cars and puddles on the low quays
+    # (the car park on the harbour's south quay is at 0.5 m) read as "sea" holes in the
+    # land, and the yacht tracer put a boat in each white van parked
+    # there. A patch of "sea" under 0.2 ha that does not reach the open
+    # water is quay.
+    lab, n = ndimage.label(sea)
+    sizes = ndimage.sum(sea, lab, np.arange(1, n + 1))
+    sea &= ~np.isin(lab, np.nonzero(sizes < 8000)[0] + 1)
     ways, pts = load_osm()
     # Yachts moored against a quay merge with it in the LiDAR terrain. The
     # OpenStreetMap coastline follows the quays, so anything outside it is sea.
