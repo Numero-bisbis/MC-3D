@@ -29,6 +29,7 @@
   const CUT = 4.7;            // m, half the width cut out of the scan (under the track)
   const LIFT = 0.1;           // m, the track sits this much above the ground model
   const BARRIER = HALF + 0.35, BARRIER_H = 1.0;
+  const FENCE_H = 3.0;        // m of catch fence above the barrier
   const [TA, TB] = TUN[0] || [1e9, -1e9];
   // Stretches with no barrier on one side: [s from, s to, side (+1 left, -1 right)].
   // The Nouvelle Chicane has no barrier on the right as the cars arrive from
@@ -216,6 +217,26 @@
       m.diffuse = c;
       return m;
     }`;
+  const FENCE = `${NOISE}
+    czm_material czm_getMaterial(czm_materialInput mi) {
+      czm_material m = czm_getDefaultMaterial(mi);
+      float s = mi.st.s, h = mi.st.t * fenceH;
+      vec2 q = vec2(mod(s, 97.0), h) / 0.1;                      // 10 cm diamonds
+      float d1 = abs(fract((q.x + q.y) * 0.5) - 0.5), d2 = abs(fract((q.x - q.y) * 0.5) - 0.5);
+      vec2 w = fwidth(vec2((q.x + q.y) * 0.5, (q.x - q.y) * 0.5)) + 0.02;
+      float wire = max(1.0 - smoothstep(0.0, w.x, d1), 1.0 - smoothstep(0.0, w.y, d2));
+      wire = min(wire, 0.18 + 0.82 * (1.0 - min(1.0, max(w.x, w.y) * 2.0)));   // far away: a light veil
+      float post = step(abs(fract(s / 4.0 + 0.5) - 0.5) * 4.0, 0.06);   // 12 cm posts every 4 m
+      float cable = max(step(0.97, mi.st.t), max(1.0 - step(0.012, abs(mi.st.t - 0.5)), 1.0 - step(0.012, abs(mi.st.t - 0.03))));
+      float cover = max(wire, max(post, cable));
+      // Screen-door cut-out: no blending, so it sorts with everything else.
+      // Ordered 4x4 threshold: an even, steady veil instead of sparkle.
+      vec2 b = mod(floor(gl_FragCoord.xy), 4.0);
+      float bayer = (mod(b.x + b.y * 2.0, 4.0) * 4.0 + mod(b.x * 2.0 + b.y * 3.0, 4.0) + 0.5) / 16.0;
+      if (cover < bayer) discard;
+      m.diffuse = mix(vec3(0.34, 0.36, 0.37), vec3(0.2, 0.22, 0.22), max(post, cable));
+      return m;
+    }`;
   const STONE = `${NOISE}
     czm_material czm_getMaterial(czm_materialInput mi) {
       czm_material m = czm_getDefaultMaterial(mi);
@@ -293,6 +314,21 @@
     prims.push(new Cesium.Primitive({
       geometryInstances: barriers.map((r) => new Cesium.GeometryInstance({ geometry: sheet(r) })),
       appearance: mat(BARR), asynchronous: false, compressVertices: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
+    }));
+    // Debris (catch) fences above the barriers, leaning in over the track
+    // at the top, as all round the real circuit: posts every 4 m, cables
+    // and a diamond wire mesh cut out in the shader.
+    const fences = barriers.map((run) => run.map((r) => {
+      const [x0, y0, , ] = r.pts[0];
+      const f = frame(r.s);
+      const side = Math.sign((x0 - f.x) * f.lx + (y0 - f.y) * f.ly) || 1;
+      const xo = x0 + f.lx * side * 0.25, yo = y0 + f.ly * side * 0.25;
+      const xi = x0 - f.lx * side * 0.35, yi = y0 - f.ly * side * 0.35;
+      return { s: r.s, pts: [[xo, yo, f.z + BARRIER_H - 0.05, 0], [xi, yi, f.z + BARRIER_H + FENCE_H, 1]] };
+    }));
+    prims.push(new Cesium.Primitive({
+      geometryInstances: fences.map((r) => new Cesium.GeometryInstance({ geometry: sheet(r) })),
+      appearance: mat(FENCE, { fenceH: FENCE_H }), asynchronous: false, compressVertices: false, show: false, shadows: Cesium.ShadowMode.DISABLED,
     }));
     // The tunnel: a closed vault from portal to portal.
     if (TA < TB) {

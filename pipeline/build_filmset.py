@@ -2028,28 +2028,60 @@ def yachts(m, ortho, sea, stats, ways=()):
                 return
         placed.append(hull)
         hull_h = min(0.8 + 0.045 * L, 4.5)
-        white = np.array(hexrgb("#f6f5f1"))
-        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#f6f5f1", "#6d7780", "#0e3a5c"])))
-        add_walls(m, hull, -0.4, 0.35, -0.4, 100, stripe * 0.9, HULL)
-        add_walls(m, hull, 0.35, hull_h, -0.4, 100, white, HULL)
-        deck = hull.buffer(-0.25)
-        add_roof(m, hull, hull_h, white * 0.97, False)
-        if L > 9 and not deck.is_empty:
-            aft = plan(0.03 * L, 0.2 * L, W * 0.42).intersection(deck)
+        white = np.array(hexrgb(rnd.choice(["#f6f5f1"] * 5 + ["#eceae4", "#eceae4", "#2a3c55"])))
+        dark_hull = white.mean() < 100
+        stripe = np.array(hexrgb(rnd.choice(["#1f2a3a", "#1f2a3a", "#0e3a5c", "#6d7780"]))) if not dark_hull else np.array(hexrgb("#f2efe8"))
+        top = np.array(hexrgb("#f6f5f1"))
+        glass = np.array(hexrgb("#1a2430"))
+        # The hull, lofted: narrower at the waterline than at the deck (the
+        # sides flare out and catch the light), the sheer rising to the bow,
+        # a dark boot stripe at the water, a bulwark round the deck.
+        n_ = len(hull_outline(L, W))
+        wl = np.array(hull_outline(L * 0.96, W * 0.84)) + [0.02 * L, 0]
+        dk = np.array(hull_outline(L, W))
+        sheer = lambda u: hull_h + 0.22 * hull_h * np.clip(u / L, 0, 1) ** 2
+        to_xy = lambda q: stern[None] + q[:, :1] * ax[None] + q[:, 1:2] * side[None]
+        WL, DK = to_xy(wl), to_xy(dk)
+        loft(m, WL, np.full(n_, -0.4), WL, np.full(n_, 0.3), stripe * 0.9, HULL)
+        loft(m, WL, np.full(n_, 0.3), DK, sheer(dk[:, 0]), white, HULL)
+        zdk = sheer(dk[:, 0])
+        cen = to_xy(np.array([[0.45 * L, 0.0]]))[0]
+        fan(m, DK, zdk, cen, hull_h + 0.06 * hull_h, hexrgb("#e9e6de") if not dark_hull else hexrgb("#d9d4c8"), HULL)
+        if L > 8:
+            inner = to_xy(np.array(hull_outline(L * 0.985, W * 0.94)) + [0.01 * L, 0])
+            loft(m, DK, zdk, DK, zdk + 0.55, white, HULL)
+            loft(m, inner, zdk + 0.55, inner, zdk, white * 0.92, HULL)     # inside face
+        if L > 9:
+            aft = plan(0.03 * L, 0.2 * L, W * 0.4).intersection(hull.buffer(-0.4))
             for q in to_polys(aft):
-                add_roof(m, orient(q, 1.0), hull_h + 0.03, hexrgb("#b88a5c"), False)   # teak
+                add_roof(m, orient(q, 1.0), hull_h + 0.05, hexrgb("#b88a5c"), False)   # teak
+        # Superstructure: tiers stepping back, each tapering and raked at the
+        # front, a band of dark glass running round (the shader's window
+        # band on HULL walls), a fly bridge, and a mast on the bigger ones.
         tiers = 1 if L < 14 else 2 if L < 30 else 3 if L < 55 else 4
-        z = hull_h
-        for t in range(tiers):
-            a0, a1 = (0.2 + 0.05 * t) * L, (0.66 - 0.07 * t) * L
-            half = W / 2 * (0.8 - 0.1 * t)
+        z = hull_h + 0.05
+        for t_ in range(tiers):
+            a0, a1 = (0.18 + 0.06 * t_) * L, (0.68 - 0.08 * t_) * L
+            half = W / 2 * (0.82 - 0.1 * t_)
             if a1 - a0 < 2 or half < 0.6:
                 break
-            th = 2.4 if L > 14 else 1.5
-            q = plan(a0, a1, half)
-            add_walls(m, q, z, z + th, z, th, white, HULL)
-            add_roof(m, q, z + th, white * 0.95, False)
-            z += th
+            th = 2.5 if L > 14 else 1.6
+            rake = min(1.2, 0.35 * th)
+            lo = to_xy(np.array([[a0, -half], [a1, -half], [a1, half], [a0, half]]))
+            hi = to_xy(np.array([[a0 + 0.15, -(half - 0.2)], [a1 - rake, -(half - 0.2)], [a1 - rake, half - 0.2], [a0 + 0.15, half - 0.2]]))
+            loft(m, np.vstack([lo, lo[:1]]), np.full(5, z), np.vstack([hi, hi[:1]]), np.full(5, z + th),
+                 top if t_ else white if not dark_hull else top, HULL, band=True)
+            roof = orient(Polygon(hi), 1.0)
+            add_roof(m, roof, z + th, top * 0.96, False)
+            # The roof's overhang: a thin slab a little wider than the tier.
+            ov = orient(Polygon(hi).buffer(0.25, join_style=2), 1.0)
+            add_walls(m, ov, z + th, z + th + 0.12, z, 100, top * 0.9, PLAIN)
+            add_roof(m, ov, z + th + 0.12, top * 0.97, False)
+            z += th + 0.12
+        if L > 20:
+            c_ = to_xy(np.array([[0.5 * L, 0.0]]))[0]
+            mast = orient(Polygon([c_ + ax * dx + side * dy for dx, dy in [(-0.4, -0.2), (0.4, -0.2), (0.4, 0.2), (-0.4, 0.2)]]), 1.0)
+            add_walls(m, mast, z, z + min(4.0, 0.08 * L), z, 100, np.array(hexrgb("#dedad2")), PLAIN)
         stats["yachts"] += 1
 
     lab, n = ndimage.label(boat)
@@ -2080,6 +2112,44 @@ def yachts(m, ortho, sea, stats, ways=()):
         mid = cen + ax * (proj.max() + proj.min()) / 2
         for stern, ax_, L_, W_ in moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
             build(stern, ax_, L_, W_)
+
+
+def loft(m, A, za, B, zb, col, kind, band=False):
+    """Side walls between two rings of the same length (closed: first point
+    repeated or not): A at heights za, B at zb. band=True gives the wall the
+    0..1 height coordinate that draws the window band on HULL walls."""
+    A, B = np.asarray(A, float), np.asarray(B, float)
+    za, zb = np.broadcast_to(np.asarray(za, float), (len(A),)), np.broadcast_to(np.asarray(zb, float), (len(B),))
+    if not np.allclose(A[0], A[-1]):
+        A, B = np.vstack([A, A[:1]]), np.vstack([B, B[:1]])
+        za, zb = np.append(za, za[0]), np.append(zb, zb[0])
+    # Outward winding: counter-clockwise ring (shapely orient sign=1).
+    area = 0.5 * np.sum(A[:-1, 0] * A[1:, 1] - A[1:, 0] * A[:-1, 1])
+    if area < 0:
+        A, B, za, zb = A[::-1], B[::-1], za[::-1], zb[::-1]
+    k = len(A) - 1
+    pa = enu_fast(A[:, 0], A[:, 1], za)
+    pb = enu_fast(B[:, 0], B[:, 1], zb)
+    P = np.stack([pa[:-1], pa[1:], pb[1:], pb[:-1]], 1)
+    nrm = np.cross(P[:, 1] - P[:, 0], P[:, 3] - P[:, 0])
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+    v = np.array([0.0, 0.0, 1.0, 1.0]) if band else np.zeros(4)
+    uv = np.stack([np.tile([0.0, 1.0, 1.0, 0.0], (k, 1)), np.tile(v, (k, 1))], -1)
+    idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
+    m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx)
+
+
+def fan(m, ring, z, centre, zc, col, kind):
+    """A deck: triangles from a centre point to each edge of the ring."""
+    ring = np.asarray(ring, float)
+    z = np.broadcast_to(np.asarray(z, float), (len(ring),))
+    area = 0.5 * np.sum(ring[:, 0] * np.roll(ring[:, 1], -1) - np.roll(ring[:, 0], -1) * ring[:, 1])
+    if area < 0:
+        ring, z = ring[::-1], z[::-1]
+    p = enu_fast(ring[:, 0], ring[:, 1], z)
+    c = enu_fast(np.array([centre[0]]), np.array([centre[1]]), np.array([zc]))
+    a, b = p, np.roll(p, -1, 0)
+    m.tri(np.repeat(c, len(p), 0), a, b, col, kind)
 
 
 def moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
@@ -2204,6 +2274,246 @@ def pool_features(m, ways, mnt):
     return n_
 
 
+# PLAIN styles drawn by the viewer: 5 polished steel, 6 bronze.
+METAL, BRONZE = 5, 6
+
+
+def _box(m, cx, cy, ax, w, d, z0, z1, col, kind=PLAIN, style=None, top=True):
+    """An upright box centred on (cx, cy), w along ax and d across."""
+    ax = np.asarray(ax, float) / (np.linalg.norm(ax) + 1e-9)
+    sd = np.array([-ax[1], ax[0]])
+    c = np.array([cx, cy])
+    pts = [c - ax * w / 2 - sd * d / 2, c + ax * w / 2 - sd * d / 2, c + ax * w / 2 + sd * d / 2, c - ax * w / 2 + sd * d / 2]
+    poly = orient(Polygon(pts), 1.0)
+    add_walls(m, poly, z0, z1, z0, 100, col, kind, style=style)
+    if top:
+        P = enu_fast(np.array([p[0] for p in pts]), np.array([p[1] for p in pts]), np.full(4, z1))
+        m.tri(P[[0, 0]], P[[1, 2]], P[[2, 3]], col, kind, style=style)
+
+
+def _ball(m, cx, cy, z, r, col, style, nu=10, nv=6):
+    v, t = unit_sphere(nu, nv)
+    P = enu_fast(cx + v[:, 0] * r, cy + v[:, 1] * r, z + v[:, 2] * r)
+    Q = enu_fast(cx + v[:, 0] * (r + 1), cy + v[:, 1] * (r + 1), z + v[:, 2] * (r + 1))
+    nrm = Q - P
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+    m.add(P, nrm, col, PLAIN, idx=t, style=style)
+
+
+def street_features(m, ways, pts, mnt, stats):
+    """The furniture of the streets around the circuit, from OpenStreetMap:
+    fountain basins with a stone rim and water jets, the bronze statues and
+    busts on their plinths (Fangio, Louis Chiron, Massenet, Berlioz...),
+    Anish Kapoor's Sky Mirror on Casino square, the Chrome Ball, and the
+    rows of flagpoles flying Monaco's red and white. Small things, but from
+    the lap camera they give the streets their scale and depth."""
+    mntR = Raster(mnt)
+    xmin, ymin, xmax, ymax = X0, Y1 - mnt.shape[0] * RES, X0 + mnt.shape[1] * RES, Y1
+    inside = lambda x, y: xmin + 5 < x < xmax - 5 and ymin + 5 < y < ymax - 5
+
+    def gz(x, y):
+        z = mntR.sample(np.array([x]), np.array([y]))
+        z = float(z[0]) if np.size(z) else float("nan")
+        return z
+
+    stone, rimc = np.array(hexrgb("#ddd5c4")), np.array(hexrgb("#cfc5b0"))
+    water, jet = np.array(hexrgb("#3f9fae")), np.array(hexrgb("#eef6f7"))
+    bronze, steel = np.array(hexrgb("#6a5638")), np.array(hexrgb("#d8dee4"))
+    n = {"fountains": 0, "statues": 0, "flags": 0, "sky_mirror": 0}
+
+    # Fountains: a stone rim round the basin, water just below its top and,
+    # in the bigger ones, a cluster of jets.
+    for t, p_, closed in ways:
+        if not closed or len(p_) < 4 or t.get("amenity") != "fountain":
+            continue
+        g = Polygon(p_).buffer(0)
+        c = g.centroid
+        if g.area < 4 or not inside(c.x, c.y) or not off_track(c.x, c.y, 1.0):
+            continue
+        ring = np.asarray(g.exterior.coords)
+        zr = mntR.sample(ring[:, 0], ring[:, 1])
+        if not np.isfinite(zr).any():
+            continue
+        z0 = float(np.nanmedian(zr))
+        inner = g.buffer(-0.45)
+        if inner.is_empty or inner.geom_type != "Polygon":
+            continue
+        rim = 0.55
+        add_walls(m, orient(g, 1.0), z0 - 0.3, z0 + rim, z0, 100, rimc, PLAIN)
+        add_walls(m, orient(inner, 1.0), z0, z0 + rim, z0, 100, rimc * 0.93, PLAIN, inward=True)
+        for poly, z, col in ((g.difference(inner), z0 + rim, stone), (inner, z0 + rim - 0.12, water)):
+            tr = triangulate(poly)
+            if tr is None:
+                continue
+            v, tri = tr
+            P = enu_fast(v[:, 0], v[:, 1], np.full(len(v), z))
+            m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, PLAIN)
+        if g.area > 30 and not any(tt.get("name") == "Sky Mirror" and g.buffer(1).contains(Point(*xy))
+                                   for xy, tt in pts):
+            r = math.sqrt(inner.area / math.pi)
+            _box(m, c.x, c.y, (1, 0), 0.9, 0.9, z0, z0 + 0.9, stone)
+            for k in range(7):
+                a = 2 * math.pi * k / 7
+                rr = 0 if k == 0 else r * 0.45
+                h = 2.6 if k == 0 else 1.2
+                x, y = c.x + rr * math.cos(a), c.y + rr * math.sin(a)
+                P = enu_fast(x + CONE_V[:, 0] * 0.12, y + CONE_V[:, 1] * 0.12, z0 + rim - 0.12 + CONE_V[:, 2] * h)
+                m.tri(P[CONE_T[:, 0]], P[CONE_T[:, 1]], P[CONE_T[:, 2]], jet, PLAIN)
+        n["fountains"] += 1
+
+    for (x, y), t in pts:
+        if not inside(x, y):
+            continue
+        name = t.get("name") or ""
+        typ = t.get("artwork_type") or t.get("memorial") or ""
+        z0 = gz(x, y)
+        if not np.isfinite(z0) or not off_track(x, y, 0.5):
+            continue
+        # Face the nearest stretch of the circuit (or south, to the sea).
+        if TRACK is not None:
+            q = TRACK["line"].interpolate(TRACK["line"].project(shapely.Point(x, y)))
+            fa = np.array([q.x - x, q.y - y])
+        else:
+            fa = np.array([0.0, -1.0])
+        fa = fa / (np.linalg.norm(fa) + 1e-9)
+        sd = np.array([-fa[1], fa[0]])
+        if name == "Sky Mirror":
+            # A 5.5 m concave disc of polished steel, tilted back to the sky,
+            # turned to the cars coming round the square from Massenet.
+            fa = np.array([1.0, 0.25]) / math.hypot(1.0, 0.25)
+            sd = np.array([-fa[1], fa[0]])
+            R, depth, tilt = 2.75, 0.45, math.radians(20)
+            zc = z0 + 0.6 + R
+            up = np.array([0.0, 0.0, 1.0])
+            nrm_ax = np.array([fa[0] * math.cos(tilt), fa[1] * math.cos(tilt), math.sin(tilt)])
+            e1 = np.array([sd[0], sd[1], 0.0])
+            e2 = np.cross(nrm_ax, e1)
+            e2 /= np.linalg.norm(e2)
+            nr, nu_ = 6, 32
+            V, N = [], []
+            for i in range(nr + 1):
+                rr = R * i / nr
+                for j in range(nu_):
+                    a = 2 * math.pi * j / nu_
+                    off = e1 * rr * math.cos(a) + e2 * rr * math.sin(a) + nrm_ax * depth * (rr / R) ** 2
+                    V.append(off)
+                    sl = 2 * depth * rr / R ** 2
+                    rad = e1 * math.cos(a) + e2 * math.sin(a)
+                    nv = nrm_ax - rad * sl
+                    N.append(nv / np.linalg.norm(nv))
+            V, N = np.array(V), np.array(N)
+            P = enu_fast(x + V[:, 0], y + V[:, 1], zc + V[:, 2])
+            Q = enu_fast(x + V[:, 0] + N[:, 0], y + V[:, 1] + N[:, 1], zc + V[:, 2] + N[:, 2])
+            nn = (Q - P) / np.linalg.norm(Q - P, axis=1, keepdims=True)
+            idx = []
+            for i in range(nr):
+                for j in range(nu_):
+                    a_, b_ = i * nu_ + j, i * nu_ + (j + 1) % nu_
+                    c_, d_ = a_ + nu_, b_ + nu_
+                    idx += [a_, c_, b_, b_, c_, d_]
+            idx = np.array(idx)
+            # Front: concave mirror; back: the same surface, reversed.
+            m.add(P, nn, steel, PLAIN, idx=idx, style=METAL)
+            m.add(P, -nn, steel * 0.8, PLAIN, idx=idx.reshape(-1, 3)[:, ::-1], style=METAL)
+            _box(m, x - fa[0] * 0.25, y - fa[1] * 0.25, sd, 0.7, 0.45, z0, zc - 0.05, steel * 0.7, style=METAL)
+            n["sky_mirror"] += 1
+        elif name == "Chrome Ball":
+            _ball(m, x, y, z0 + 1.0, 1.0, steel, METAL)
+            n["statues"] += 1
+        elif typ == "bust" and name:
+            _box(m, x, y, fa, 0.6, 0.6, z0, z0 + 1.45, stone)
+            _box(m, x, y, sd, 0.58, 0.3, z0 + 1.45, z0 + 1.78, bronze, style=BRONZE)
+            _ball(m, x, y, z0 + 1.97, 0.15, bronze, BRONZE, 8, 5)
+            n["statues"] += 1
+        elif typ == "statue":
+            # Plinth, then a standing figure in bronze, facing the street.
+            ph = 1.4
+            _box(m, x, y, fa, 1.3, 1.3, z0, z0 + ph, stone)
+            _box(m, x, y, fa, 1.45, 1.45, z0 + ph, z0 + ph + 0.12, rimc)
+            zb = z0 + ph + 0.12
+            for s_ in (-1, 1):
+                lx, ly = x + sd[0] * 0.12 * s_, y + sd[1] * 0.12 * s_
+                _box(m, lx, ly, fa, 0.2, 0.17, zb, zb + 0.9, bronze, style=BRONZE)
+            _box(m, x, y, sd, 0.5, 0.3, zb + 0.9, zb + 1.52, bronze, style=BRONZE)
+            for s_ in (-1, 1):
+                ax_, ay_ = x + sd[0] * 0.31 * s_, y + sd[1] * 0.31 * s_
+                _box(m, ax_, ay_, fa, 0.13, 0.12, zb + 0.95, zb + 1.5, bronze, style=BRONZE)
+            _ball(m, x, y, zb + 1.7, 0.14, bronze, BRONZE, 8, 5)
+            n["statues"] += 1
+        elif t.get("man_made") == "flagpole":
+            H = 9.0
+            _box(m, x, y, (1, 0), 0.12, 0.12, z0, z0 + H, np.array(hexrgb("#f0f0ee")))
+            _ball(m, x, y, z0 + H + 0.08, 0.1, np.array(hexrgb("#e2c46a")), METAL, 6, 4)
+            # Monaco: red over white, flying downwind of the sea breeze.
+            fw, fh = 1.5, 1.0
+            wdir = np.array([-0.3, 1.0]) / math.hypot(0.3, 1.0)
+            fx, fy = x + wdir[0] * (fw / 2 + 0.06), y + wdir[1] * (fw / 2 + 0.06)
+            top = z0 + H - 0.15
+            _box(m, fx, fy, wdir, fw, 0.03, top - fh / 2, top, np.array(hexrgb("#ce1126")))
+            _box(m, fx, fy, wdir, fw, 0.03, top - fh, top - fh / 2, np.array(hexrgb("#f7f7f5")), top=False)
+            n["flags"] += 1
+    stats.update(n)
+    return n
+
+
+def pavements(m, sea, bmask, stats):
+    """A raised pavement behind the barriers on both sides of the circuit:
+    pale stone, 12 cm above the road, from just behind the barrier to
+    2.6 m out, with its kerb face down to the ground. Up close at street
+    level it gives the edge of the track height and a crisp line, where
+    the painted ground was soft. Not over water, buildings, the tunnel,
+    other stretches of the lap, or the Nouvelle Chicane's open side."""
+    if TRACK is None:
+        return 0
+    t = TRACK
+    n = len(t["x"])
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    seaR, bR = Raster(sea.astype(np.float32)), Raster(bmask.astype(np.float32))
+    stone = np.array(hexrgb("#d4cbb8"))
+    kerb = np.array(hexrgb("#bdb3a0"))
+    d0, d1 = TRACK_HALF + 0.45, TRACK_HALF + 2.6
+    count = 0
+    dx = np.gradient(t["x"]); dy = np.gradient(t["y"])
+    ln = np.hypot(dx, dy) + 1e-9
+    nx, ny = -dy / ln, dx / ln
+    s_ = np.arange(n) * step
+    for side in (1, -1):
+        ok = np.ones(n, bool)
+        for k_, d in enumerate((d0, (d0 + d1) / 2, d1)):
+            px, py = t["x"] + side * nx * d, t["y"] + side * ny * d
+            ok &= (seaR.sample(px, py) < 0.5) & (bR.sample(px, py) < 0.5)
+            ok &= track_dist(px, py) > TRACK_HALF + 0.3
+        if TUNNEL is not None:
+            ok &= ~((s_ > TUNNEL["ta"] - 6) & (s_ < TUNNEL["tb"] + 6))
+        if side == -1:
+            ok &= ~((s_ > 2072) & (s_ < 2164))            # the chicane's escape road (clean-track OPEN)
+        # Runs of at least 6 m.
+        lab, nr = ndimage.label(ok)
+        for r in range(1, nr + 1):
+            idx = np.nonzero(lab == r)[0]
+            if len(idx) < 4:
+                continue
+            xs_i = t["x"][idx] + side * nx[idx] * d0; ys_i = t["y"][idx] + side * ny[idx] * d0
+            xs_o = t["x"][idx] + side * nx[idx] * d1; ys_o = t["y"][idx] + side * ny[idx] * d1
+            z = t["z"][idx]
+            pi = enu_fast(xs_i, ys_i, z + 0.12); po = enu_fast(xs_o, ys_o, z + 0.12)
+            pk = enu_fast(xs_o, ys_o, z - 0.3)
+            a, b = pi[:-1], pi[1:]; c, d_ = po[1:], po[:-1]
+            if side == 1:
+                m.tri(a, d_, c, stone, PLAIN); m.tri(a, c, b, stone, PLAIN)
+            else:
+                m.tri(a, b, c, stone, PLAIN); m.tri(a, c, d_, stone, PLAIN)
+            # Kerb face on the outer edge, facing away from the track.
+            ka, kb, kc, kd = po[:-1], po[1:], pk[1:], pk[:-1]
+            if side == 1:
+                m.tri(ka, kb, kc, kerb, PLAIN); m.tri(ka, kc, kd, kerb, PLAIN)
+            else:
+                m.tri(ka, kc, kb, kerb, PLAIN); m.tri(ka, kd, kc, kerb, PLAIN)
+            count += len(idx)
+    stats["pavement_m"] = int(count * step)
+    return count
+
+
 # ----------------------------------------------------------------- crowds ----
 CROWD = 4                            # PLAIN style: spectators (the viewer animates them)
 # Grand Prix crowds standing behind the barriers: lap metres (from, to).
@@ -2243,7 +2553,7 @@ def crowds(m, mnt, sea, bmask, stats):
             ln = math.hypot(dx, dy) or 1
             nx, ny = -dy / ln, dx / ln
             for side in (1, -1):
-                for d in np.arange(TRACK_HALF + 1.9, TRACK_HALF + 7.2, 1.05):
+                for d in np.arange(TRACK_HALF + 2.9, TRACK_HALF + 8.2, 1.05):
                     jx, jy = rnd.normal(0, 0.18, 2)
                     P.append((t["x"][i] + side * nx * d + jx, t["y"][i] + side * ny * d + jy, t["z"][i], s, side * nx, side * ny))
     P = np.array(P)
@@ -2652,6 +2962,8 @@ def main():
     drive = drive_map(gz, bmask, sea)
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
+    pavements(bm, sea, bmask, stats)
+    print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(mns, sea), roofs=(ortho_hi, photo["polys"] if photo else None))

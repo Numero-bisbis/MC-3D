@@ -113,13 +113,17 @@ and a raised centre with its clock on the square. Along the shore the sea
 turns lighter, with a line of foam and small waves lapping at the quays.
 Mapped street trees are sized from the LiDAR canopy (the plane trees of the
 boulevards), and white shapes on piers and quays are no longer taken for
-boats. Boats are moored the way Port Hercule moors them: stern-to, bow out,
+boats. Boats are lofted in 3D (hulls flaring from the waterline to the deck, the sheer rising to the bow, a boot stripe and bulwark, tapered and raked superstructure tiers with a band of dark glass, roof overhangs and masts) and moored the way Port Hercule moors them: stern-to, bow out,
 square to the quay or pontoon and side by side (neighbours that merge into
 one white shape in the photo are split into a row). Trees need a green crown
 in the photo and at least 6 m² of it, and none grow on pools, pool decks,
 sports grounds or piers. The Stade Nautique Rainier III gets its racing pool
 (coping, lane lines, lane ropes) and its diving tower, with boards from 1 to
-10 m. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
+10 m. During the Legendary laps, about 5,700 spectators line the barriers
+from the swimming pool to La Rascasse, on the start straight and at Sainte
+Dévote, the Casino and Tabac, hopping out of step; they are hidden in the
+plain film set view. The water is the dark green-grey teal of the port in
+the IGN photo, with soft reflections. Walls weather subtly (patchy plaster, floor-to-floor tint, rain
 streaks under the sills). Trees and moored
 yachts are rebuilt from the LiDAR, flat roofs get parapets and the
 machinery rooms the LiDAR sees and plants where the IGN photo shows roof
