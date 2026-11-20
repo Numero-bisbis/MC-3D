@@ -248,15 +248,16 @@ def load_osm():
 
 # -------------------------------------------------------------- mesh kit ----
 # Kinds, read by the viewer's shader from the colour alpha.
-GROUND, WALL_OLD, WALL_NEW, ROOF_FLAT, ROOF_TILE, LEAF, WOOD, HULL, WATER, PLAIN, WALL_GLASS = range(11)
+GROUND, WALL_OLD, WALL_NEW, ROOF_FLAT, ROOF_TILE, LEAF, WOOD, HULL, WATER, PLAIN, WALL_GLASS, ROAD = range(12)
 
 
 class Mesh:
     def __init__(self):
         self.p, self.n, self.c, self.uv, self.i = [], [], [], [], []
+        self.uv2 = []          # second texture coordinate (roads: across/along)
         self.count = 0
 
-    def add(self, pos, nrm, col, kind, uv=None, idx=None, style=None):
+    def add(self, pos, nrm, col, kind, uv=None, idx=None, style=None, uv2=None):
         pos = np.asarray(pos, np.float32)
         k = len(pos)
         nrm = np.broadcast_to(np.asarray(nrm, np.float32), (k, 3))
@@ -265,6 +266,7 @@ class Mesh:
         uv = np.zeros((k, 2), np.float32) if uv is None else np.asarray(uv, np.float32)
         idx = np.arange(k) if idx is None else np.asarray(idx)
         self.p.append(pos); self.n.append(nrm); self.c.append(rgba); self.uv.append(uv)
+        self.uv2.append(np.zeros((k, 2), np.float32) if uv2 is None else np.asarray(uv2, np.float32))
         self.i.append(idx.astype(np.uint32).ravel() + self.count)
         self.count += k
 
@@ -1785,7 +1787,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             built = float(np.mean(hrel > 2.5))
             recent = (props.get("date_creation") or "") >= "2022"
             post_scan = False
-            if built < 0.35:
+            if built < 0.35 or props.get("mareterra"):
+                # (Mareterra's blocks always: the 2021 scan caught some of
+                # them half-built, which made Le Renzo 2 a flat slab.)
                 if not (recent and props.get("hauteur")):
                     stats["dropped"] += 1
                     continue
@@ -3077,55 +3081,150 @@ def cone(nu=6):
 CONE_V, CONE_T = cone()
 
 
-def add_tree(m, x, y, z, h, r, kind, rnd):
-    """x, y Lambert-93, z ground (NGF)."""
-    def put(v, t, scale, offset, col, k, jitter=0.0):
-        vv = v * scale + offset
-        if jitter:
-            vv = vv + rnd.normal(0, jitter, vv.shape) * scale
-        P = enu_fast(x + vv[:, 0], y + vv[:, 1], z + vv[:, 2])
-        if k != LEAF:
-            m.tri(P[t[:, 0]], P[t[:, 1]], P[t[:, 2]], col, k)
-            return
-        # Crowns: smooth normals (soft, rounded foliage) and darker
-        # underneath, as light gets inside a real crown less.
-        nrm = v / np.maximum(scale, 1e-3)
-        nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
-        shade = 0.68 + 0.32 * (v[:, 2] + 1) / 2
-        cc = np.asarray(col, np.float32)[None] * shade[:, None]
-        m.add(P, nrm, cc, k, idx=t)
+BLOB_V, BLOB_T = unit_sphere(7, 5)
+LIMB_V, LIMB_T = cone(5)
 
-    trunk = hexrgb("#7a5a40")
-    if kind == "pine":       # umbrella pine: tall bare trunk, wide flat crown
-        put(CONE_V, CONE_T, np.array([0.35, 0.35, h * 0.8]), np.array([0, 0, 0]), trunk, WOOD)
-        g = np.array(hexrgb("#4d7a3e")) * (0.9 + 0.2 * rnd.random())
-        put(SPH_V, SPH_T, np.array([r, r, r * 0.38]), np.array([0, 0, h - r * 0.35]), g, LEAF, 0.08)
+
+def add_tree(m, x, y, z, h, r, kind, rnd):
+    """x, y Lambert-93, z ground (NGF). Trees are built like a model
+    maker's: a trunk that forks into limbs, and a crown of several leafy
+    clumps (each a lumpy blob), shaded darker inside and underneath."""
+    def limb(a, b, r0, r1, col):
+        """A tapered branch from a to b (local metres)."""
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        ax = b - a
+        L = float(np.linalg.norm(ax))
+        if L < 1e-3:
+            return
+        w = ax / L
+        u = np.cross(w, [0.0, 0.0, 1.0] if abs(w[2]) < 0.95 else [1.0, 0.0, 0.0])
+        u /= np.linalg.norm(u)
+        v = np.cross(w, u)
+        ring = LIMB_V[:5, :2]
+        bot = a + (ring[:, :1] * u + ring[:, 1:] * v) * r0
+        top = b + (ring[:, :1] * u + ring[:, 1:] * v) * r1
+        P = enu_fast(x + np.r_[bot[:, 0], top[:, 0]], y + np.r_[bot[:, 1], top[:, 1]],
+                     z + np.r_[bot[:, 2], top[:, 2]])
+        n_ = 5
+        A = [P[i] for i in range(n_)]
+        tris = []
+        for i in range(n_):
+            j = (i + 1) % n_
+            tris += [(i, j, n_ + i), (j, n_ + j, n_ + i)]
+        tris = np.array(tris)
+        m.tri(P[tris[:, 0]], P[tris[:, 1]], P[tris[:, 2]], col, WOOD)
+
+    crown_c = [0.0, 0.0, 0.0]
+    crown_r = 1.0
+
+    def clump(c, rad, col, rough=0.09):
+        """One leafy clump: a blob with a lumpy surface; normals point away
+        from the crown's centre (soft, rounded light like a real crown)."""
+        c = np.asarray(c, float)
+        v = BLOB_V * (1 + rnd.normal(0, rough, (len(BLOB_V), 1)))
+        pts = c + v * rad
+        P = enu_fast(x + pts[:, 0], y + pts[:, 1], z + pts[:, 2])
+        cc_ = np.asarray(crown_c, float)
+        nrm = (pts - cc_) / np.array([crown_r[0], crown_r[0], crown_r[1]])
+        nrm = 0.6 * nrm / np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-6) + 0.4 * BLOB_V
+        nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+        # Light gets less far into the crown: darker inside and below.
+        depth = np.linalg.norm((pts - cc_) / np.array([crown_r[0], crown_r[0], crown_r[1]]), axis=1)
+        under = np.clip((pts[:, 2] - cc_[2]) / max(crown_r[1], 0.5), -1, 1)
+        shade = np.clip(0.55 + 0.3 * depth + 0.17 * under, 0.45, 1.08)
+        cols = np.asarray(col, np.float32)[None] * shade[:, None]
+        cols = cols * (1 + rnd.normal(0, 0.035, (len(pts), 1)))
+        m.add(P, nrm, cols, LEAF, idx=BLOB_T)
+
+    bark = np.array(hexrgb(rnd.choice(["#6f5a48", "#7a6450", "#5f5044"])))
+    if kind == "pine":
+        # Umbrella (stone) pine: a long, slightly leaning bare trunk that
+        # forks into two or three limbs under a wide, flat, dark crown.
+        lean = rnd.normal(0, 0.06, 2) * h
+        fork = np.array([lean[0] * 0.7, lean[1] * 0.7, h * 0.66])
+        limb([0, 0, 0], fork, 0.32, 0.22, bark)
+        g = np.array(hexrgb(rnd.choice(["#3f6b37", "#456f3a", "#4d7a3e", "#3b6436"]))) * (0.92 + 0.14 * rnd.random())
+        top = h - r * 0.22
+        crown_c[:] = [lean[0], lean[1], top]
+        crown_r = (r, r * 0.35)
+        nb = int(np.clip(round(r * 1.4), 4, 7))
+        for i in range(nb):
+            a_ = 2 * math.pi * (i + rnd.random() * 0.5) / nb
+            dd = r * rnd.uniform(0.35, 0.62)
+            cx_, cy_ = lean[0] + math.cos(a_) * dd, lean[1] + math.sin(a_) * dd
+            if i < 3:
+                limb(fork, [cx_ * 0.8 + fork[0] * 0.2, cy_ * 0.8 + fork[1] * 0.2, top - r * 0.12], 0.18, 0.1, bark)
+            clump([cx_, cy_, top + rnd.normal(0, 0.15) * r * 0.3], np.array([r * 0.5, r * 0.5, r * 0.24]), g, 0.1)
+        clump([lean[0], lean[1], top + r * 0.08], np.array([r * 0.55, r * 0.55, r * 0.26]), g * 1.04, 0.1)
     elif kind == "cypress":
-        put(CONE_V, CONE_T, np.array([0.25, 0.25, 1.5]), np.array([0, 0, 0]), trunk, WOOD)
-        g = np.array(hexrgb("#3f6a3a")) * (0.9 + 0.2 * rnd.random())
-        put(SPH_V, SPH_T, np.array([r, r, h * 0.48]), np.array([0, 0, h * 0.52]), g, LEAF, 0.05)
+        # Italian cypress: a tall dark flame, three stacked tapering clumps.
+        limb([0, 0, 0], [0, 0, 1.4], 0.2, 0.16, bark)
+        g = np.array(hexrgb(rnd.choice(["#2f5a32", "#345f36", "#2c5530"]))) * (0.92 + 0.12 * rnd.random())
+        crown_c[:] = [0, 0, h * 0.55]
+        crown_r = (r, h * 0.45)
+        for k_, (zf, rf) in enumerate(((0.32, 1.0), (0.58, 0.82), (0.82, 0.5))):
+            clump([rnd.normal(0, 0.05), rnd.normal(0, 0.05), h * zf], np.array([r * rf, r * rf, h * 0.24]), g, 0.08)
     elif kind == "palm":
-        put(CONE_V, CONE_T, np.array([0.3, 0.3, h]), np.array([0, 0, 0]), hexrgb("#8b7356"), WOOD)
-        g = np.array(hexrgb("#5f8c3f")) * (0.9 + 0.2 * rnd.random())
-        for i in range(7):
-            a = 2 * math.pi * i / 7 + rnd.random() * 0.4
-            ca, sa = math.cos(a), math.sin(a)
-            L = r * 1.1
-            pts = np.array([[0, 0, h], [ca * L * 0.5 - sa * 0.5, sa * L * 0.5 + ca * 0.5, h + 0.5],
-                            [ca * L, sa * L, h - 1.2], [ca * L * 0.5 + sa * 0.5, sa * L * 0.5 - ca * 0.5, h + 0.5]])
-            P = enu_fast(x + pts[:, 0], y + pts[:, 1], z + pts[:, 2])
-            for tri_ in ([0, 1, 2], [0, 2, 3], [0, 2, 1], [0, 3, 2]):
-                m.tri(P[[tri_[0]]], P[[tri_[1]]], P[[tri_[2]]], g, LEAF)
-    else:                    # broadleaf: two or three lumps
-        put(CONE_V, CONE_T, np.array([0.3, 0.3, h * 0.55]), np.array([0, 0, 0]), trunk, WOOD)
-        base_g = np.array(hexrgb(rnd.choice(["#6a9a45", "#7aa64f", "#5f8f40", "#86ad55", "#6e9c58",
-                                             "#8aa848"])))
-        cz = max(h - r * 0.9, r * 0.8)
-        put(SPH_V, SPH_T, np.array([r, r, r * 0.85]), np.array([0, 0, cz]), base_g * (0.95 + 0.1 * rnd.random()), LEAF, 0.07)
-        if r > 2.5:
-            o = rnd.normal(0, r * 0.35, 2)
-            put(SPH_V, SPH_T, np.array([r * 0.65] * 3), np.array([o[0], o[1], cz + r * 0.35]),
-                base_g * (1.05 + 0.08 * rnd.random()), LEAF, 0.07)
+        # Canary / date palm: a ringed trunk with a gentle curve, a crown of
+        # long arching fronds, the lowest ones drying yellow.
+        bend = rnd.normal(0, 0.05, 2) * h
+        p0 = np.array([0.0, 0.0, 0.0])
+        p1 = np.array([bend[0] * 0.3, bend[1] * 0.3, h * 0.5])
+        p2 = np.array([bend[0], bend[1], h])
+        tw = 0.28 if r < 3.5 else 0.38
+        limb(p0, p1, tw * 1.25, tw, hexrgb("#8a7558"))
+        limb(p1, p2, tw, tw * 0.9, hexrgb("#8f7a5c"))
+        limb(p2 - [0, 0, 0.6], p2 + [0, 0, 0.5], tw * 1.25, tw * 0.7, hexrgb("#6e6a3c"))
+        green = np.array(hexrgb(rnd.choice(["#5d8a3a", "#678f3f", "#557f37"])))
+        dry = np.array(hexrgb("#a89a5a"))
+        nf = 14
+        for i in range(nf):
+            a_ = 2 * math.pi * i / nf + rnd.normal(0, 0.12)
+            low = i % 3 == 0
+            ca, sa = math.cos(a_), math.sin(a_)
+            L = r * (1.05 if not low else 0.95)
+            up = 0.55 if not low else -0.1
+            # Three segments arching up then down.
+            ts = np.array([0.0, 0.35, 0.7, 1.0])
+            prof = np.column_stack([ts * L, (up * np.sin(ts * math.pi * 0.8) - 1.1 * ts ** 2) * L * 0.45])
+            wid = np.array([0.12, 0.55, 0.45, 0.05]) * (L / 3.2)
+            sx, sy = -sa, ca
+            ctr = np.column_stack([p2[0] + ca * prof[:, 0], p2[1] + sa * prof[:, 0], p2[2] + 0.3 + prof[:, 1]])
+            Lp = ctr + np.column_stack([sx * wid, sy * wid, np.zeros(4) - 0.05])
+            Rp = ctr - np.column_stack([sx * wid, sy * wid, np.zeros(4) + 0.05])
+            P = enu_fast(x + np.r_[Lp[:, 0], Rp[:, 0]], y + np.r_[Lp[:, 1], Rp[:, 1]], z + np.r_[Lp[:, 2], Rp[:, 2]])
+            col = (dry if low and rnd.random() < 0.6 else green) * (0.9 + 0.2 * rnd.random())
+            for k_ in range(3):
+                for tri_ in ((k_, 4 + k_, k_ + 1), (k_ + 1, 4 + k_, 5 + k_)):
+                    m.tri(P[[tri_[0]]], P[[tri_[1]]], P[[tri_[2]]], col, LEAF)
+                    m.tri(P[[tri_[0]]], P[[tri_[2]]], P[[tri_[1]]], col * 0.85, LEAF)
+    else:
+        # Broadleaf (plane trees on the boulevards, olives, holm oaks): a
+        # trunk that forks into a few limbs, a crown of overlapping clumps.
+        # The crown fills the top 55-65 % of the tree, as on real street
+        # trees (pruned up to clear the pavement), not a ball on a pole.
+        tz = min(max(h - 2 * r * 0.95, h * 0.3), h * 0.45)
+        lean = rnd.normal(0, 0.04, 2) * h
+        fork = np.array([lean[0], lean[1], tz + (h - tz) * 0.2])
+        limb([0, 0, 0], fork, max(0.2, r * 0.11), max(0.14, r * 0.07), bark)
+        base_g = np.array(hexrgb(rnd.choice(["#5c7a3c", "#66813f", "#56733a", "#6d8446", "#5b7547",
+                                             "#748450", "#61803f"])))
+        base_g = base_g * (0.9 + 0.15 * rnd.random())
+        rz = (h - tz) / 2
+        cz = tz + rz
+        crown_c[:] = [lean[0], lean[1], cz]
+        crown_r = (r, rz)
+        nb = 3 if r < 2.2 else (4 if r < 3.5 else 6)
+        for i in range(nb):
+            a_ = 2 * math.pi * (i + rnd.random() * 0.6) / nb
+            dd = r * rnd.uniform(0.3, 0.5)
+            c_ = [lean[0] + math.cos(a_) * dd, lean[1] + math.sin(a_) * dd, cz + rnd.uniform(-0.3, 0.25) * rz]
+            if r > 2.2 and i < 3:
+                limb(fork, [c_[0] * 0.7 + fork[0] * 0.3, c_[1] * 0.7 + fork[1] * 0.3, cz - r * 0.15],
+                     max(0.1, r * 0.05), 0.06, bark)
+            rr_ = r * rnd.uniform(0.5, 0.66)
+            clump(c_, np.array([rr_, rr_, rz * rnd.uniform(0.55, 0.7)]), base_g * (0.94 + 0.12 * rnd.random()))
+        clump([lean[0], lean[1], cz + rz * 0.35], np.array([r * 0.58, r * 0.58, rz * 0.6]), base_g * 1.05)
 
 
 def no_tree_zones(ways):
@@ -3300,7 +3399,7 @@ def yachts(m, ortho, sea, stats, ways=()):
         # sides flare out and catch the light), the sheer rising to the bow,
         # a dark boot stripe at the water, a bulwark round the deck.
         n_ = len(hull_outline(L, W))
-        wl = np.array(hull_outline(L * 0.96, W * 0.84)) + [0.02 * L, 0]
+        wl = np.array(hull_outline(L * 0.9, W * 0.82)) + [0.015 * L, 0]
         dk = np.array(hull_outline(L, W))
         sheer = lambda u: hull_h + 0.22 * hull_h * np.clip(u / L, 0, 1) ** 2
         to_xy = lambda q: stern[None] + q[:, :1] * ax[None] + q[:, 1:2] * side[None]
@@ -3318,33 +3417,48 @@ def yachts(m, ortho, sea, stats, ways=()):
             aft = plan(0.03 * L, 0.2 * L, W * 0.4).intersection(hull.buffer(-0.4))
             for q in to_polys(aft):
                 add_roof(m, orient(q, 1.0), hull_h + 0.05, hexrgb("#b88a5c"), False)   # teak
-        # Superstructure: tiers stepping back, each tapering and raked at the
-        # front, a band of dark glass running round (the shader's window
-        # band on HULL walls), a fly bridge, and a mast on the bigger ones.
-        tiers = 1 if L < 14 else 2 if L < 30 else 3 if L < 55 else 4
+        # Superstructure: decks stepping back, each with a rounded, raked
+        # front like a real motor yacht's (a hull-shaped plan, not a box),
+        # a band of dark glass running round (the shader's window band on
+        # HULL walls) and an overhanging roof; a radar arch on top.
+        tiers = 1 if L < 12 else 2 if L < 24 else 3 if L < 45 else 4
         z = hull_h + 0.05
         for t_ in range(tiers):
-            a0, a1 = (0.18 + 0.06 * t_) * L, (0.68 - 0.08 * t_) * L
-            half = W / 2 * (0.82 - 0.1 * t_)
-            if a1 - a0 < 2 or half < 0.6:
+            a0 = (0.17 + 0.07 * t_) * L
+            a1 = (0.74 - 0.05 * t_) * L
+            half = W / 2 * (0.86 - 0.09 * t_)
+            if a1 - a0 < 2.2 or half < 0.6:
                 break
-            th = 2.5 if L > 14 else 1.6
-            rake = min(1.2, 0.35 * th)
-            lo = to_xy(np.array([[a0, -half], [a1, -half], [a1, half], [a0, half]]))
-            hi = to_xy(np.array([[a0 + 0.15, -(half - 0.2)], [a1 - rake, -(half - 0.2)], [a1 - rake, half - 0.2], [a0 + 0.15, half - 0.2]]))
-            loft(m, np.vstack([lo, lo[:1]]), np.full(5, z), np.vstack([hi, hi[:1]]), np.full(5, z + th),
+            th = 2.4 if L > 14 else 1.7
+            rake = min(1.6, 0.45 * th + 0.02 * L)
+            lo_p = np.array(hull_outline(a1 - a0, 2 * half)) + [a0, 0]
+            hi_p = np.array(hull_outline(a1 - a0 - rake, 2 * half - 0.35)) + [a0 + 0.1, 0]
+            lo, hi = to_xy(lo_p), to_xy(hi_p)
+            loft(m, lo, np.full(len(lo), z), hi, np.full(len(hi), z + th),
                  top if t_ else white if not dark_hull else top, HULL, band=True)
-            roof = orient(Polygon(hi), 1.0)
-            add_roof(m, roof, z + th, top * 0.96, False)
-            # The roof's overhang: a thin slab a little wider than the tier.
-            ov = orient(Polygon(hi).buffer(0.25, join_style=2), 1.0)
-            add_walls(m, ov, z + th, z + th + 0.12, z, 100, top * 0.9, PLAIN)
-            add_roof(m, ov, z + th + 0.12, top * 0.97, False)
-            z += th + 0.12
-        if L > 20:
-            c_ = to_xy(np.array([[0.5 * L, 0.0]]))[0]
-            mast = orient(Polygon([c_ + ax * dx + side * dy for dx, dy in [(-0.4, -0.2), (0.4, -0.2), (0.4, 0.2), (-0.4, 0.2)]]), 1.0)
-            add_walls(m, mast, z, z + min(4.0, 0.08 * L), z, 100, np.array(hexrgb("#dedad2")), PLAIN)
+            roof = Polygon(hi).buffer(0)
+            if isinstance(roof, Polygon):
+                add_roof(m, orient(roof, 1.0), z + th, top * 0.96, False)
+                # The roof's overhang: a thin slab a little wider than the deck,
+                # reaching further aft over the open deck behind.
+                ovp = to_xy(np.array(hull_outline(a1 - a0 - rake + 0.5, 2 * half)) + [a0 - (0.06 * L if t_ == 0 else 0.6), 0])
+                ov = Polygon(ovp).buffer(0)
+                if isinstance(ov, Polygon):
+                    ov = orient(ov, 1.0)
+                    add_walls(m, ov, z + th, z + th + 0.14, z, 100, top * 0.9, PLAIN)
+                    add_roof(m, ov, z + th + 0.14, top * 0.97, False)
+            z += th + 0.14
+        if L > 16:
+            # Radar arch: two raked legs and a bar over the top deck.
+            c_ = to_xy(np.array([[(0.5 + 0.02 * tiers) * L, 0.0]]))[0]
+            hw_ = W / 2 * 0.45
+            ah = min(2.6, 0.9 + 0.035 * L)
+            col_a = np.array(hexrgb("#ecebe6"))
+            for sgn in (-1, 1):
+                _box(m, *(c_ + side * sgn * hw_), ax, 0.5, 0.25, z, z + ah, col_a)
+            _box(m, *c_, ax, 0.5, 2 * hw_ + 0.25, z + ah - 0.3, z + ah, col_a)
+            if L > 30:
+                _box(m, *c_, ax, 0.25, 0.25, z + ah, z + ah + min(3.5, 0.06 * L), np.array(hexrgb("#dedad2")))
         stats["yachts"] += 1
 
     lab, n = ndimage.label(boat)
@@ -3357,6 +3471,8 @@ def yachts(m, ortho, sea, stats, ways=()):
         rr = rr + sl[0].start; cc = cc + sl[1].start
         if on_pier[rr, cc].mean() > 0.15:
             continue
+        if MT is not None and MT["mask"][rr, cc].mean() > 0.2:
+            continue                     # Mareterra: the 2022 photo shows work barges
         x, y = cell_xy(rr, cc)
         pts = np.column_stack([x, y])
         cen = pts.mean(0)
@@ -3375,6 +3491,44 @@ def yachts(m, ortho, sea, stats, ways=()):
         mid = cen + ax * (proj.max() + proj.min()) / 2
         for stern, ax_, L_, W_ in moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
             build(stern, ax_, L_, W_)
+    # Mareterra's marina (Port du Petit Portier, opened 2024): the photo
+    # predates it, so its berths are laid out here: yachts of 12-30 m
+    # moored stern-to along the quays, bows to the middle of the basin,
+    # some berths empty.
+    if MT is not None:
+        mm = np.zeros(sea.shape, bool)
+        for t, pts_, closed in ways:
+            if closed and t.get("leisure") == "marina" and len(pts_) > 3:
+                g = Polygon(pts_).buffer(0)
+                if MT["zone"].buffer(30).contains(g.representative_point()):
+                    mm |= raster_mask(g.buffer(2.0))
+        Wm = sea & mm & ~on_pier
+        if Wm.sum() > 400:
+            wp = cells_to_poly(Wm, X0, Y1, RES)
+            wp = max(to_polys(wp), key=lambda q: q.area).simplify(0.6)
+            WmR = Raster(Wm.astype(np.float32))
+            moorR = Raster(moor.astype(np.float32))
+            _s1 = lambda R_, q_: float(R_.sample(np.array([q_[0]]), np.array([q_[1]]))[0])
+            rb = np.random.default_rng(47)
+            ring_ = wp.exterior
+            for s_ in np.arange(3.0, ring_.length, 5.5):
+                p0 = np.array(ring_.interpolate(s_).coords[0])
+                p1 = np.array(ring_.interpolate(s_ + 1.0).coords[0])
+                t_ = (p1 - p0) / (np.linalg.norm(p1 - p0) + 1e-9)
+                n_ = np.array([-t_[1], t_[0]])
+                if _s1(WmR, p0 + n_ * 2.0) < 0.5:
+                    n_ = -n_
+                if _s1(WmR, p0 + n_ * 2.0) < 0.5 or _s1(moorR, p0 - n_ * 1.2) < 0.5:
+                    continue                 # the basin's mouth, not a quay
+                if rb.random() < 0.3:
+                    continue                 # an empty berth
+                free = 0.0
+                while free < 80 and _s1(WmR, p0 + n_ * (free + 1.0)) > 0.5:
+                    free += 1.0
+                Lb = float(min(rb.choice([12, 14, 16, 18, 20, 24, 28, 30]), 0.45 * free))
+                if Lb < 9:
+                    continue
+                build(p0 + n_ * 0.8, n_, Lb, float(np.clip(Lb / 3.4, 3.2, 7.5)))
 
 
 def loft(m, A, za, B, zb, col, kind, band=False):
@@ -4156,6 +4310,9 @@ def write_glb(path, prims, ground_jpg):
             "NORMAL": acc(yup(n), 5126, "VEC3", 34962),
             "COLOR_0": acc(c.astype(np.uint8), 5121, "VEC4", 34962, normalized=True),
             "TEXCOORD_0": acc(uv.astype("<f4"), 5126, "VEC2", 34962),
+            # Every primitive has a second set (zeros except on the road
+            # surfaces), so the viewer's one shader can read it everywhere.
+            "TEXCOORD_1": acc(np.concatenate(mesh.uv2).astype("<f4"), 5126, "VEC2", 34962),
         }
         idx = acc(i.astype("<u4"), 5125, "SCALAR", 34963)
         meshes_p.append({"attributes": attrs, "indices": idx, "material": 1 if textured else 0})
@@ -4184,6 +4341,199 @@ def write_glb(path, prims, ground_jpg):
         f.write(struct.pack("<III", 0x46546C67, 2, total))
         f.write(struct.pack("<II", len(js), 0x4E4F534A)); f.write(js)
         f.write(struct.pack("<II", len(bin_), 0x004E4942)); f.write(bin_)
+
+
+# ------------------------------------------------------------------ roads ----
+# Road surfaces of their own over the painted ground map: a strip draped on
+# the terrain for every street, with its across/along position in metres
+# (TEXCOORD_1) so the viewer draws asphalt grain, patches, tyre wear and
+# crisp lane markings and zebra crossings at any distance, where the 37 cm
+# ground map could only give a soft grey band. Stone kerbs along both sides.
+ROAD_W = {"motorway": 12, "trunk": 11, "primary": 10, "secondary": 8.5, "tertiary": 7.5,
+          "residential": 6, "unclassified": 6, "service": 4.5, "living_street": 5,
+          "primary_link": 6, "secondary_link": 6, "tertiary_link": 5, "raceway": 9}
+ROAD_RANK = {"raceway": 9, "motorway": 8, "trunk": 7, "primary": 6, "secondary": 5, "tertiary": 4,
+             "primary_link": 4, "secondary_link": 4, "tertiary_link": 3, "residential": 2,
+             "unclassified": 2, "living_street": 1, "service": 0}
+# Marking styles (low bits of the colour alpha).
+MK_NONE, MK_CENTRE, MK_CENTRE_EDGE, MK_LANES_EDGE, MK_EDGE = range(5)
+ROAD_LIFT = 0.06                     # m above the ground triangles
+ROAD_SPAN_U, ROAD_SPAN_V = 32.0, 72.0  # TEXCOORD_1 = (across + 16, along) / span
+
+
+def ground_z(gz, x, y):
+    """Height of the ground mesh's own triangles (same diagonal) at x, y."""
+    fj = (np.asarray(x) - X0) / GRID
+    fi = (Y1 - np.asarray(y)) / GRID
+    n = gz.shape[0] - 1
+    j0 = np.clip(np.floor(fj).astype(int), 0, n - 1)
+    i0 = np.clip(np.floor(fi).astype(int), 0, n - 1)
+    fx, fy = np.clip(fj - j0, 0, 1), np.clip(fi - i0, 0, 1)
+    a, b = gz[i0, j0], gz[i0, j0 + 1]
+    c, d = gz[i0 + 1, j0], gz[i0 + 1, j0 + 1]
+    lo = a + fx * (b - a) + fy * (c - a)
+    hi = d + (1 - fx) * (c - d) + (1 - fy) * (b - d)
+    return np.where(fx + fy <= 1, lo, hi)
+
+
+def road_surfaces(m, ways, pts, gz, bmask, stats):
+    from scipy.spatial import cKDTree
+    roads = []
+    for t, p_, closed in ways:
+        hw = t.get("highway")
+        if hw not in ROAD_W or t.get("tunnel") in ("yes", "building_passage") or t.get("area") == "yes" \
+                or t.get("layer", "0") not in ("0", "1") or t.get("bridge") or len(p_) < 2:
+            continue
+        if t.get("layer", "0") == "1":
+            continue
+        W = float(ROAD_W[hw])
+        try:
+            if t.get("width"):
+                W = float(t["width"].replace("m", "").strip())
+            elif t.get("lanes"):
+                W = max(W, 3.1 * float(t["lanes"]))
+        except ValueError:
+            pass
+        W = float(np.clip(W, 3.0, 20.0))
+        roads.append((t, LineString(p_), W))
+    # Junctions: points shared by two roads (markings stop there).
+    cnt = {}
+    for t, ln, W in roads:
+        for q in {(round(x, 2), round(y, 2)) for x, y in ln.coords}:
+            cnt[q] = cnt.get(q, 0) + 1
+    jpts = np.array([q for q, k in cnt.items() if k >= 2]) if cnt else np.zeros((0, 2))
+    jkd = cKDTree(jpts) if len(jpts) else None
+    cross = np.array([xy for xy, tg in pts if tg.get("highway") == "crossing"
+                      and tg.get("crossing") not in ("unmarked", "no", "informal")
+                      and tg.get("crossing:markings") not in ("no",)]) if pts else np.zeros((0, 2))
+    ckd = cKDTree(cross) if len(cross) else None
+    bR = Raster(bmask.astype(np.float32))
+    kerb_top = np.array(hexrgb("#c9c2b4"))
+    kerb_face = np.array(hexrgb("#b3ab9c"))
+    total, kerb_m = 0.0, 0.0
+    for t, ln, W in roads:
+        hw = t["highway"]
+        half = W / 2
+        L = ln.length
+        if L < 2:
+            continue
+        oneway = t.get("oneway") in ("yes", "1", "-1") or t.get("junction") == "roundabout"
+        lanes = int(float(t.get("lanes", 0) or 0)) if str(t.get("lanes", "")).replace(".", "").isdigit() else 0
+        if hw == "raceway":
+            style = MK_EDGE
+        elif hw in ("primary", "secondary", "trunk", "motorway", "tertiary") or hw.endswith("_link"):
+            style = MK_LANES_EDGE if oneway and (lanes >= 2 or W >= 7) else (MK_EDGE if oneway else MK_CENTRE_EDGE)
+        elif hw in ("residential", "unclassified"):
+            style = MK_NONE if oneway or W < 5.5 else MK_CENTRE
+        else:
+            style = MK_NONE
+        # Along-road samples: every 1.5 m, plus the edges of each zebra.
+        ss = list(np.linspace(0, L, max(2, int(math.ceil(L / 2.0)) + 1)))
+        spans = []
+        if ckd is not None:
+            for k in ckd.query_ball_point(ln.centroid.coords[0], L / 2 + 5):
+                cp = Point(cross[k])
+                if ln.distance(cp) < 0.6:
+                    sc = ln.project(cp)
+                    spans.append((sc - 1.6, sc + 1.6))
+                    ss += [sc - 1.62, sc - 1.6, sc + 1.6, sc + 1.62]
+        ss += list(np.arange(ROAD_SPAN_V, L, ROAD_SPAN_V))
+        ss = np.unique(np.clip(ss, 0, L))
+        P = np.array([ln.interpolate(v).coords[0] for v in ss])
+        tx = np.gradient(P[:, 0], ss, edge_order=1) if len(ss) > 2 else np.full(len(ss), P[-1, 0] - P[0, 0])
+        ty = np.gradient(P[:, 1], ss, edge_order=1) if len(ss) > 2 else np.full(len(ss), P[-1, 1] - P[0, 1])
+        tl = np.hypot(tx, ty) + 1e-9
+        nx_, ny_ = -ty / tl, tx / tl
+        offs = np.array([-half, -half / 2, 0.0, half / 2, half]) if W > 6.5 else np.array([-half, 0.0, half])
+        X = P[:, 0, None] + nx_[:, None] * offs
+        Y = P[:, 1, None] + ny_[:, None] * offs
+        Z = ground_z(gz, X, Y)
+        # Not over the water (a road ending on a quay edge).
+        wet = (Z <= SEA_FLOOR + 0.5).any(1)
+        Z = Z + ROAD_LIFT + 0.004 * ROAD_RANK.get(hw, 0)
+        if TRACK is not None:
+            # On and beside the circuit, stay under the tours' modelled road.
+            dk, jk = TRACK["kd"].query(np.column_stack([X.ravel(), Y.ravel()]))
+            zt = np.where(dk < TRACK_HALF + 2.0, TRACK["z"][jk] - 0.06, np.inf).reshape(Z.shape)
+            Z = np.minimum(Z, zt)
+        jd = jkd.query(P)[0] if jkd is not None else np.full(len(P), 99.0)
+        jf = np.clip((jd - (half + 2.5)) / 3.0, 0, 1)
+        if hw == "raceway":
+            jf[:] = 1.0
+        zc = np.zeros(len(ss))
+        for a_, b_ in spans:
+            zc[(ss >= a_ - 1e-6) & (ss <= b_ + 1e-6)] = 1.0
+        # Strips of 72 m (along resets): crisp TEXCOORD_1 after compression.
+        # Each break is a sample of its own, shared by both strips.
+        for k in range(int(L // ROAD_SPAN_V) + 1):
+            base_s = k * ROAD_SPAN_V
+            idx = np.nonzero((ss >= base_s - 1e-6) & (ss <= base_s + ROAD_SPAN_V + 1e-6))[0]
+            if len(idx) < 2:
+                continue
+            xx, yy, zz = X[idx].ravel(), Y[idx].ravel(), Z[idx].ravel()
+            pos = enu_fast(xx, yy, zz)
+            k_ = len(offs)
+            u2 = np.tile((offs + ROAD_SPAN_U / 2) / ROAD_SPAN_U, len(idx))
+            v2 = np.repeat((ss[idx] - base_s) / ROAD_SPAN_V, k_)
+            uv = np.column_stack([(xx - X0) / (X1 - X0), (Y1 - yy) / (Y1 - Y0)])
+            col = np.column_stack([np.repeat(jf[idx], k_) * 255, np.repeat(zc[idx], k_) * 255,
+                                   np.full(len(xx), min(255, half * 10))])
+            tri = []
+            for r_ in range(len(idx) - 1):
+                if wet[idx[r_]] or wet[idx[r_ + 1]]:
+                    continue
+                for q in range(k_ - 1):
+                    a0, b0 = r_ * k_ + q, r_ * k_ + q + 1
+                    a1, b1 = a0 + k_, b0 + k_
+                    tri += [(a0, a1, b0), (b0, a1, b1)]
+            if not tri:
+                continue
+            tri = np.array(tri)
+            # Front faces up.
+            pa, pb, pc = pos[tri[:, 0]], pos[tri[:, 1]], pos[tri[:, 2]]
+            up = np.cross(pb - pa, pc - pa)[:, 2] < 0
+            tri[up] = tri[up][:, [0, 2, 1]]
+            nrm = np.tile([0.0, 0.0, 1.0], (len(pos), 1))
+            m.add(pos, nrm, col, ROAD, uv=uv, idx=tri, style=style, uv2=np.column_stack([u2, v2]))
+        total += L
+        # Kerbs: a 25 cm stone kerb, 13 cm proud of the road, on both sides,
+        # away from junctions, the circuit (its own pavements), buildings
+        # and lanes without pavements.
+        if hw in ("service", "raceway", "living_street"):
+            continue
+        for side in (-1, 1):
+            o0, o1 = side * half, side * (half + 0.25)
+            ok = (jf > 0.99) & ~wet
+            ex, ey = P[:, 0] + nx_ * o1, P[:, 1] + ny_ * o1
+            ok &= bR.sample(ex, ey) < 0.5
+            if TRACK is not None:
+                ok &= track_dist(P[:, 0], P[:, 1]) > TRACK_HALF + 6
+            lab, nr = ndimage.label(ok)
+            for r_ in range(1, nr + 1):
+                ii = np.nonzero(lab == r_)[0]
+                if len(ii) < 3:
+                    continue
+                xa, ya = P[ii, 0] + nx_[ii] * o0, P[ii, 1] + ny_[ii] * o0
+                xb, yb = P[ii, 0] + nx_[ii] * o1, P[ii, 1] + ny_[ii] * o1
+                za = ground_z(gz, xa, ya) + ROAD_LIFT
+                zb_ = ground_z(gz, xb, yb)
+                ztop = np.maximum(za, zb_) + 0.13
+                A0 = enu_fast(xa, ya, za - 0.05); A1 = enu_fast(xa, ya, ztop)
+                B1 = enu_fast(xb, yb, ztop); B0 = enu_fast(xb, yb, zb_ - 0.1)
+                cin = enu_fast(P[ii, 0], P[ii, 1], za + 0.5)          # toward the road
+                cout = enu_fast(P[ii, 0] + nx_[ii] * side * (half + 3), P[ii, 1] + ny_[ii] * side * (half + 3), za + 0.5)
+                sl = slice(0, -1); sr = slice(1, None)
+                tri_facing(m, A0[sl], A0[sr], A1[sr], cin[sl], kerb_face, PLAIN)
+                tri_facing(m, A0[sl], A1[sr], A1[sl], cin[sl], kerb_face, PLAIN)
+                upv = A1 + np.array([0, 0, 10.0])
+                tri_facing(m, A1[sl], A1[sr], B1[sr], upv[sl], kerb_top, PLAIN)
+                tri_facing(m, A1[sl], B1[sr], B1[sl], upv[sl], kerb_top, PLAIN)
+                tri_facing(m, B1[sl], B1[sr], B0[sr], cout[sl], kerb_face, PLAIN)
+                tri_facing(m, B1[sl], B0[sr], B0[sl], cout[sl], kerb_face, PLAIN)
+                kerb_m += float(ss[ii[-1]] - ss[ii[0]])
+    stats["road_m"] = int(total)
+    stats["kerb_m"] = int(kerb_m)
+    return int(total)
 
 
 # ---------------------------------------------------------- street lamps ----
@@ -4413,6 +4763,8 @@ def main():
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     gm, gz = ground_mesh(mnt_ground, sea)
+    rm = Mesh()
+    print("roads…", road_surfaces(rm, ways, pts, gz, bmask, stats), "m")
     drive = drive_map(gz, bmask, sea)
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
@@ -4423,7 +4775,7 @@ def main():
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
 
-    audit = [("ground", gm), ("buildings", bm), ("trees", tm), ("harbour", hm)]
+    audit = [("ground", gm), ("buildings", bm), ("trees", tm), ("harbour", hm), ("roads", rm)]
     if photo and photo["mesh"].p:
         audit.append(("photo roofs", photo["mesh"]))
     hits = track_audit(audit)
@@ -4444,7 +4796,7 @@ def main():
         Image.new("RGB", (4, 4), (128, 128, 128)).save(tiny, "JPEG")
         write_glb(OUT / "monte-carlo-tunnel.glb", [(tun_m, False)], tiny.getvalue())
     raw = OUT / "monte-carlo.raw.glb"
-    prims = [(gm, True), (bm, False), (tm, False), (hm, False), (sm, False)]
+    prims = [(gm, True), (rm, True), (bm, False), (tm, False), (hm, False), (sm, False)]
     if photo and photo["mesh"].p:
         prims.append((photo["mesh"], True))
     write_glb(raw, prims, jpg)
