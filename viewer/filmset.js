@@ -14,7 +14,8 @@
 
   // Kinds written by the pipeline into the colour alpha: kind * 16 + style.
   // 0 ground, 1 classic wall, 2 modern wall, 3 flat roof, 4 tiled roof,
-  // 5 leaves, 6 wood, 7 boat, 8 sea, 9 plain, 10 glass wall. For walls the
+  // 5 leaves, 6 wood, 7 boat, 8 sea, 9 plain, 10 glass wall, 11 road
+  // surface (style = lane markings, texCoord_1 = across/along). For walls the
   // style is the façade type (pipeline S_*): 0 Riviera shutters, 1 Belle
   // Époque, 2 arched (Casino), 3 painted villa, 4 1960s-80s loggias,
   // 5 1970s balcony bands, 6 glass, 7 contemporary, 8 1930s.
@@ -143,6 +144,73 @@
               material.diffuse = mix(d, rock, steep * (1.0 - 0.7 * veg));
             }
           }
+          if (u_night > 0.0) {
+            float L = texture(u_lights, vec2(fsInput.attributes.texCoord_0.x, 1.0 - fsInput.attributes.texCoord_0.y)).r;
+            material.emissive = material.diffuse * vec3(1.0, 0.78, 0.5) * L * 2.4 * u_night;
+          }
+          return;
+        }
+        if (kind > 10.5) {              // road surface: asphalt and markings
+          // texCoord_1: across (+16) / 32 and along / 72, in metres.
+          vec2 r2 = fsInput.attributes.texCoord_1;
+          float ac = r2.x * 32.0 - 16.0;
+          float al = r2.y * 72.0;
+          float hw = c.b * 25.5;                 // half width, m
+          float junc = c.r;                      // 0 at junctions: no markings
+          float zebra = c.g;
+          float mk = a255 - kind * 16.0;
+          // World position in metres (the ground map's coordinates), so
+          // overlapping strips at junctions show the same asphalt.
+          vec2 wp = fsInput.attributes.texCoord_0 * 1500.0;
+          float px = length(fwidth(wp));
+          // Asphalt: dark grey aggregate, sun-bleached and patched.
+          vec3 asph = vec3(0.115, 0.118, 0.125);
+          float patchN = vnoise(wp * 0.11) * 0.6 + vnoise(wp * 0.37) * 0.4;
+          asph *= mix(0.86, 1.18, patchN);
+          // Repairs: darker rectangles of newer tarmac here and there.
+          vec2 cellR = floor(wp / vec2(7.0, 4.0));
+          float rep = step(0.86, hash12(cellR)) * box(fract(wp / vec2(7.0, 4.0)), vec2(0.15), vec2(0.85), vec2(0.03));
+          asph *= 1.0 - 0.22 * rep;
+          // Aggregate speckle up close.
+          float near = 1.0 - smoothstep(0.04, 0.25, px);
+          asph *= mix(1.0, mix(0.82, 1.16, hash12(floor(wp * 22.0))), near);
+          // Tyre tracks: polished, slightly darker bands in each lane;
+          // dust and grit lighter along the kerbs.
+          float lanes = max(1.0, floor(2.0 * hw / 3.0 + 0.3));
+          float lw = 2.0 * hw / lanes;
+          float inl = fract((ac + hw) / lw) * lw;            // 0..lw across the lane
+          float tyre = smoothstep(0.35, 0.0, abs(inl - lw * 0.3)) + smoothstep(0.35, 0.0, abs(inl - lw * 0.7));
+          asph *= 1.0 - 0.07 * tyre * junc;
+          asph *= 1.0 + 0.10 * (1.0 - smoothstep(0.0, 0.5, hw - abs(ac)));
+          // Fine cracks.
+          float crack = smoothstep(0.93, 0.98, vnoise(wp * 1.3 + vnoise(wp * 0.4) * 3.0));
+          asph *= 1.0 - 0.25 * crack * near;
+          // Markings (white paint, worn).
+          vec2 aa = vec2(max(fwidth(ac), 0.01) * 1.2, max(fwidth(al), 0.01) * 1.2);
+          float paint = 0.0;
+          float dash = smoothstep(0.0, aa.y, fract(al / 9.0) * 9.0) * (1.0 - smoothstep(3.0 - aa.y, 3.0 + aa.y, fract(al / 9.0) * 9.0));
+          if (mk > 0.5 && mk < 2.5) {           // centre line, dashed
+            paint = max(paint, (1.0 - smoothstep(0.06, 0.06 + aa.x, abs(ac))) * dash);
+          }
+          if (mk > 1.5) {                       // edge lines
+            float e = abs(abs(ac) - (hw - 0.35));
+            paint = max(paint, 1.0 - smoothstep(0.06, 0.06 + aa.x, e));
+          }
+          if (mk > 2.5 && mk < 3.5) {           // lane lines, dashed
+            float d = abs(fract((ac + hw) / lw + 0.5) - 0.5) * lw;
+            float inner = step(0.5 * lw, hw - abs(ac));
+            paint = max(paint, (1.0 - smoothstep(0.06, 0.06 + aa.x, d)) * dash * inner);
+          }
+          paint *= junc;
+          if (zebra > 0.5) {                    // zebra crossing: bars along the road
+            float bars = box(vec2(fract((ac + hw) / 1.0), 0.5), vec2(0.0, 0.0), vec2(0.5, 1.0), vec2(aa.x, 0.01));
+            paint = max(paint, bars * step(abs(ac), hw - 0.3));
+          }
+          paint *= mix(0.7, 1.0, vnoise(wp * 2.7)) * mix(0.85, 1.0, hash12(floor(wp * 12.0)));
+          vec3 white = vec3(0.78, 0.78, 0.75);
+          material.diffuse = mix(asph, white, clamp(paint, 0.0, 1.0));
+          material.roughness = mix(0.92, 0.6, paint);
+          material.specular = vec3(0.03);
           if (u_night > 0.0) {
             float L = texture(u_lights, vec2(fsInput.attributes.texCoord_0.x, 1.0 - fsInput.attributes.texCoord_0.y)).r;
             material.emissive = material.diffuse * vec3(1.0, 0.78, 0.5) * L * 2.4 * u_night;
@@ -443,8 +511,17 @@
           material.diffuse = base * mix(0.86, 1.04, smoothstep(0.0, 0.25, rows));
           material.roughness = 0.75;
         } else if (kind < 5.5) {        // leaves
-          vec3 n = fsInput.attributes.normalEC;
-          material.diffuse = base * (0.9 + 0.2 * hash12(floor(fsInput.attributes.positionMC.xz * 2.0)));
+          // Leafy texture: clusters of leaves with darker gaps between
+          // them, finer leaves up close, a warmer tint where the sun
+          // shines through the edge of the crown.
+          vec3 pm = fsInput.attributes.positionMC * length(czm_model[0].xyz);
+          float cl = vnoise(pm.xz * 1.6 + pm.y * 0.9) * 0.6 + vnoise(pm.xz * 4.3 - pm.y * 2.1) * 0.4;
+          float px_ = length(fwidth(pm));
+          float leaf = mix(0.5, hash12(floor(pm.xz * 9.0 + pm.y * 7.0)), 1.0 - smoothstep(0.03, 0.12, px_));
+          vec3 d = base * mix(0.62, 1.18, cl) * mix(0.88, 1.08, leaf);
+          float rim = pow(1.0 - abs(dot(normalize(fsInput.attributes.normalEC), normalize(-fsInput.attributes.positionEC))), 2.0);
+          d = mix(d, d * vec3(1.12, 1.15, 0.8), rim * 0.5);
+          material.diffuse = d;
           material.roughness = 0.9;
         } else if (kind < 7.5) {        // wood, boats
           vec2 f = fract(uv);
