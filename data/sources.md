@@ -10,6 +10,7 @@
 | Geoid grid | IGN RAF20 (`fr_ign_RAF20.tif` from cdn.proj.org) | Etalab Open Licence 2.0 | 2020 | NGF-IGN69 heights to WGS84 ellipsoid |
 | Circuit route | OpenStreetMap relation 148194 "Circuit de Monaco" via the OSM API | ODbL 1.0 (credit "© OpenStreetMap contributors") | fetched 2026-11-16 | Grand Prix lap tour |
 | Film set (Monte-Carlo) | IGN LiDAR HD MNT/MNS 50 cm, BD TOPO outlines, BD ORTHO 50 cm (tells tiled, copper and flat roofs, trees and yachts apart) and 20 cm (the roofs' own photo), OpenStreetMap roads, gardens, pools, piers, trees, building floors, names and years; Wikidata years built, styles and floors (CC0) | Etalab 2.0, ODbL 1.0 and CC0 | fetched 2026-11-18 | `viewer/filmset/monte-carlo.glb` |
+| Film set (Mareterra) | OpenStreetMap outline of L'Anse du Portier, buildings with floors and heights, park, pond, pools, paths (mapped after the December 2024 opening); BD TOPO 2024 heights where OSM has none; Mapillary 2025 street photos as a visual reference for the white slab-balcony look and paving | ODbL 1.0, Etalab 2.0, CC-BY-SA 4.0 | fetched 2026-11-20 | Mareterra in `viewer/filmset/monte-carlo.glb` (the 2021 LiDAR and 2022 photo show a building site) |
 | Wide imagery | EOX Sentinel-2 cloudless 2020 | CC BY-NC-SA 4.0 (non-commercial) | 2020 | Riviera view |
 | Wide terrain | AWS Terrain Tiles (Mapzen Terrarium) | mixed open sources, see tilezen/joerd attribution | — | mountains behind Monaco |
 

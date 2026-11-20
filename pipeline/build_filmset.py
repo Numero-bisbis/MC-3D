@@ -21,6 +21,8 @@ in pipeline/facade_colours.json).
   harbour    Yachts found in the LiDAR over water become stylised hulls;
              OpenStreetMap piers become pontoons.
   sea        One flat plane the viewer animates.
+  Mareterra  The 2024 land extension, absent from the 2021 LiDAR: rebuilt
+             from OpenStreetMap (see mareterra_setup and friends).
 
 Output: viewer/filmset/monte-carlo.glb (y-up glTF in an east-north-up frame
 centred on Casino square, heights in metres above the ellipsoid minus the
@@ -1847,6 +1849,11 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             info = facades.get(poly, props)
             BAY_NOW = None if hero else info["bay"]
             style = S_ARCH if hero else pick_style(info, H, tiled, grand, post_scan, rnd)
+            mt = props.get("mareterra")
+            if mt is not None:
+                # Mareterra: white walls and wide windows behind white
+                # slab balconies, the Renzo Piano blocks included.
+                style = S_MODERN
             if info["style"] == S_BELLE and not tiled and not post_scan and poly.area > 200:
                 grand = True        # a real palace: stone, mansard roof
             if style not in (S_BELLE, S_ARCH):
@@ -1864,6 +1871,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 col = np.array(hexrgb(info["colour"]))
             if hero:
                 col = np.array(hexrgb(hero["wall"]))
+            if mt is not None:
+                col = np.array(hexrgb(MT_WHITE)) * (0.97 + 0.03 * rnd.random())
             # Storeys: the real count where open data has it, so each
             # building gets its own number of rows of windows.
             hwall = max(2.5, float(np.percentile(hrel, 40))) if tiled else H
@@ -1883,6 +1892,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 # Garnier's halls: tall arcaded ground floor, a piano nobile
                 # and an attic, not rows of flats.
                 fh = hwall / max(2, round(hwall / 7.5))
+            if mt is not None:
+                fh = max(2.8, (H - 1.0) / mt["levels"])
             # Fine-tune this building's photo shift by up to a metre.
             adj = (0.0, 0.0)
             if photo is not None and photo.get("edges") is not None and poly.area > 80:
@@ -2027,6 +2038,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     stats["towers"] += 1
             if props.get("cleabs") == CASINO_FRONT:
                 casino_front(m, poly, base, H, fh, col, kind, style, rcol, mntR)
+            elif mt is not None:
+                stats["mareterra_slabs"] = stats.get("mareterra_slabs", 0) + mareterra_terraces(
+                    m, poly, base, H, fh, mt)
             elif not hero and not post_scan and (not tiled or info["balconies"]):
                 stats["balconies"] = stats.get("balconies", 0) + facade_depth(
                     m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
@@ -2036,6 +2050,221 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             stats["levels"] += len(levels)
     BAY_NOW = GROUND_R = None
     return footprint
+
+
+# -------------------------------------------------------------- Mareterra ----
+# Mareterra (L'Anse du Portier), the 6 ha land extension east of the Grimaldi
+# Forum, opened in December 2024. The LiDAR (2021) and the IGN photo (2022)
+# show it as a building site: pits below sea level, cranes, half-built
+# floors. Here it is rebuilt from what was mapped after it opened:
+# OpenStreetMap (outline, buildings with their floors, the park, the pond,
+# pools, paths, the Port du Petit Portier marina), BD TOPO 2024 heights where
+# OpenStreetMap has none, and street photos on Mapillary (2025) for the look:
+# white terraced blocks with deep slab balconies, pale stone paving, young
+# pines. Nothing comes from Google's photorealistic tiles: their terms forbid
+# deriving geometry or textures from them.
+MT_NAME = "L'Anse du Portier"
+MT = None                            # {"zone": Polygon, "land": 50 cm mask}
+MT_PLATEAU = 5.0                     # m NGF, the esplanade (BD TOPO ground levels 4.5-6)
+MT_EDGE = 3.4                        # m NGF, the seafront promenade
+MT_WHITE = "#f3f1ec"
+MT_PAVING = (214, 206, 190)          # pale limestone paving, as in the street photos
+
+
+def raster_mask(geom):
+    n = int((X1 - X0) / RES)
+    img = Image.new("L", (n, n), 0)
+    d = ImageDraw.Draw(img)
+    for q in to_polys(geom):
+        d.polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in q.exterior.coords], fill=255)
+        for h in q.interiors:
+            d.polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in h.coords], fill=0)
+    return np.asarray(img) > 0
+
+
+def mareterra_setup(ways, mnt, mns, ortho, sea, land):
+    """Replace the 2021 building site with the finished esplanade: ground
+    at MT_PLATEAU that eases into the old streets around it and steps down
+    to MT_EDGE along the sea, sea where the OpenStreetMap coastline says so
+    (the pits read as sea), no cranes in the surface model, and plain
+    paving in the photo (so the site's dirt does not turn into lawns)."""
+    zone = None
+    for t, pts, closed in ways:
+        if closed and t.get("place") and t.get("name") == MT_NAME and len(pts) > 3:
+            zone = Polygon(pts).buffer(0)
+    if zone is None:
+        return None
+    zm = raster_mask(zone)
+    sea[zm] = ~land[zm]
+    L = zm & ~sea
+    out = ~zm & ~sea & np.isfinite(mnt)
+    d_in, (ri, ci) = ndimage.distance_transform_edt(~out, return_indices=True)
+    edge = mnt[ri, ci]
+    ss = lambda v: v * v * (3 - 2 * v)
+    w = ss(np.clip(d_in * RES / 25.0, 0, 1))
+    d_sea = ndimage.distance_transform_edt(~sea) * RES
+    target = MT_PLATEAU - (MT_PLATEAU - MT_EDGE) * (1 - ss(np.clip((d_sea - 4) / 14.0, 0, 1)))
+    z = w * target + (1 - w) * edge
+    z = np.where(L, z, np.nan_to_num(mnt, nan=0.0))
+    z = ndimage.gaussian_filter(z, 3.0)
+    mnt[L] = z[L]
+    mns[L] = z[L]
+    ortho[L] = MT_PAVING
+    return {"zone": zone, "land": L, "mask": zm, "dsea": d_sea}
+
+
+def mareterra_feats(feats, ways):
+    """Mareterra's buildings from OpenStreetMap (mapped after it opened),
+    in place of the BD TOPO outlines (surveyed mid-construction)."""
+    if MT is None:
+        return feats
+    zone = MT["zone"]
+    keep, bd = [], []
+    for f in feats:
+        g = shapely.force_2d(shape(f["geometry"])).buffer(0)
+        if zone.contains(g.centroid):
+            bd.append((g, float(f["properties"].get("hauteur") or 0)))
+        else:
+            keep.append(f)
+    blds, parts = [], []
+    for t, pts, closed in ways:
+        if not closed or len(pts) < 4:
+            continue
+        b = t.get("building")
+        if not (b or t.get("building:part")) or b in ("roof", "no"):
+            continue
+        g = Polygon(pts).buffer(0)
+        if g.area < 10 or not zone.contains(g.representative_point()):
+            continue
+        (parts if t.get("building:part") else blds).append((g, t))
+    pu = unary_union([g for g, _ in parts]) if parts else None
+    n = 0
+    for g, t in blds + parts:
+        if pu is not None and "building" in t:
+            g = g.difference(pu)
+        lv = t.get("building:levels", "")
+        lv = float(lv) if lv.replace(".", "").isdigit() else None
+        hs = t.get("height", "").replace("m", "").strip()
+        try:
+            h = float(hs)
+        except ValueError:
+            h = None
+        if h is None:
+            # The tallest BD TOPO 2024 outline under it, else its floors.
+            hb = [hh for gb, hh in bd if gb.intersection(g).area > 0.3 * min(gb.area, g.area)]
+            if lv:
+                h = lv * 3.3 + 1.0
+                if hb and abs(max(hb) - h) < 4:
+                    h = max(hb)
+            elif hb and max(hb) > 3:
+                h = max(hb)
+            else:
+                h = 11.0 if t.get("building") == "house" else 7.0
+        if not lv:
+            lv = max(1, round((h - 1.0) / 3.3))
+        for q in to_polys(g):
+            if q.area < 10:
+                continue
+            n += 1
+            keep.append({"type": "Feature", "geometry": shapely.geometry.mapping(q),
+                         "properties": {"cleabs": f"MARETERRA{n:03d}", "hauteur": round(h, 1),
+                                        "date_creation": "2024-12-04", "mareterra": {
+                                            "levels": lv, "name": t.get("name"),
+                                            "house": t.get("building") in ("house", "terrace")}}})
+    print(f"Mareterra: {n} buildings from OpenStreetMap in place of {len(bd)} BD TOPO outlines")
+    return keep
+
+
+def mareterra_terraces(m, poly, base, H, fh, mt):
+    """The deep white slab balconies that wrap Mareterra's blocks (seen in
+    the 2025 street photos): one slab per floor, a thin white edge with a
+    glass rail on top, the underside a shade darker."""
+    if H < 6:
+        return 0
+    depth = 1.0 if H > 40 else 1.7
+    white = np.array(hexrgb(MT_WHITE))
+    rail = np.array(hexrgb("#a9bcc0"))
+    js = 1 if mt.get("house") else 2
+    slab = poly.buffer(depth, join_style=js, quad_segs=3)
+    if not isinstance(slab, Polygon):
+        return 0
+    slab = orient(slab, 1.0)
+    ring = [orient(q, 1.0) for q in to_polys(slab.difference(poly))]
+    k_ = 0
+    nf = int(round((H - 1.0) / fh))
+    for k in range(1, nf + 1):
+        z = base + k * fh
+        if z > base + H - 0.6:
+            break
+        add_walls(m, slab, z - 0.38, z, z, 10, white, PLAIN)
+        for q in ring:
+            add_roof(m, q, z, white * 0.97, False)
+            add_roof(m, orient(q, -1.0), z - 0.38, white * 0.8, False)
+        add_walls(m, slab, z, z + 1.05, z, 10, rail, PLAIN)
+        k_ += 1
+    return k_
+
+
+def mareterra_trees(m, ways, mnt, bmask, stats):
+    """Planted pines, olives and shrubs in Mareterra's park and gardens
+    (the LiDAR predates them): a jittered grid inside each green area."""
+    if MT is None:
+        return 0
+    zone = MT["zone"]
+    rnd = np.random.default_rng(24)
+    mntR = Raster(mnt)
+    DENS = {"park": 9.0, "garden": 8.0, "scrub": 7.0, "wood": 7.0, "forest": 7.0, "grass": 15.0,
+            "meadow": 13.0, "flowerbed": 99.0}
+    n = 0
+    for t, pts, closed in ways:
+        k = t.get("leisure") or t.get("landuse") or t.get("natural")
+        if not closed or k not in DENS or len(pts) < 4:
+            continue
+        g = Polygon(pts).buffer(0)
+        if not zone.contains(g.representative_point()):
+            continue
+        sp = DENS[k]
+        x0, y0, x1, y1 = g.bounds
+        for x in np.arange(x0 + sp / 2, x1, sp):
+            for y in np.arange(y0 + sp / 2, y1, sp):
+                px_, py_ = x + rnd.uniform(-0.4, 0.4) * sp, y + rnd.uniform(-0.4, 0.4) * sp
+                if not g.buffer(-1.5).contains(Point(px_, py_)):
+                    continue
+                r_, c_ = int((Y1 - py_) / RES), int((px_ - X0) / RES)
+                if not (0 <= r_ < bmask.shape[0] and 0 <= c_ < bmask.shape[1]) or bmask[r_, c_] \
+                        or not MT["land"][r_, c_]:
+                    continue
+                z = float(mntR.sample(np.array([px_]), np.array([py_]))[0])
+                if not np.isfinite(z):
+                    continue
+                u = rnd.random()
+                if u < 0.55:
+                    add_tree(m, px_, py_, z, rnd.uniform(7, 11), rnd.uniform(2.6, 3.8), "pine", rnd)
+                elif u < 0.85:
+                    add_tree(m, px_, py_, z, rnd.uniform(4, 6.5), rnd.uniform(1.8, 2.6), "broad", rnd)
+                else:
+                    add_tree(m, px_, py_, z, rnd.uniform(1.2, 2.0), rnd.uniform(0.9, 1.4), "broad", rnd)
+                n += 1
+    # The seafront promenade: a row of umbrella pines 8 m in from the edge.
+    pools = unary_union([Polygon(p_).buffer(2.0) for t, p_, c in ways
+                         if c and len(p_) > 3 and (t.get("leisure") == "swimming_pool" or t.get("natural") == "water")])
+    ring = zone.buffer(-8.0)
+    for q in to_polys(ring):
+        ln = q.exterior
+        for s_ in np.arange(0, ln.length, 12.0):
+            pt = ln.interpolate(s_)
+            r_, c_ = int((Y1 - pt.y) / RES), int((pt.x - X0) / RES)
+            if not (0 <= r_ < bmask.shape[0] and 0 <= c_ < bmask.shape[1]):
+                continue
+            if not MT["land"][r_, c_] or bmask[r_, c_] or not (5.0 < MT["dsea"][r_, c_] < 13.0) \
+                    or pools.contains(pt):
+                continue
+            z = float(mntR.sample(np.array([pt.x]), np.array([pt.y]))[0])
+            if np.isfinite(z):
+                add_tree(m, pt.x, pt.y, z, rnd.uniform(8, 10.5), rnd.uniform(3.0, 3.8), "pine", rnd)
+                n += 1
+    stats["mareterra_trees"] = n
+    return n
 
 
 # ----------------------------------------------------------------- tunnel ----
@@ -4075,7 +4304,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     mnt, mns = load_raster("mnt.tif"), load_raster("mns.tif")
-    ortho = np.asarray(Image.open(RAW / "ortho.jpg").convert("RGB"))
+    ortho = np.array(Image.open(RAW / "ortho.jpg").convert("RGB"))
     ortho_hi = load_ortho_hi()
     # Sea: no terrain in the LiDAR, or ground at sea level.
     # Moored yachts and pontoons show up as small islands of "ground" in the
@@ -4097,7 +4326,10 @@ def main():
     ways, pts = load_osm()
     # Yachts moored against a quay merge with it in the LiDAR terrain. The
     # OpenStreetMap coastline follows the quays, so anything outside it is sea.
-    sea |= ~coast_land(ways, sea)
+    land = coast_land(ways, sea)
+    sea |= ~land
+    global MT
+    MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
     mnt_f = np.where(sea, np.nan, mnt)
     global TUNNEL
     TUNNEL = load_tunnel()
@@ -4136,7 +4368,15 @@ def main():
         print("photo lean per metre of height (east, north):", lean)
         photo = {"mesh": Mesh(), "polys": [], "lean": lean, "edges": edges}
     facades = FacadeData(ways)
+    feats = mareterra_feats(feats, ways)
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
+    if MT is not None:
+        # Mareterra's new blocks into the surface model, so they cast
+        # their baked shadows on the ground map like the rest.
+        for f in feats:
+            if "mareterra" in f["properties"]:
+                mk = raster_mask(shape(f["geometry"]))
+                mns[mk] = np.nan_to_num(mnt_f[mk], nan=MT_PLATEAU) + f["properties"]["hauteur"]
     stats["photo_facade_colours"] = facades.used_photo_colours
     stats["photo_facade_types"] = facades.used_survey
     stats["photo_roofs"] = len(photo["polys"]) if photo else 0
@@ -4157,6 +4397,7 @@ def main():
     print("trees…")
     tm = Mesh()
     trees(tm, mns, mnt_f, ortho, bgrow.astype(np.uint8), pts, stats, no_tree_zones(ways))
+    print("Mareterra planting…", mareterra_trees(tm, ways, mnt_f, bgrow, stats))
     print("harbour…")
     hm = Mesh()
     yachts(hm, ortho, sea, stats, ways)
