@@ -502,10 +502,72 @@ def ground_mesh(mnt, sea):
         endz = contains_xy(TUNNEL["ends"], X, Y) & ~ins
         anyq = lambda a_: a_[:-1, :-1] | a_[:-1, 1:] | a_[1:, :-1] | a_[1:, 1:]
         keep &= ~(anyq(ins) & anyq(endz))
+    fine = []
+    for zx0, zy0, zx1, zy1 in DETAIL_ZONES:
+        # A 1 m grid over the zone instead of the 3 m one: the ravine walls
+        # keep their real shape (ledges, overhangs smoothed, the gully).
+        j0, j1 = int(math.ceil((zx0 - X0) / GRID)), int(math.floor((zx1 - X0) / GRID))
+        i0, i1 = int(math.ceil((Y1 - zy1) / GRID)), int(math.floor((Y1 - zy0) / GRID))
+        if j1 - j0 < 2 or i1 - i0 < 2:
+            continue
+        keep[i0:i1, j0:j1] = False
+        fine.append(_detail_patch(mnt, Z, i0, i1, j0, j1))
     tris = np.concatenate([np.stack([a, cc, b], -1)[keep], np.stack([b, cc, d], -1)[keep]])
     m = Mesh()
     m.add(P, N, [255, 255, 255], GROUND, uv=uv, idx=tris)
+    for Pf, Nf, uvf, tf in fine:
+        m.add(Pf, Nf, [255, 255, 255], GROUND, uv=uvf, idx=tf)
     return m, Z
+
+
+# Places where the 3 m ground grid is too coarse for the terrain: the
+# Ravin de Sainte-Dévote (cliffs behind the church, under the bridges).
+DETAIL_ZONES = [(1055925.0, 6303100.0, 1056140.0, 6303275.0)]
+DETAIL_K = 3                         # 3 m / 3 = 1 m
+
+
+def _detail_patch(mnt, Z, i0, i1, j0, j1):
+    """A finer ground grid over coarse cells [i0, i1) x [j0, j1). Its edge
+    nodes follow the coarse grid exactly (so there is no crack), and the
+    finer LiDAR ground fades in over 6 m from the edge. Near the circuit
+    it keeps the coarse heights, which the track rules have set."""
+    K = DETAIL_K
+    st = GRID / K
+    nxf, nyf = (j1 - j0) * K + 1, (i1 - i0) * K + 1
+    xs = X0 + j0 * GRID + np.arange(nxf) * st
+    ys = Y1 - i0 * GRID - np.arange(nyf) * st
+    Xf, Yf = np.meshgrid(xs, ys)
+    # Coarse surface, bilinear.
+    fi = (Y1 - Yf) / GRID
+    fj = (Xf - X0) / GRID
+    ia = np.clip(np.floor(fi).astype(int), 0, Z.shape[0] - 2)
+    ja = np.clip(np.floor(fj).astype(int), 0, Z.shape[1] - 2)
+    ti, tj = fi - ia, fj - ja
+    Zc = (Z[ia, ja] * (1 - ti) * (1 - tj) + Z[ia, ja + 1] * (1 - ti) * tj +
+          Z[ia + 1, ja] * ti * (1 - tj) + Z[ia + 1, ja + 1] * ti * tj)
+    # Fine LiDAR ground: mean of the 50 cm cells within 75 cm.
+    h = ndimage.uniform_filter(np.nan_to_num(mnt, nan=0.0), size=3)
+    w = ndimage.uniform_filter((~np.isnan(mnt)).astype(np.float32), size=3)
+    hm = np.where(w > 0.3, h / np.maximum(w, 1e-6), np.nan)
+    r = np.clip(((Y1 - Yf) / RES).astype(int), 0, mnt.shape[0] - 1)
+    c = np.clip(((Xf - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
+    Zm = hm[r, c]
+    edge = np.minimum.reduce([Xf - xs[0], xs[-1] - Xf, ys[0] - Yf, Yf - ys[-1]])
+    wt = np.clip(edge / 6.0, 0.0, 1.0)
+    if TRACK is not None:
+        dtr = track_dist(Xf.ravel(), Yf.ravel()).reshape(Xf.shape)
+        wt *= np.clip((dtr - (TRACK_HALF + 16)) / 6.0, 0.0, 1.0)
+    wt = np.where(np.isfinite(Zm) & (Zc > SEA_FLOOR + 1), wt, 0.0)
+    Zf = Zc + wt * (np.nan_to_num(Zm, nan=0.0) - Zc)
+    P = enu_fast(Xf.ravel(), Yf.ravel(), Zf.ravel())
+    gy, gx = np.gradient(Zf, st)
+    N = np.column_stack([-gx.ravel(), gy.ravel(), np.ones(Zf.size)])
+    N /= np.linalg.norm(N, axis=1, keepdims=True)
+    uv = np.column_stack([(Xf.ravel() - X0) / (X1 - X0), (Y1 - Yf.ravel()) / (Y1 - Y0)])
+    ii = np.arange(nxf * nyf).reshape(nyf, nxf)
+    a, b, cc, d = ii[:-1, :-1], ii[:-1, 1:], ii[1:, :-1], ii[1:, 1:]
+    tris = np.concatenate([np.stack([a, cc, b], -1).reshape(-1, 3), np.stack([b, cc, d], -1).reshape(-1, 3)])
+    return P, N, uv, tris
 
 
 def race_pool(d, xy, pts, px):
@@ -1455,6 +1517,8 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
         return 0
     n_ = 0
     pale = np.minimum(np.asarray(col) * 1.06 + 10, 252)
+    if style == S_BELLE:
+        pale = np.array(hexrgb("#efe8da"))      # Belle Époque: white stone balconies
     for a, b in zip(ring[:-1], ring[1:]):
         L = float(np.linalg.norm(b - a))
         if L < 6:
@@ -1480,6 +1544,8 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
         floors = int(H / fh)
         if modern:
             rail = np.array(hexrgb(rnd.choice(["#f4f2ec", "#e9e6de", "#5f6a6e", "#d9d4c8"])))
+            if style == S_BELLE:
+                rail = pale * 0.98                  # a white balustrade
             dep = depth or rnd.uniform(1.0, 1.5)
             for k in range(1, floors):
                 z = base + k * fh
@@ -1543,6 +1609,101 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
     return n_
 
 
+# Église Sainte-Dévote, at the foot of its ravine just above the first
+# corner. BD TOPO has it 2.4 m tall (the scan under the bridge); the LiDAR
+# surface shows a nave about 9 m to the ridge, gable on to the square, and a
+# bell tower about 16 m tall near the east corner of the front. The outline's
+# main body (the rest, up the slope, is the presbytery): four corners, L93.
+CHURCH_SD = "BATIMENT0000000074074425"
+CHURCH_SD_BODY = [(1056048.4, 6303135.9), (1056040.7, 6303123.1), (1056014.4, 6303141.3), (1056024.1, 6303152.7)]
+CHURCH_SD_TOWER = (1056043.2, 6303134.2)
+
+
+def church_sainte_devote(m, mntR):
+    global BAY_NOW
+    body = orient(Polygon(CHURCH_SD_BODY), 1.0)
+    F0, F1, Bk1, Bk0 = (np.array(p_) for p_ in CHURCH_SD_BODY)
+    fm, bm = (F0 + F1) / 2, (Bk0 + Bk1) / 2
+    L = float(np.linalg.norm(bm - fm))
+    u = (bm - fm) / L                       # from the front to the back
+    v = np.array([-u[1], u[0]])             # across
+    hw = float(np.linalg.norm(F0 - F1)) / 2
+    if np.dot(F0 - fm, v) < 0:
+        v = -v
+    base = float(np.nanmin(mntR.sample(np.array([F0[0], F1[0], fm[0]]), np.array([F0[1], F1[1], fm[1]]))))
+    cream, trim = np.array(hexrgb("#f0e4c9")), np.array(hexrgb("#e1c393"))
+    tile = np.array(hexrgb("#b8583b"))
+    eave, ridge = base + 6.8, base + 9.9
+
+    def P(sv, tv, zv):
+        q = fm[None] + np.outer(np.atleast_1d(sv), u) + np.outer(np.atleast_1d(tv), v)
+        return enu_fast(q[:, 0], q[:, 1], np.atleast_1d(np.asarray(zv, float)) * np.ones(len(q)))
+
+    sky = P(L / 2, 0, ridge + 40)
+    # Walls: one tall storey of round-arched windows.
+    BAY_NOW = 4.4
+    add_walls(m, body, base - 1.0, eave, base, eave - base, cream, WALL_OLD, style=S_ARCH)
+    # Cornice under the eaves.
+    cor = body.buffer(0.35, join_style=2)
+    add_walls(m, cor, eave - 0.45, eave, eave, 10, trim, PLAIN)
+    # Gable roof along the nave, 40 cm over the walls all round.
+    o = 0.55
+    for side in (-1, 1):
+        A = P([-o, L + o], [side * (hw + o)] * 2, eave - 0.2)
+        R = P([-o, L + o], [0, 0], ridge)
+        tri_facing(m, A[[0, 0]], A[[1, 1]], R[[1, 0]], np.repeat(sky, 2, 0), tile, ROOF_TILE)
+        tri_facing(m, A[[0]], R[[1]], R[[0]], sky, tile, ROOF_TILE)
+        # Underside of the overhang.
+        A2 = P([-o, L + o], [side * hw] * 2, eave - 0.05)
+        dn = P(L / 2, side * hw, eave - 30)
+        tri_facing(m, A[[0, 0]], A[[1, 1]], A2[[1, 0]], np.repeat(dn, 2, 0), trim * 0.8, PLAIN)
+    # Gable ends.
+    for sv, outw in ((0.0, -1), (L, 1)):
+        G = P([sv] * 3, [-hw, hw, 0], [eave, eave, ridge - 0.1])
+        tri_facing(m, G[[0]], G[[1]], G[[2]], P(sv + outw * 20, 0, eave), cream, PLAIN)
+    # The front: a frontispiece with pilasters and a pediment above the
+    # roof line, the arched portal in the middle.
+    wf = hw * 0.62
+    BAY_NOW = 2 * wf
+    front = orient(Polygon([tuple(fm - u * 0.9 - v * wf), tuple(fm - u * 0.9 + v * wf),
+                            tuple(fm + u * 0.2 + v * wf), tuple(fm + u * 0.2 - v * wf)]), 1.0)
+    ztop = base + 10.2
+    add_walls(m, front, base - 1.0, ztop, base, ztop - base, cream, WALL_OLD, style=S_ARCH)
+    for tv in (-wf, wf):                       # pilasters at the corners
+        c_ = fm - u * 0.95 + v * tv * 0.97
+        _box(m, c_[0], c_[1], v, 0.7, 0.35, base - 0.5, ztop, trim, PLAIN)
+    corn = orient(front.buffer(0.3, join_style=2), 1.0)
+    add_walls(m, corn, ztop - 0.5, ztop, ztop, 10, trim, PLAIN)
+    add_roof(m, corn, ztop, trim, False)
+    # Pediment.
+    pz = ztop + 2.4
+    for so in (-1.2, 0.2):
+        G = P([so] * 3, [-wf - 0.3, wf + 0.3, 0], [ztop, ztop, pz])
+        tri_facing(m, G[[0]], G[[1]], G[[2]], P(so - 20 if so < 0 else so + 20, 0, ztop), cream if so < 0 else cream * 0.95, PLAIN)
+    for side in (-1, 1):
+        A = P([-1.2, 0.2], [side * (wf + 0.3)] * 2, ztop)
+        R = P([-1.2, 0.2], [0, 0], pz)
+        tri_facing(m, A[[0, 0]], A[[1, 1]], R[[1, 0]], np.repeat(P(-0.5, 0, pz + 30), 2, 0), tile, ROOF_TILE)
+    # Cross on the apex.
+    c_ = fm - u * 0.5
+    _box(m, c_[0], c_[1], v, 0.14, 0.14, pz, pz + 1.3, trim, PLAIN)
+    _box(m, c_[0], c_[1] + 0.0, v, 0.7, 0.14, pz + 0.75, pz + 0.92, trim, PLAIN)
+    # Bell tower: square, three stages of arches, a cornice and a tiled cap.
+    tx, ty = CHURCH_SD_TOWER
+    tw = 3.8
+    tp = orient(Polygon([tuple(np.array([tx, ty]) + a_ * u * tw / 2 + b_ * v * tw / 2)
+                         for a_, b_ in ((-1, -1), (-1, 1), (1, 1), (1, -1))]), 1.0)
+    BAY_NOW = tw
+    th = base + 14.0
+    add_walls(m, tp, base, th, base, (th - base) / 3, cream, WALL_OLD, style=S_ARCH)
+    tc = orient(tp.buffer(0.35, join_style=2), 1.0)
+    add_walls(m, tc, th - 0.4, th + 0.1, th, 10, trim, PLAIN)
+    add_roof(m, tc, th + 0.1, trim, False)
+    add_cap(m, orient(tp.buffer(-0.1, join_style=2), 1.0), th + 0.1, 2.6, tile, ROOF_TILE)
+    BAY_NOW = None
+    return body.union(tp)
+
+
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
     global BAY_NOW, GROUND_R
     mntR = Raster(mnt)
@@ -1567,6 +1728,14 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
             key = f["properties"].get("cleabs") or poly.wkt[:60]
+            if key == CHURCH_SD:
+                body = church_sainte_devote(m, mntR)
+                footprint.append(body)
+                stats["landmarks"] = stats.get("landmarks", 0) + 1
+                rest = [q for q in to_polys(poly.difference(body.buffer(0.4, join_style=2))) if q.area >= 10]
+                if not rest:
+                    continue
+                poly = orient(max(rest, key=lambda q: q.area), 1.0)
             rnd = rng_for(key)
             pr_ = f["properties"]
             if pr_.get("construction_legere") and float(track_dist(poly.centroid.x, poly.centroid.y)[0]) < 30:
@@ -1772,6 +1941,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                             # Parapet: a low wall round the roof edge, so
                             # roofs read as terraces instead of lids.
                             pc = np.asarray(col) * 0.97
+                            if style == S_BELLE:
+                                # Belle Époque roofs end in a pale stone balustrade.
+                                pc = np.array(hexrgb("#f1ebdf"))
                             add_walls(m, part, zt, zt + 0.9, zt, 10, pc, PLAIN)
                             add_walls(m, part, zt, zt + 0.9, zt, 10, pc * 0.85, PLAIN, inward=True)
                             inner_top = part.buffer(-0.25, join_style=2)
@@ -2450,10 +2622,54 @@ BRIDGE_W = {"primary": 10, "primary_link": 7, "secondary": 8.5, "tertiary": 7.5,
             "steps": 2.6, "cycleway": 2.6, "path": 2.4}
 
 
+def _bridge_approaches(ways, ends, fam, reach=14.0):
+    """The road a bridge runs on to at each end: the first `reach` metres of
+    the street way that meets it there (not another bridge, not a tunnel),
+    as points walking away from the bridge. None where nothing meets it."""
+    out = []
+    for e in ends:
+        E = Point(e)
+        best = None
+        for t, pts, closed in ways:
+            hw = t.get("highway")
+            if closed or not hw or t.get("bridge") or t.get("tunnel") or hw not in BRIDGE_W:
+                continue
+            if (hw in ("footway", "steps", "cycleway", "path", "pedestrian")) != fam:
+                continue
+            if Point(pts[0]).distance(E) < 0.8:
+                seq = list(pts)
+            elif Point(pts[-1]).distance(E) < 0.8:
+                seq = list(pts)[::-1]
+            else:
+                continue
+            ls = LineString(seq)
+            if ls.length < 3:
+                continue
+            best = ls if best is None or ls.length > best.length else best
+        if best is None:
+            out.append(None)
+            continue
+        L = min(reach, best.length)
+        ss = np.arange(1.5, L + 0.01, 1.5)
+        q = shapely.line_interpolate_point(best, ss)
+        out.append(np.column_stack([shapely.get_x(q), shapely.get_y(q)]))
+    return out
+
+
 def bridges(m, ways, mns, mnt):
+    """Each OpenStreetMap bridge: a deck at its LiDAR surface height, carried
+    on a girder whose underside arches up from deep haunches at the
+    abutments to a slim middle (Monaco's ravine bridges are single spans,
+    like the Pont Sainte-Dévote over the church), solid abutment walls
+    where the deck meets the ground, and the deck carried a few metres on
+    to the street at each end so the road runs on without a step or a
+    gap (the 3 m ground grid smears a ledge road on a cliff edge)."""
     mnsR, mntR = Raster(mns), Raster(mnt)
+    # Lowest ground within 3 m: where the ground mesh can sag to.
+    gminR = Raster(ndimage.minimum_filter(np.nan_to_num(mnt, nan=-50.0), size=7))
     n_ = 0
     asph, walk, stone = np.array(hexrgb("#55585e")), np.array(hexrgb("#d9cfbd")), np.array(hexrgb("#e4dccb"))
+    concrete = np.array(hexrgb("#ddd5c3"))
     for t, pts, closed in ways:
         w = BRIDGE_W.get(t.get("highway"))
         if not w or not t.get("bridge") or closed:
@@ -2461,70 +2677,142 @@ def bridges(m, ways, mns, mnt):
         ls = LineString(pts)
         if ls.length < 4 or not box(X0, Y0, X1, Y1).buffer(-2).intersects(ls):
             continue
+        foot = t.get("highway") in ("footway", "steps", "cycleway", "path", "pedestrian")
         ss = np.linspace(0, ls.length, max(3, int(ls.length / 1.5) + 1))
         q = shapely.line_interpolate_point(ls, ss)
-        x, y = shapely.get_x(q), shapely.get_y(q)
-        ok = (x > X0 + 1) & (x < X1 - 1) & (y > Y0 + 1) & (y < Y1 - 1)
-        if ok.sum() < 3:
-            continue
-        x, y = x[ok], y[ok]
-        top = mnsR.sample(x, y)
-        gnd = mntR.sample(x, y)
+        bx, by = shapely.get_x(q), shapely.get_y(q)
+        top = mnsR.sample(bx, by)
         if np.all(np.isnan(top)):
             continue
-        top = np.where(np.isfinite(top), top, np.nanmedian(top))
-        # The deck surface: the LiDAR surface along the way, without cars,
-        # lamp posts or trees leaning over it, and with no sudden steps.
-        z = ndimage.median_filter(top, size=7, mode="nearest")
-        z = ndimage.gaussian_filter1d(z, 3, mode="nearest")
+        # Approaches: the street beyond each end, at its own ground height.
+        pre, post = _bridge_approaches(ways, [pts[0], pts[-1]], foot)
+        pre = pre[::-1] if pre is not None else np.zeros((0, 2))
+        post = post if post is not None else np.zeros((0, 2))
+        if TRACK is not None:
+            # Never carry a deck on to the circuit itself.
+            if len(pre):
+                pre = pre[track_dist(pre[:, 0], pre[:, 1]) > TRACK_HALF + 1.0]
+            if len(post):
+                post = post[track_dist(post[:, 0], post[:, 1]) > TRACK_HALF + 1.0]
+        x = np.concatenate([pre[:, 0], bx, post[:, 0]])
+        y = np.concatenate([pre[:, 1], by, post[:, 1]])
+        on = np.concatenate([np.zeros(len(pre), bool), np.ones(len(bx), bool), np.zeros(len(post), bool)])
+        ok = (x > X0 + 1) & (x < X1 - 1) & (y > Y0 + 1) & (y < Y1 - 1)
+        if ok[on].sum() < 3:
+            continue
+        x, y, on = x[ok], y[ok], on[ok]
+        top = mnsR.sample(x, y)
+        gnd = mntR.sample(x, y)
+        gmin = gminR.sample(x, y)
+        # The deck: the LiDAR surface on the bridge, the ground on the
+        # approaches, without cars, lamp posts or trees, and no steps.
+        z = np.where(on, top, gnd)
+        z = np.where(np.isfinite(z), z, np.nanmedian(top))
+        z = ndimage.median_filter(z, size=7, mode="nearest")
+        z = ndimage.gaussian_filter1d(z, 2.5, mode="nearest")
         gnd = np.where(np.isfinite(gnd), gnd, z - 10)
-        if np.nanmax(z - gnd) < 2.0:
+        gmin = np.where(np.isfinite(gmin) & (gmin > -40), gmin, gnd)
+        if np.nanmax((z - gnd)[on]) < 2.0:
             continue                  # a bridge over nothing much: the ground carries the street
         dx, dy = np.gradient(x), np.gradient(y)
         l = np.maximum(np.hypot(dx, dy), 1e-6)
         lx, ly = -dy / l, dx / l
+
         def at(off, dz=0.0):
             return enu_fast(x + lx * off, y + ly * off, z + dz)
+
+        def at_z(off, zz):
+            return enu_fast(x + lx * off, y + ly * off, zz)
+
         up = at(0, 30)
         hw = w / 2
-        foot = t.get("highway") in ("footway", "steps", "cycleway", "path", "pedestrian")
-        bands = [(-hw, hw, walk if foot else asph, 0.0)] if foot else \
-                [(-hw + 1.4, hw - 1.4, asph, 0.0), (-hw, -hw + 1.4, walk, 0.15), (hw - 1.4, hw, walk, 0.15)]
+        bands = [(-hw, hw, walk if foot else asph, 0.03)] if foot else \
+                [(-hw + 1.4, hw - 1.4, asph, 0.03), (-hw, -hw + 1.4, walk, 0.18), (hw - 1.4, hw, walk, 0.18)]
         for o0, o1, col, dz in bands:
             A, B = at(o0, dz), at(o1, dz)
             tri_facing(m, A[:-1], B[:-1], A[1:], up[:-1], col, PLAIN)
             tri_facing(m, B[:-1], B[1:], A[1:], up[:-1], col, PLAIN)
-        # Deck edges, the underside, and parapets.
+        if not foot:
+            # Kerbs: the step up from the road to each pavement.
+            for o in (-hw + 1.4, hw - 1.4):
+                A, B = at(o, 0.03), at(o, 0.18)
+                mid_ = at(0, 0.5)
+                tri_facing(m, A[:-1], B[:-1], A[1:], mid_[:-1], walk * 0.9, PLAIN)
+                tri_facing(m, B[:-1], B[1:], A[1:], mid_[:-1], walk * 0.9, PLAIN)
+        # The underside. Clear spans (more than 4.5 m over the ground) get
+        # a girder that is deep at the abutments and slim in the middle;
+        # elsewhere the deck stands on a solid wall down into the ground.
+        clear = (z - gnd > 4.5) & on
+        soffit = np.where(on, gmin - 0.5, gmin - 0.4)
+        cum = np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+        lab, nrun = ndimage.label(clear)
+        piers = []
+        for k in range(1, nrun + 1):
+            idx = np.nonzero(lab == k)[0]
+            s0, s1 = cum[idx[0]], cum[idx[-1]]
+            Ls = max(s1 - s0, 1.0)
+            nsub = max(1, int(math.ceil(Ls / 48.0))) if Ls > 90 else 1
+            sub = Ls / nsub
+            piers += [s0 + sub * j for j in range(1, nsub)]
+            u = ((cum[idx] - s0) % sub) / sub * 2 - 1
+            d_end = min(4.2, 1.4 + 0.035 * sub)
+            depth = 1.3 + (d_end - 1.3) * u ** 2
+            soffit[idx] = np.maximum(z[idx] - depth, np.minimum(z[idx] - 1.3, gnd[idx] + 0.3))
+        if TRACK is not None:
+            # Over the circuit the deck keeps a slim edge: nothing hangs
+            # down into the cars' way.
+            over = track_dist(x, y) < TRACK_HALF + hw + 4.0
+            soffit = np.where(over, np.maximum(soffit, z - 1.3), soffit)
         for side in (-1, 1):
             o = side * hw
             out_ = at(side * (hw + 20))
-            for (h0, h1), col in (((-1.3, 0.15), stone), ((0.15, 1.15), stone)):
-                A, B = at(o, h0), at(o, h1)
-                tri_facing(m, A[:-1], B[:-1], A[1:], out_[:-1], col, PLAIN)
-                tri_facing(m, B[:-1], B[1:], A[1:], out_[:-1], col, PLAIN)
+            # Fascia: the girder's face, down to the soffit or the ground.
+            A, B = at_z(o, soffit), at(o, 0.18)
+            tri_facing(m, A[:-1], B[:-1], A[1:], out_[:-1], concrete, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], out_[:-1], concrete, PLAIN)
+            # A moulded string course along the deck edge.
+            A, B = at(o + side * 0.18, -0.55), at(o + side * 0.18, -0.25)
+            tri_facing(m, A[:-1], B[:-1], A[1:], out_[:-1], stone * 1.02, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], out_[:-1], stone * 1.02, PLAIN)
+            A, B = at(o, -0.55), at(o + side * 0.18, -0.55)
+            dn_ = at(0, -30)
+            tri_facing(m, A[:-1], B[:-1], A[1:], dn_[:-1], stone * 0.8, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], dn_[:-1], stone * 0.8, PLAIN)
+            A, B = at(o, -0.25), at(o + side * 0.18, -0.25)
+            tri_facing(m, A[:-1], B[:-1], A[1:], up[:-1], stone, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], up[:-1], stone, PLAIN)
+            # Parapet: outer face, inner face and coping.
+            A, B = at(o, 0.18), at(o, 1.15)
+            tri_facing(m, A[:-1], B[:-1], A[1:], out_[:-1], stone, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], out_[:-1], stone, PLAIN)
             inn = at(0, 0.6)
-            A, B = at(o - side * 0.3, 0.15), at(o - side * 0.3, 1.15)
-            tri_facing(m, A[:-1], B[:-1], A[1:], inn[:-1], col * 0.95, PLAIN)
-            tri_facing(m, B[:-1], B[1:], A[1:], inn[:-1], col * 0.95, PLAIN)
-            A, B = at(o - side * 0.3, 1.15), at(o, 1.15)
+            A, B = at(o - side * 0.3, 0.18), at(o - side * 0.3, 1.15)
+            tri_facing(m, A[:-1], B[:-1], A[1:], inn[:-1], stone * 0.95, PLAIN)
+            tri_facing(m, B[:-1], B[1:], A[1:], inn[:-1], stone * 0.95, PLAIN)
+            A, B = at(o - side * 0.3, 1.15), at(o + 0.05 * side, 1.15)
             tri_facing(m, A[:-1], B[:-1], A[1:], up[:-1], stone * 1.03, PLAIN)
             tri_facing(m, B[:-1], B[1:], A[1:], up[:-1], stone * 1.03, PLAIN)
-        A, B = at(-hw, -1.3), at(hw, -1.3)
-        dn = at(0, -30)
-        tri_facing(m, A[:-1], B[:-1], A[1:], dn[:-1], stone * 0.7, PLAIN)
-        tri_facing(m, B[:-1], B[1:], A[1:], dn[:-1], stone * 0.7, PLAIN)
-        # Piers where the deck stands well clear of the ground.
-        cum = np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
-        for sp in np.arange(12, cum[-1] - 6, 18.0):
-            i = int(np.searchsorted(cum, sp))
-            if z[i] - gnd[i] < 4 or (TRACK is not None and track_dist(x[i], y[i])[0] < TRACK_HALF + 1.5):
+        A, B = at_z(-hw, soffit), at_z(hw, soffit)
+        dn = at(0, -40)
+        tri_facing(m, A[:-1], B[:-1], A[1:], dn[:-1], concrete * 0.72, PLAIN)
+        tri_facing(m, B[:-1], B[1:], A[1:], dn[:-1], concrete * 0.72, PLAIN)
+        # The ends of the girder where the deck stops in the air.
+        for i_, j_ in ((0, 1), (len(x) - 1, len(x) - 2)):
+            if z[i_] - gmin[i_] < 0.6:
                 continue
-            for o in (-hw * 0.55, hw * 0.55):
-                px_, py_ = x[i] + lx[i] * o, y[i] + ly[i] * o
-                if TRACK is not None and track_dist(px_, py_)[0] < TRACK_HALF + 1.5:
-                    continue
-                add_walls(m, box(px_ - 0.6, py_ - 0.6, px_ + 0.6, py_ + 0.6), gnd[i] - 1, z[i] - 1.3, gnd[i], 10,
-                          stone * 0.9, PLAIN)
+            off = np.array([-hw, hw, hw, -hw])
+            P0 = enu_fast(x[i_] + lx[i_] * off, y[i_] + ly[i_] * off,
+                          np.array([soffit[i_], soffit[i_], z[i_] + 0.18, z[i_] + 0.18]))
+            T_ = enu_fast(np.array([x[i_] + (x[i_] - x[j_]) * 10]), np.array([y[i_] + (y[i_] - y[j_]) * 10]),
+                          np.array([z[i_]]))
+            tri_facing(m, P0[[0, 0]], P0[[1, 2]], P0[[2, 3]], np.repeat(T_, 2, 0), concrete * 0.9, PLAIN)
+        # Piers only on very long viaducts: slender walls across the deck.
+        for sp in piers:
+            i = int(np.searchsorted(cum, sp))
+            if TRACK is not None and track_dist(x[i], y[i])[0] < TRACK_HALF + 1.5:
+                continue
+            ax_ = np.array([lx[i], ly[i]])
+            _box(m, x[i], y[i], ax_, w * 0.7, 1.6, gnd[i] - 1, soffit[i] + 0.05, concrete * 0.92, PLAIN)
         n_ += 1
     return n_
 

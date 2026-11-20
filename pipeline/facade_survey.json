@@ -70,10 +70,13 @@
    "depth": 1.3
   },
   "BATIMENT0000000074074386": {
-   "style": "villa",
-   "seen": "Belle Epoque villa",
-   "bay": 2.8,
-   "balconies": "small"
+   "style": "belle",
+   "seen": "red Belle Epoque villa by the Sainte-Devote steps: deep red walls, white balustraded balconies on curved bays, roof terrace balustrade",
+   "colour": "#b94a3f",
+   "levels": 5,
+   "balconies": "continuous",
+   "depth": 1.3,
+   "bay": 2.8
   },
   "BATIMENT0000000074074396": {
    "style": "ribbon",
