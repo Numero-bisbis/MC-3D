@@ -543,6 +543,47 @@ def race_pool(d, xy, pts, px):
             col = (220, 40, 40) if j < n_ * 0.1 or j > n_ * 0.9 else ((240, 240, 240) if j % 2 else (30, 90, 200))
             d.line(xy([p0, p1]), fill=col, width=max(1, int(0.12 * px)))
 
+def clean_roof_patch(patch, pm, px):
+    """One roof's piece of aerial photo, tidied for the set: the band along
+    the outline (where the photo's lean and the trace leave a sliver of
+    street, wall or the neighbour's roof) takes the roof's own colour from
+    just inside it, and stains and hard shadows are toned down, so the roof
+    reads as one clean surface with a crisp edge."""
+    a = np.asarray(patch).astype(np.float32)
+    m = np.asarray(pm) > 0
+    if m.sum() < 30:
+        return patch
+    band = max(2, int(round(0.9 * px)))
+    inner = ndimage.binary_erosion(m, iterations=band)
+    if inner.sum() < 20:
+        inner = ndimage.binary_erosion(m, iterations=1)
+        if inner.sum() < 10:
+            inner = m
+    # Speckle out, then the roof's local colour (normalised blur over the
+    # inner part only, so nothing from outside the outline leaks in).
+    a = ndimage.median_filter(a, size=(3, 3, 1))
+    w = inner.astype(np.float32)
+    r = max(3.0, 2.0 * px)
+    den = ndimage.gaussian_filter(w, r) + 1e-4
+    local = np.stack([ndimage.gaussian_filter(a[..., k] * w, r) for k in range(3)], -1) / den[..., None]
+    mean = a[inner].mean(0)
+    local = np.where(den[..., None] > 0.02, local, mean)
+    # Tame the contrast round the local colour (stains, tar patches,
+    # shadows of the parapet), keeping roof kit and skylights readable.
+    d = a - local
+    # Dark blotches (tar, damp, the shadow of a parapet or a neighbour)
+    # are pulled up harder than bright roof kit is pulled down.
+    dark = np.clip(-d.mean(-1, keepdims=True) / 40.0, 0.0, 1.0)
+    out = local + d * (0.6 - 0.25 * dark)
+    # The edge band: the roof's own colour, faded in (half its overall
+    # colour, so a shadowed rim does not become a dark frame).
+    edge = 0.5 * local + 0.5 * mean
+    dist = ndimage.distance_transform_edt(m)
+    k = np.clip((dist - 1.0) / band, 0.0, 1.0)[..., None]
+    out = edge * (1 - k) + out * k
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
+
 def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     S = 6144
     px = S / (X1 - X0)
@@ -691,7 +732,7 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
                 dpm.polygon([(X - a0, Y - b0) for X, Y in xy(q.exterior.coords)], fill=255)
                 for hole in q.interiors:
                     dpm.polygon([(X - a0, Y - b0) for X, Y in xy(hole.coords)], fill=0)
-                canvas.paste(patch, (a0, b0), pm)
+                canvas.paste(clean_roof_patch(patch, pm, px), (a0, b0), pm)
                 mk.paste(255, (a0, b0, a1, b1), pm)
         mkf = np.asarray(mk).astype(np.float32)[..., None] / 255
         ph = np.asarray(canvas).astype(np.float32)
@@ -950,22 +991,93 @@ def photo_uv(x, y):
     return np.column_stack([(x - X0) / (X1 - X0), (Y1 - y) / (Y1 - Y0)])
 
 
+def tidy_outline(poly, r=0.45):
+    """Footprint without the small jogs, notches and spikes a traced
+    outline (or a 1 m raster region) carries: an opening and a closing of
+    r metres with square joins, then a light simplify. Keeps the polygon
+    when tidying would lose more than a few percent of it."""
+    try:
+        q = poly.buffer(-r, join_style=2).buffer(r, join_style=2)
+        q = q.buffer(r, join_style=2).buffer(-r, join_style=2)
+        q = q.simplify(0.25)
+    except Exception:
+        return poly
+    parts = [g for g in to_polys(q) if g.area > 1]
+    if not parts:
+        return poly
+    q = max(parts, key=lambda g: g.area)
+    if not q.is_valid or abs(q.area - poly.area) > 0.06 * poly.area:
+        return poly
+    return orient(q, 1.0)
+
+
+def skeleton_roof(poly, z, slope, t_max, dt=0.35):
+    """A roof whose slopes all rise at `slope` (m per m) from every eave,
+    up to t_max metres in from the eaves and flat above: hipped roofs
+    (t_max large), mansards (slope steep, t_max = the mansard's depth).
+    The contour lines are the outline offset inwards with mitred corners
+    (the straight skeleton's wavefront), so hips, valleys and ridges are
+    straight lines and the eave is crisp, not a mesh of random facets.
+    Returns (xy vertices, z, triangles) or None."""
+    rings, zs, holes = [], [], []
+    levels = np.arange(0.0, t_max + 1e-6, dt)
+    if levels[-1] < t_max - 0.05:
+        levels = np.append(levels, t_max)
+    for t in levels:
+        g = poly if t == 0 else poly.buffer(-t, join_style=2, mitre_limit=20.0)
+        ps = [orient(q.simplify(0.04), 1.0) for q in to_polys(g) if q.area > 0.3]
+        if not ps:
+            break
+        for q in ps:
+            for ring in [q.exterior] + list(q.interiors):
+                pts = np.asarray(ring.coords)[:-1, :2]
+                if len(pts) >= 3:
+                    rings.append(pts)
+                    zs.append(z + t * slope)
+    for hole in poly.interiors:
+        hp = Polygon(hole).representative_point()
+        holes.append([hp.x, hp.y])
+    verts, segs, vz = [], [], []
+    for pts, zz in zip(rings, zs):
+        b = len(verts)
+        n = len(pts)
+        verts.extend(pts.tolist())
+        vz.extend([zz] * n)
+        segs.extend([[b + i, b + (i + 1) % n] for i in range(n)])
+    data = {"vertices": np.array(verts), "segments": np.array(segs)}
+    if holes:
+        data["holes"] = np.array(holes)
+    try:
+        t = triangle.triangulate(data, "p")
+    except Exception:
+        return None
+    if "triangles" not in t or not len(t["triangles"]):
+        return None
+    v = t["vertices"]
+    vz = np.asarray(vz, float)
+    if len(v) > len(vz):
+        # Points triangle added where two contours touched: their height
+        # from the distance to the eaves.
+        extra = v[len(vz):]
+        d = shapely.distance(poly.boundary, shapely.points(extra[:, 0], extra[:, 1]))
+        vz = np.concatenate([vz, z + np.minimum(d, t_max) * slope])
+    return v, vz, t["triangles"]
+
+
 def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
     """photo: a dict {"mesh", "polys"}; the roof goes into that textured
     mesh, mapped onto the aerial photo painted into the ground map."""
     if tiled:
-        t = triangulate(poly, area=4)
+        slope = math.tan(math.radians(28))
+        t = skeleton_roof(poly, z, slope, (cap if cap else 99) / slope, dt=0.4)
+        if t is None:
+            return
+        v, zz, tri = t
     else:
         t = triangulate(poly)
-    if t is None:
-        return
-    v, tri = t
-    if tiled:
-        import shapely
-        dist = shapely.distance(poly.exterior if not poly.interiors else poly.boundary,
-                                shapely.points(v[:, 0], v[:, 1]))
-        zz = z + np.minimum(dist * math.tan(math.radians(28)), cap if cap else 99)
-    else:
+        if t is None:
+            return
+        v, tri = t
         zz = np.full(len(v), z)
     P = enu_fast(v[:, 0], v[:, 1], zz)
     if photo is not None:
@@ -1263,13 +1375,12 @@ def roof_kind(rgb):
 
 
 def add_mansard(m, poly, z, col, kind, slope_h=3.2, inset=2.4):
-    """Steep roof skirt rising slope_h over the first `inset` metres, then flat."""
-    t = triangulate(poly, area=6)
+    """Steep roof skirt rising slope_h over the first `inset` metres, then
+    flat, with straight hips at the corners and a crisp break line."""
+    t = skeleton_roof(poly, z, slope_h / inset, inset, dt=inset / 3)
     if t is None:
         return
-    v, tri = t
-    dist = shapely.distance(poly.boundary, shapely.points(v[:, 0], v[:, 1]))
-    zz = z + np.minimum(dist / inset, 1.0) * slope_h
+    v, zz, tri = t
     P = enu_fast(v[:, 0], v[:, 1], zz)
     m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, kind)
 
@@ -1446,6 +1557,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             poly = orient(poly.simplify(0.35), 1.0)
             if not isinstance(poly, Polygon) or poly.is_empty:
                 continue
+            poly = tidy_outline(poly)
             if TRACK is not None and poly.intersects(TRACK["keep_out"]) and not (
                     TUNNEL is not None and poly.intersects(TUNNEL["bld"])):
                 # Outlines that reach onto the track (arcades, kiosks,
@@ -1542,6 +1654,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                             m_ = ndimage.binary_opening(grid >= li, iterations=2)
                             region = cells_to_poly(m_, X0 + c0 * RES, Y1 - r0 * RES, 2 * RES)
                             region = region.intersection(prev).simplify(1.2)
+                            region = unary_union([tidy_outline(q, 0.8) for q in to_polys(region)])
                         parts = [p for p in to_polys(region) if p.area > 60
                                  and p.area / max(p.convex_hull.area, 1) > 0.55]
                         if not parts:
@@ -1635,7 +1748,18 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     if tiled:
                         eave = base + max(2.5, float(np.percentile(hrel, 40)))
                         add_walls(m, part, zb, eave, base, fh, col, kind, style=style)
-                        add_roof(m, part, eave, rcol, True, max(1.0, base + top - eave), photo=ph)
+                        # Eaves that overhang the walls by 40 cm, with a
+                        # thin fascia board and a soffit underneath.
+                        ov = part.buffer(0.4, join_style=2)
+                        if not isinstance(ov, Polygon):
+                            ov = part
+                        ov = orient(ov, 1.0)
+                        add_roof(m, ov, eave, rcol, True, max(1.0, base + top - eave), photo=ph)
+                        if ov is not part:
+                            fas = np.asarray(col) * 0.92
+                            add_walls(m, ov, eave - 0.16, eave, eave, 10, fas, PLAIN)
+                            for sp in to_polys(ov.difference(part)):
+                                add_roof(m, orient(sp, -1.0), eave - 0.16, fas * 0.8, False)
                     elif grand and last and part.area > 120 and hz > 8:
                         sk = min(3.4, hz * 0.25)
                         add_walls(m, part, zb, zt - sk, base, fh, col, kind, style=style)
