@@ -788,6 +788,13 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             for h in q.interiors:
                 dm_.polygon(xy(np.asarray(h.coords)), fill=0)
         img.paste(tuple(hexrgb(SW_PAVING)), (0, 0) + img.size, mk_)
+        mk2 = Image.new("L", img.size, 0)
+        dm2 = ImageDraw.Draw(mk2)
+        for q in to_polys(SW["pale"]):
+            dm2.polygon(xy(np.asarray(q.exterior.coords)), fill=255)
+            for h in q.interiors:
+                dm2.polygon(xy(np.asarray(h.coords)), fill=0)
+        img.paste(tuple(hexrgb(SW_PALE)), (0, 0) + img.size, ImageChops.multiply(mk_, mk2))
         d = ImageDraw.Draw(img)
     # Dashed centre lines on the larger roads.
     for t, pts in roads:
@@ -1659,7 +1666,7 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
                 m.tri(P[np.zeros_like(t)], P[t + 1], P[t], ac * 0.75, PLAIN)
                 # Valance: the hanging front flap.
                 fr = Polygon([P3 - u * 0.0, P2, P2 + out * 0.04, P3 + out * 0.04])
-                if fr.difference(keep).area > 0.01:
+                if not fr.intersects(keep):             # (the flap is never cut: whole or not at all)
                     add_walls(m, orient(fr, 1.0), base + 3.1 - 0.35 * 1.7 - 0.3, base + 3.1 - 0.35 * 1.7, base, 100, ac * 0.9, PLAIN)
     return n_
 
@@ -1829,6 +1836,16 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 continue
             hrel = sub[ins] - base
             top = float(np.percentile(hrel, 92))
+            if TRACK is not None and poly.distance(TRACK["line"]) < 8:
+                # A building down the slope below the circuit (Avenue
+                # d'Ostende's sea side): its roof is a terrace at the road's
+                # level at most, whatever stands on it (lamps, hedges, the
+                # street itself where the outline runs under it).
+                rp_ = poly.representative_point()
+                zr_ = float(TRACK["z"][TRACK["kd"].query([rp_.x, rp_.y])[1]])
+                if base < zr_ - 6 and np.median(hrel) + base < zr_ + 2:
+                    top = min(top, zr_ - 0.3 - base)
+                    hrel = np.minimum(hrel, top)
             props = f["properties"]
             # The LiDAR was flown in 2021; BD TOPO is current. A building
             # the scan does not see is either newer (Mareterra and its
@@ -1881,6 +1898,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                             region = cells_to_poly(m_, X0 + c0 * RES, Y1 - r0 * RES, 2 * RES)
                             region = region.intersection(prev).simplify(1.2)
                             region = unary_union([tidy_outline(q, 0.8) for q in to_polys(region)])
+                            region = region.intersection(prev)     # (tidying never grows it past the level below)
                         parts = [p for p in to_polys(region) if p.area > 60
                                  and p.area / max(p.convex_hull.area, 1) > 0.55]
                         if not parts:
@@ -2411,7 +2429,7 @@ def ostende_promenade(m, mnt, stats):
     tint = 0.95 + 0.08 * np.random.default_rng(7).random(len(idx) - 1)[:, None]
     stone = np.array(hexrgb("#e2d6bc"))[None] * tint
     cope = np.array(hexrgb("#efe7d6"))
-    d0 = TRACK_HALF + 0.45
+    d0 = TRACK_HALF + 0.1                 # from the kerb, as the pavements elsewhere (SW_START)
 
     def at(d, zz):
         return enu_fast(x + nx * d, y + ny * d, zz)
@@ -2422,6 +2440,12 @@ def ostende_promenade(m, mnt, stats):
     # Both faces: the pavement must show whichever way it is wound.
     m.tri(a, b, c, brick, PLAIN); m.tri(a, c, d_, brick, PLAIN)
     m.tri(a, c, b, brick, PLAIN); m.tri(a, d_, c, brick, PLAIN)
+    # The kerb's face down to the road.
+    kl, kh = at(d0, z - 0.3), at(d0, z + 0.12)
+    kc = np.array(hexrgb("#bdb5a6"))
+    a, b, c, d_ = kl[:-1], kl[1:], kh[1:], kh[:-1]
+    m.tri(a, b, c, kc, PLAIN); m.tri(a, c, d_, kc, PLAIN)
+    m.tri(a, c, b, kc, PLAIN); m.tri(a, d_, c, kc, PLAIN)
     # Ground beyond the parapet (the lowest within 3 m, as ground_mesh()
     # lowers it): the foot of the retaining wall.
     gx, gy = x + nx * (pd + 2.0), y + ny * (pd + 2.0)
@@ -2521,6 +2545,16 @@ def flatten_harbour(mnt):
     out = mnt.copy()
     zr, zc = rows[near], cols[near]
     cap = zt_all[j[near]] + 0.5 + 0.03 * np.maximum(0, d[near] - 6)
+    # Not on the hillside of a higher part of the lap: Avenue d'Ostende
+    # climbs right above the harbour stretch, and capped to the quay its
+    # pavements and the ground up to its buildings sank by up to 28 m.
+    hi = t["z"] >= 8.0
+    if TUNNEL is not None:
+        hi &= ~((s_ > TUNNEL["ta"] - 30) & (s_ < tb + 30))   # (not the tunnel's exit ramp down to the harbour)
+    if hi.any():
+        dh, _ = cKDTree(np.column_stack([t["x"][hi], t["y"][hi]])).query(
+            np.column_stack([cx[near], cy[near]]), distance_upper_bound=30)
+        cap = np.where(np.isfinite(dh) & (dh < d[near]), np.inf, cap)
     out[zr, zc] = np.minimum(out[zr, zc], cap)
     return out
 
@@ -2908,7 +2942,9 @@ SW = None
 SW_REACH = 40.0                       # m from the circuit's centre line
 SW_MAX_W = 14.0                       # m, widest pavement from a road's edge
 SW_KERB = 0.14                        # m above the road
-SW_PAVING = "#cfcac0"                 # pale stone paving, as in the street photos
+SW_PAVING = "#a5715f"                 # red brick pavers, as along Monaco's streets (Mapillary 2025)
+SW_PALE = "#d3cbbd"                    # pale stone round the Casino (Mapillary 2025)
+SW_PALE_S = (650, 1080)                # lap metres: Massenet, Casino square, Spélugues
 SW_SKIP_ROAD = ("footway", "path", "steps", "cycleway", "pedestrian", "track", "bridleway", "corridor")
 
 
@@ -2997,7 +3033,8 @@ def sidewalks_setup(ways, mnt, sea, feats):
         i = PROM["idx"]
         a = np.column_stack([t["x"][i], t["y"][i]])
         b = a + np.column_stack([PROM["nx"], PROM["ny"]]) * (PROM["pd"][:, None] + 1.5)
-        other.append(Polygon(np.r_[a, b[::-1]]).buffer(0))
+        prom_poly = Polygon(np.r_[a, b[::-1]]).buffer(0)
+        other.append(prom_poly)
     sea_poly = cells_to_poly(ndimage.zoom(sea.astype(np.uint8), 0.25, order=0) > 0, X0, Y1, RES * 4) if sea.any() else Polygon()
     walk = corridor.intersection(roads.buffer(SW_MAX_W)).difference(roads)
     walk = walk.difference(blds).difference(unary_union(other)).difference(sea_poly.buffer(4.5))   # quay_walls() lays the 4 m by the water
@@ -3013,7 +3050,7 @@ def sidewalks_setup(ways, mnt, sea, feats):
     lv[rr[level], cc[level]] = True
     # Patches of LiDAR humps (stands, vans) count as level if surrounded.
     lv = ndimage.binary_closing(lv, iterations=4) & mk
-    lv = ndimage.binary_opening(lv, iterations=2)
+    lv = ndimage.binary_opening(lv, iterations=1)       # (narrow pavements, 1.5 m, stay)
     # Only pieces that touch a road.
     lab, n = ndimage.label(lv)
     rmask = raster_mask(roads.buffer(1.0))
@@ -3025,15 +3062,271 @@ def sidewalks_setup(ways, mnt, sea, feats):
     walk_lv = cells_to_poly(lv1, X0, Y1, RES * k)
     # Back to the exact road edges and building faces where it meets them.
     walk = walk_lv.buffer(0.8, join_style=2).intersection(walk)
+    # Along the circuit itself, a continuous strip each side from the
+    # road's edge to the first building (a little under it), side street,
+    # garden or change of level, whatever the raster test above found.
+    stop = [sea_poly.buffer(1.0), unary_union(other)]
+    lap_w = []
+    for tg, p_, cl in ways:
+        hw = tg.get("highway")
+        if hw not in ROAD_W or len(p_) < 2 or tg.get("tunnel") or tg.get("bridge"):
+            continue
+        q_ = np.asarray(p_, dtype=float)
+        # Segment by segment (a way can follow the lap, then turn off it).
+        L_ = np.hypot(*np.diff(q_, axis=0).T)
+        k_ = np.maximum(1, np.ceil(L_ / 2.0)).astype(int)
+        dense = np.vstack([q_[i] + (q_[i + 1] - q_[i]) * np.linspace(0, 1, k_[i] + 1)[:-1, None]
+                           for i in range(len(q_) - 1)] + [q_[-1:]])
+        off_lap = track_dist(dense[:, 0], dense[:, 1]) > 4.0
+        lab_, nl_ = ndimage.label(off_lap)
+        for li in range(1, nl_ + 1):
+            ii = np.nonzero(lab_ == li)[0]
+            seg_ = dense[max(ii[0] - 1, 0):ii[-1] + 2]
+            if len(seg_) > 1:
+                stop.append(LineString(seg_).buffer(float(ROAD_W[hw]) / 2, cap_style=2))
+    strip = track_strip(blds, unary_union(stop), mnt)
+    walk = unary_union([walk, strip])
     walk = unary_union([q for q in to_polys(walk) if q.area > 6])
     if walk.is_empty:
         return None
+    def zfn(x, y):
+        """Kerb height: beside the circuit its own road's (a parallel street
+        up or down the slope must not tilt the pavement), elsewhere the
+        nearest street's."""
+        x, y = np.atleast_1d(x), np.atleast_1d(y)
+        dk_, jk_ = t["kd"].query(np.column_stack([x, y]))
+        return np.where(dk_ < SW_START + SW_STRIP_W + 1.0, t["z"][jk_], zroad(x, y)) + SW_KERB
+    skip = [blds.buffer(0.5), sea_poly.buffer(1.0)]
+    if QA is not None:
+        skip.append(QA["poly"].buffer(1.0))
+    if MT is not None:
+        skip.append(MT["zone"])
+    if TUNNEL is not None:
+        skip += [TUNNEL["ground"].buffer(6), TUNNEL["approach"]]
+    if PROM is not None:
+        skip.append(prom_poly.buffer(1.0))
+    steps = [LineString(p_).buffer(2.0) for tg, p_, cl in ways
+             if tg.get("highway") == "steps" and len(p_) > 1 and LineString(p_).intersects(corridor)]
+    walls = edge_walls(unary_union([walk, roads.intersection(corridor)]), mnt, zfn,
+                       unary_union(skip + steps))
     mk = raster_mask(walk)
     rr, cc = np.nonzero(mk)
     xs, ys = cell_xy(rr, cc)
-    mnt[rr, cc] = zroad(xs, ys) + SW_KERB
-    print(f"sidewalks: {walk.area:.0f} m2 along the circuit")
-    return {"poly": walk, "zw": lambda x, y: zroad(x, y) + SW_KERB}
+    mnt[rr, cc] = zfn(xs, ys)
+    print(f"sidewalks: {walk.area:.0f} m2 along the circuit, walls {walls['up_m']:.0f} m up, {walls['down_m']:.0f} m down")
+    # Red brick pavers almost everywhere; pale stone round the Casino.
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    i0, i1 = int(SW_PALE_S[0] / step), int(SW_PALE_S[1] / step)
+    pale_zone = LineString(np.column_stack([t["x"][i0:i1], t["y"][i0:i1]])).buffer(SW_REACH + SW_MAX_W)
+    return {"poly": walk, "pale": walk.intersection(pale_zone), "zw": zfn, "walls": walls}
+
+
+SW_WALL = "#d9ccb1"                    # Monaco's retaining walls: warm stone and render
+SW_WALL_REACH = 25.0                   # m from the circuit's centre line
+SW_CAP = 4.5                           # m of level ground drawn on top of a wall
+
+
+def edge_walls(U, mnt, zfn, skip):
+    """Round the edge of the street (circuit, roads and pavements), metre by
+    metre: where the ground beside it is more than a metre higher, a
+    retaining wall up to it; where it drops more than 1.2 m, a wall down
+    to it with a stone parapet. Left to the 3 m terrain grid these were
+    lumps of smeared photo rising from the kerb and slopes falling off it."""
+    R = Raster(mnt)
+    # Traffic islands and medians (small holes in the street) keep their
+    # kerbs: no walls round them.
+    U = unary_union([Polygon(pg.exterior, [h for h in pg.interiors if Polygon(h).area > 300])
+                     for pg in to_polys(U)])
+    A, B, OUT, KIND, TOP, LOW, ZW = [], [], [], [], [], [], []
+    for pg in to_polys(U):
+        for ring in [pg.exterior] + list(pg.interiors):
+            L = ring.length
+            if L < 4:
+                continue
+            ss = np.linspace(0, L, max(4, int(L / 1.0)) + 1)
+            q = shapely.line_interpolate_point(ring, ss)
+            P = np.column_stack([shapely.get_x(q), shapely.get_y(q)])
+            a, b = P[:-1], P[1:]
+            mid = (a + b) / 2
+            u = b - a
+            ln = np.linalg.norm(u, axis=1)
+            ok = ln > 0.05
+            a, b, mid, u, ln = a[ok], b[ok], mid[ok], u[ok], ln[ok]
+            u = u / ln[:, None]
+            out = np.column_stack([u[:, 1], -u[:, 0]])
+            t_ = mid + out * 0.3
+            flip = contains_xy(U, t_[:, 0], t_[:, 1])
+            out[flip] *= -1
+            near = track_dist(mid[:, 0], mid[:, 1]) < SW_WALL_REACH
+            o1 = mid + out * 1.0
+            near &= ~contains_xy(skip, o1[:, 0], o1[:, 1])
+            # Never a wall, or the ground on top of one, on the circuit (a
+            # side road's edge facing another leg of the lap).
+            for d_ in (1.0, 3.0, SW_CAP + 0.5):
+                px_, py_ = mid[:, 0] + out[:, 0] * d_, mid[:, 1] + out[:, 1] * d_
+                near &= track_dist(px_, py_) > TRACK_HALF + 1.0
+                near &= ~contains_xy(U, px_, py_)       # nor across a narrow gap on to another street
+            if not near.any():
+                continue
+            zw = zfn(mid[:, 0], mid[:, 1])
+            sm = np.stack([R.sample(mid[:, 0] + out[:, 0] * d, mid[:, 1] + out[:, 1] * d) for d in (1.0, 2.0, 3.0)])
+            fin = np.isfinite(sm).all(0)
+            top = np.where(fin, np.median(np.where(fin, sm, 0), 0), zw)
+            low = np.where(fin, np.min(np.where(fin, sm, 0), 0), zw)
+            up = near & fin & (top - zw > 0.7)
+            down = near & fin & ~up & (low < zw - 1.2)
+            # No single-metre walls or gaps.
+            up = ndimage.binary_opening(ndimage.binary_closing(up, iterations=1), iterations=1)
+            down = ndimage.binary_opening(ndimage.binary_closing(down, iterations=1), iterations=1) & ~up
+            top = ndimage.median_filter(np.minimum(top, zw + 12.0), 5, mode="nearest")
+            low = ndimage.minimum_filter1d(np.maximum(low, zw - 10.0), 3, mode="nearest")
+            k = up | down
+            A.append(a[k]); B.append(b[k]); OUT.append(out[k]); KIND.append(up[k])
+            TOP.append(np.maximum(top[k], zw[k] + 0.6)); LOW.append(low[k]); ZW.append(zw[k])
+    if not A:
+        return {"up_m": 0.0, "down_m": 0.0, "a": np.zeros((0, 2))}
+    w = {k_: np.concatenate(v) for k_, v in (("a", A), ("b", B), ("out", OUT), ("up", KIND), ("top", TOP),
+                                             ("low", LOW), ("zw", ZW))}
+    seg = np.linalg.norm(w["b"] - w["a"], axis=1)
+    w["up_m"], w["down_m"] = float(seg[w["up"]].sum()), float(seg[~w["up"]].sum())
+    return w
+
+
+def wall_ground(X, Y, Zm):
+    """Ground nodes just behind a retaining wall go down to the street, so
+    the 3 m grid's slope stays behind the wall (under its cap) instead of
+    rising in front of it."""
+    w = SW["walls"] if SW is not None else None
+    if w is None or not len(w["a"]) or not w["up"].any():
+        return Zm
+    from scipy.spatial import cKDTree
+    m_ = (w["a"][w["up"]] + w["b"][w["up"]]) / 2
+    o_ = w["out"][w["up"]]
+    zw = w["zw"][w["up"]]
+    d, j = cKDTree(m_).query(np.column_stack([X.ravel(), Y.ravel()]), distance_upper_bound=GRID + 0.6)
+    hit = np.isfinite(d)
+    jj = np.where(hit, j, 0)
+    behind = ((X.ravel() - m_[jj, 0]) * o_[jj, 0] + (Y.ravel() - m_[jj, 1]) * o_[jj, 1]) > -0.2
+    sel = (hit & behind).reshape(X.shape)
+    if sel.any():
+        Zm = Zm.copy()
+        Zm[sel] = np.minimum(Zm[sel], zw[jj.reshape(X.shape)[sel]] - 0.3)
+    return Zm
+
+
+def street_walls(gm, m, stats):
+    """The walls edge_walls() found: stone faces, a coping, level ground on
+    top of the retaining walls and a parapet along the drops."""
+    w = SW["walls"] if SW is not None else None
+    if w is None or not len(w["a"]):
+        return 0
+    rng = np.random.default_rng(11)
+    n = len(w["a"])
+    tint = (0.93 + 0.09 * rng.random(n))[:, None]
+    stone = np.array(hexrgb(SW_WALL))[None] * tint
+    cope = np.array(hexrgb("#ece4d3"))
+    a, b, o, zw, top, low = w["a"], w["b"], w["out"], w["zw"], w["top"], w["low"]
+    o3 = np.column_stack([o, np.zeros(n)])
+
+    def E(p, z):
+        return enu_fast(p[:, 0], p[:, 1], z)
+    up = w["up"]
+    if up.any():
+        A, B, O, Z0, Z1 = a[up], b[up], o3[up], zw[up] - 0.4, top[up]
+        _quad(m, E(A, Z0), E(B, Z0), E(B, Z1), E(A, Z1), stone[up], -O)
+        # Coping along the top, and the ground on top of the wall.
+        c0a, c0b = A - O[:, :2] * 0.05, B - O[:, :2] * 0.05
+        c1a, c1b = A + O[:, :2] * 0.35, B + O[:, :2] * 0.35
+        upz = np.tile([0.0, 0.0, 1.0], (up.sum(), 1))
+        _quad(m, E(c0a, Z1 + 0.06), E(c0b, Z1 + 0.06), E(c1b, Z1 + 0.06), E(c1a, Z1 + 0.06), cope, upz)
+        _quad(m, E(c0a, Z1 - 0.1), E(c0b, Z1 - 0.1), E(c0b, Z1 + 0.06), E(c0a, Z1 + 0.06), cope * 0.9, -O)
+        ca, cb = A + O[:, :2] * SW_CAP, B + O[:, :2] * SW_CAP
+        V = np.concatenate([c1a, c1b, cb, ca])
+        Z = np.concatenate([Z1, Z1, Z1, Z1]) + 0.04
+        k = up.sum()
+        idx = np.concatenate([np.column_stack([np.arange(k), np.arange(k) + k, np.arange(k) + 2 * k]),
+                              np.column_stack([np.arange(k), np.arange(k) + 2 * k, np.arange(k) + 3 * k])])
+        uv = np.column_stack([(V[:, 0] - X0) / (X1 - X0), (Y1 - V[:, 1]) / (Y1 - Y0)])
+        P = enu_fast(V[:, 0], V[:, 1], Z)
+        # Wound to face up (the ring runs either way round).
+        e1, e2 = P[idx[:, 1]] - P[idx[:, 0]], P[idx[:, 2]] - P[idx[:, 0]]
+        fl = np.cross(e1, e2)[:, 2] < 0
+        idx[fl] = idx[fl][:, [0, 2, 1]]
+        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=idx)
+    dn = ~up
+    if dn.any():
+        A, B, O = a[dn], b[dn], o3[dn]
+        Z0, Zt = low[dn] - 0.3, zw[dn] + 0.9
+        tall = (zw[dn] - low[dn]) > 1.5
+        Zt = np.where(tall, Zt, zw[dn])
+        Ao, Bo = A + O[:, :2] * 0.3, B + O[:, :2] * 0.3
+        _quad(m, E(Ao, Z0), E(Bo, Z0), E(Bo, Zt), E(Ao, Zt), stone[dn] * 0.95, O)
+        if tall.any():
+            t_ = tall
+            _quad(m, E(A[t_], zw[dn][t_] - 0.2), E(B[t_], zw[dn][t_] - 0.2), E(B[t_], Zt[t_]), E(A[t_], Zt[t_]),
+                  stone[dn][t_], -O[t_])
+            upz = np.tile([0.0, 0.0, 1.0], (t_.sum(), 1))
+            ci, cb_ = A[t_] - O[t_, :2] * 0.04, B[t_] - O[t_, :2] * 0.04
+            co, cob = Ao[t_] + O[t_, :2] * 0.04, Bo[t_] + O[t_, :2] * 0.04
+            _quad(m, E(ci, Zt[t_] + 0.06), E(cb_, Zt[t_] + 0.06), E(cob, Zt[t_] + 0.06), E(co, Zt[t_] + 0.06), cope, upz)
+    stats["street_wall_up_m"] = int(w["up_m"])
+    stats["street_wall_down_m"] = int(w["down_m"])
+    return n
+
+
+SW_START = TRACK_HALF + 0.1            # the pavement's kerb, just past the circuit's edge line
+SW_STRIP_W = 8.0                       # m, the widest strip along the lap (wider places come from the raster test)
+
+
+def track_strip(blds, stop, mnt):
+    """Pavement both sides of the circuit, 2 m by 2 m along the lap: from
+    the kerb out to whatever comes first, a building (the strip runs half
+    a metre under it), a side street, a garden or a quay (stop), or the
+    ground more than a metre off the kerb's level (a wall: edge_walls()
+    builds it); at most SW_MAX_W wide."""
+    t = TRACK
+    x, y, z = t["x"], t["y"], t["z"]
+    n = len(x)
+    dx = np.gradient(np.r_[x[-1], x, x[0]])[1:-1]
+    dy = np.gradient(np.r_[y[-1], y, y[0]])[1:-1]
+    ln = np.hypot(dx, dy) + 1e-9
+    lx, ly = -dy / ln, dx / ln
+    ds = SW_START + np.arange(0.0, SW_STRIP_W, 0.25)
+    R = Raster(mnt)
+    quads = []
+    for side in (1.0, -1.0):
+        PX = x[:, None] + side * lx[:, None] * ds[None]
+        PY = y[:, None] + side * ly[:, None] * ds[None]
+        fx, fy = PX.ravel(), PY.ravel()
+        inb = contains_xy(blds, fx, fy).reshape(PX.shape)
+        ins = contains_xy(stop, fx, fy).reshape(PX.shape)
+        g = R.sample(fx, fy).reshape(PX.shape)
+        off = ~np.isfinite(g) | (np.abs(g - (z[:, None] + SW_KERB)) > 1.0)
+        # (Another leg of the lap is a stop too.)
+        oth = (track_dist(fx, fy).reshape(PX.shape) < ds[None] - 1.0)
+        end = inb | ins | off | oth
+        first = np.where(end.any(1), end.argmax(1), len(ds))
+        w = ds[np.minimum(first, len(ds) - 1)] - SW_START
+        w = np.where(first >= len(ds), SW_STRIP_W, w)
+        hitb = (first < len(ds)) & inb[np.arange(n), np.minimum(first, len(ds) - 1)]
+        w = np.where(hitb, w + 0.5, w)
+        w = ndimage.median_filter(w, 3, mode="wrap")
+        for i in range(n):
+            j = (i + 1) % n
+            if w[i] < 0.6 or w[j] < 0.6:
+                continue
+            a0 = (x[i] + side * lx[i] * SW_START, y[i] + side * ly[i] * SW_START)
+            b0 = (x[j] + side * lx[j] * SW_START, y[j] + side * ly[j] * SW_START)
+            b1 = (x[j] + side * lx[j] * (SW_START + w[j]), y[j] + side * ly[j] * (SW_START + w[j]))
+            a1 = (x[i] + side * lx[i] * (SW_START + w[i]), y[i] + side * ly[i] * (SW_START + w[i]))
+            q = Polygon([a0, b0, b1, a1]).buffer(0.05, join_style=2)
+            if q.is_valid and not q.is_empty:
+                quads.append(q)
+    strip = unary_union(quads).difference(t["line"].buffer(SW_START))
+    if TUNNEL is not None:
+        strip = strip.difference(TUNNEL["ground"].buffer(6)).difference(TUNNEL["approach"])
+    strip = strip.difference(blds.buffer(-0.5) if not blds.is_empty else blds)
+    return unary_union([q for q in to_polys(strip) if q.area > 4])
 
 
 def sidewalk_ground(X, Y, Zm, Zs):
@@ -3048,7 +3341,7 @@ def sidewalk_ground(X, Y, Zm, Zs):
         # the road and the barriers).
         Zm[ins] = np.minimum(Zm[ins], zw - 0.16)
         Zs[ins] = zw
-    return Zm, Zs
+    return wall_ground(X, Y, Zm), Zs
 
 
 def sidewalks(gm, m, stats):
@@ -3206,7 +3499,8 @@ def track_audit(named, half=TRACK_HALF - 0.2, lift=0.1, tol=-0.08, over=4.5):
             h = P[ins, 2] - C[j[ins], 2]
             ok = keep(sq[j[ins]], h)
             for k in np.nonzero(ok)[0]:
-                hits.append((float(sq[j[ins]][k]), float(d[ins][k]), float(h[k]), name + " vertex"))
+                hits.append((float(sq[j[ins]][k]), float(d[ins][k]), float(h[k]),
+                             name + " vertex (%.0f, %.0f)" % tuple(P[ins][k, :2])))
         # Triangles over the corridor, bucketed on a 2 m grid.
         T = P[I]
         cen = T[:, :, :2].mean(1)
@@ -5032,6 +5326,13 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
         except ValueError:
             pass
         W = float(np.clip(W, 3.0, 20.0))
+        if TRACK is not None:
+            # The circuit's own streets reach the pavements' kerbs (no strip
+            # of bare ground between the tarmac and the kerb).
+            q_ = np.asarray(p_, dtype=float)
+            med_ = float(np.median(track_dist(q_[:, 0], q_[:, 1])))
+            if med_ < 2.5:
+                W = max(W, 2 * (SW_START + 0.3 + med_))
         roads.append((t, LineString(p_), W))
     # Junctions: points shared by two roads (markings stop there).
     cnt = {}
@@ -5091,7 +5392,10 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
         if TRACK is not None:
             # On and beside the circuit, stay under the tours' modelled road.
             dk, jk = TRACK["kd"].query(np.column_stack([X.ravel(), Y.ravel()]))
-            zt = np.where(dk < TRACK_HALF + 2.0, TRACK["z"][jk] - 0.06, np.inf).reshape(Z.shape)
+            # (A little lower towards the edges: on a climb the nearest lap
+            # point's height is not quite the road's beside it.)
+            zt = np.where(dk < TRACK_HALF + 4.0, TRACK["z"][jk] - 0.06 - 0.08 * np.clip(dk - 3.0, 0, 1),
+                          np.inf).reshape(Z.shape)
             Z = np.minimum(Z, zt)
         jd = jkd.query(P)[0] if jkd is not None else np.full(len(P), 99.0)
         jf = np.clip((jd - (half + 2.5)) / 3.0, 0, 1)
@@ -5219,6 +5523,9 @@ def street_lamps(m, ways, gz, bmask, sea):
             z = ground(x, y)
             add_walls(m, box(x - 0.08, y - 0.08, x + 0.08, y + 0.08), z - 0.3, z + 5.4, z, 10, post_c, PLAIN)
             hx, hy = x - nx_ * 0.7, y - ny_ * 0.7          # the head leans over the road
+            if not off_track(hx, hy):
+                placed.pop()                                # (never over the circuit)
+                continue
             arm = LineString([(x, y), (hx, hy)]).buffer(0.05, cap_style=2)
             add_walls(m, orient(arm, 1.0), z + 5.3, z + 5.4, z, 10, post_c, PLAIN)
             head = box(hx - 0.28, hy - 0.28, hx + 0.28, hy + 0.28)
@@ -5423,6 +5730,7 @@ def main():
     if SW is None:
         pavements(bm, sea, bmask, stats)
     print("sidewalks…", sidewalks(gm, bm, stats))
+    print("street walls…", street_walls(gm, bm, stats))
     print("starting grid…", start_grid(bm, stats), "slots")
     ostende_promenade(bm, mnt_f, stats)
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
