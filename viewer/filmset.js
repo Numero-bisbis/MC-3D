@@ -123,6 +123,26 @@
               }
             }
           }
+          {
+            // Cliffs: steep ground is bare limestone, pale and layered,
+            // with the plants that cling to it, not the aerial photo
+            // smeared down a wall.
+            vec3 upEC = normalize(czm_normal * vec3(0.0, 1.0, 0.0));
+            float slope = dot(normalize(fsInput.attributes.normalEC), upEC);
+            float steep = 1.0 - smoothstep(0.5, 0.74, slope);
+            if (steep > 0.0) {
+              vec3 p = fsInput.attributes.positionMC;
+              vec3 d = material.diffuse;
+              float veg = smoothstep(0.01, 0.05, d.g - max(d.r, d.b)) * smoothstep(0.35, 0.65, vnoise(p.xz * 0.21 + p.y * 0.13));
+              float strata = vnoise(vec2(p.y * 1.1 + vnoise(p.xz * 0.12) * 2.5, 0.37));
+              float blotch = vnoise(p.xz * 0.33 + vec2(p.y * 0.27));
+              float crack = smoothstep(0.78, 0.9, vnoise(vec2(dot(p.xz, vec2(0.7, 0.7)) * 1.9, p.y * 0.6)));
+              vec3 lime = czm_srgbToLinear(vec3(0.80, 0.75, 0.65));
+              vec3 rock = lime * mix(0.78, 1.06, blotch) * mix(0.86, 1.04, strata) * (1.0 - 0.35 * crack);
+              rock = mix(rock, rock * vec3(1.06, 0.95, 0.80), smoothstep(0.55, 0.8, vnoise(p.xz * 0.09 + p.y * 0.05)) * 0.6);
+              material.diffuse = mix(d, rock, steep * (1.0 - 0.7 * veg));
+            }
+          }
           if (u_night > 0.0) {
             float L = texture(u_lights, vec2(fsInput.attributes.texCoord_0.x, 1.0 - fsInput.attributes.texCoord_0.y)).r;
             material.emissive = material.diffuse * vec3(1.0, 0.78, 0.5) * L * 2.4 * u_night;
