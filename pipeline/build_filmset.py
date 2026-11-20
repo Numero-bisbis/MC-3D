@@ -59,7 +59,7 @@ import numpy as np
 import pyproj
 import shapely
 import triangle
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 from scipy import ndimage
 from shapely import contains_xy
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box, shape
@@ -483,6 +483,7 @@ def ground_mesh(mnt, sea):
             _, j = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]])).query(np.column_stack([X[og], Y[og]]))
             Z[og] = np.minimum(Z[og], TUNNEL["z"][j] - 1.2)
     Z, Zs = quai_ground(X, Y, Z)
+    Z, Zs = sidewalk_ground(X, Y, Z, Zs)
     land = valid[r, c] > 0.5
     # A lone land node among sea nodes (the end of a jetty, a quay corner)
     # would stand up from the sea floor as a needle: leave it to the sea.
@@ -691,6 +692,22 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         k = t.get("leisure") or t.get("landuse") or t.get("natural")
         if k in GREEN:
             poly(pts, GREEN[k])
+    # Along the circuit, green comes only from mapped gardens: the photo's
+    # green beside the road is tree shade, awnings and planters, and painted
+    # as lawn it smeared the pavements.
+    street = Image.new("L", (S, S), 0)
+    if TRACK is not None:
+        ds_ = ImageDraw.Draw(street)
+        for q in to_polys(TRACK["line"].buffer(30.0)):
+            ds_.polygon(xy(np.asarray(q.exterior.coords)), fill=255)
+            for h in q.interiors:
+                ds_.polygon(xy(np.asarray(h.coords)), fill=0)
+        for t, pts, closed in ways:
+            k = t.get("leisure") or t.get("landuse") or t.get("natural")
+            if closed and k in GREEN and len(pts) >= 3:
+                ds_.polygon(xy(pts), fill=0)
+        street = street.filter(ImageFilter.GaussianBlur(4))
+    keep_green = street.point(lambda v: 255 - v)
     # Lawns, planters and verges nobody mapped: green in the aerial photo
     # (low plants; the LiDAR canopy below handles trees).
     if ortho is not None:
@@ -699,13 +716,14 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         veg = (exg > 16) & (o.mean(2) < 170)
         veg = ndimage.binary_opening(veg, iterations=1)
         vi = Image.fromarray((veg * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2))
-        img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#86a65a"))), img, vi.point(lambda v: int(v * 0.85)))
+        vi = ImageChops.multiply(vi.point(lambda v: int(v * 0.85)), keep_green)
+        img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#86a65a"))), img, vi)
         d = ImageDraw.Draw(img)
     # Ground under the LiDAR tree canopy: a darker garden green.
     can = Image.fromarray((canopy * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
     can = can.filter(ImageFilter.GaussianBlur(3))
     img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#6d8a4c"))), img,
-                          can.point(lambda v: int(min(255, v * 0.85))))
+                          ImageChops.multiply(can.point(lambda v: int(min(255, v * 0.85))), keep_green))
     d = ImageDraw.Draw(img)
     # Squares and pedestrian areas.
     for t, pts, closed in ways:
@@ -760,6 +778,17 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             poly(np.asarray(q.exterior.coords), QA_ASPHALT)
         for q in to_polys(QA["walk"]):
             poly(np.asarray(q.exterior.coords), QA_WALK)
+    if SW is not None:
+        # Pavements along the circuit: paving (what is in their holes,
+        # gardens and planters, stays).
+        mk_ = Image.new("L", img.size, 0)
+        dm_ = ImageDraw.Draw(mk_)
+        for q in to_polys(SW["poly"]):
+            dm_.polygon(xy(np.asarray(q.exterior.coords)), fill=255)
+            for h in q.interiors:
+                dm_.polygon(xy(np.asarray(h.coords)), fill=0)
+        img.paste(tuple(hexrgb(SW_PAVING)), (0, 0) + img.size, mk_)
+        d = ImageDraw.Draw(img)
     # Dashed centre lines on the larger roads.
     for t, pts in roads:
         if t["highway"] not in ("primary", "secondary", "tertiary", "trunk"):
@@ -2867,6 +2896,250 @@ def quai_albert(gm, m, tm, ways, pts, mntR, stats, fps=()):
         stats["trees"] += 1
     stats["quai_pines"] = len(trunk)
     return len(trunk)
+
+
+# --------------------------------------------------------------- sidewalks ----
+# Around the circuit the space between the road and the buildings is
+# pavement: flat paving a kerb above the road, up to the shop fronts. Left
+# to the 3 m terrain grid and the aerial photo it read as sand banks and
+# green smears (tree shadows, awnings) with bumps where the 2021 LiDAR saw
+# Grand Prix stands, cabins and parked lorries.
+SW = None
+SW_REACH = 40.0                       # m from the circuit's centre line
+SW_MAX_W = 14.0                       # m, widest pavement from a road's edge
+SW_KERB = 0.14                        # m above the road
+SW_PAVING = "#cfcac0"                 # pale stone paving, as in the street photos
+SW_SKIP_ROAD = ("footway", "path", "steps", "cycleway", "pedestrian", "track", "bridleway", "corridor")
+
+
+def _road_polys(ways):
+    """OSM carriageways at their mapped width (as road_surfaces() draws
+    them) with heights sampled along their centre lines."""
+    polys, P = [], []
+    for t, p_, closed in ways:
+        hw = t.get("highway")
+        if hw not in ROAD_W or t.get("tunnel") in ("yes", "building_passage") or t.get("area") == "yes" \
+                or t.get("layer", "0") not in ("0",) or t.get("bridge") or len(p_) < 2:
+            continue
+        W = float(ROAD_W[hw])
+        try:
+            if t.get("width"):
+                W = float(t["width"].replace("m", "").strip())
+            elif t.get("lanes"):
+                W = max(W, 3.1 * float(t["lanes"]))
+        except ValueError:
+            pass
+        W = float(np.clip(W, 3.0, 20.0))
+        ln = LineString(p_)
+        polys.append(ln.buffer(W / 2, cap_style=2, join_style=2))
+        for s in np.arange(0, ln.length + 0.01, 2.0):
+            q = ln.interpolate(s)
+            P.append((q.x, q.y))
+    return polys, np.array(P) if P else np.zeros((0, 2))
+
+
+def sidewalks_setup(ways, mnt, sea, feats):
+    """Works out where the pavements are along the circuit and sets the
+    terrain model there to kerb height above the nearest road."""
+    if TRACK is None:
+        return None
+    t = TRACK
+    corridor = t["line"].buffer(SW_REACH)
+    rp, rpts = _road_polys(ways)
+    track_poly = t["line"].buffer(TRACK_HALF + 0.35)
+    roads = unary_union([q for q in rp if q.intersects(corridor)] + [track_poly])
+    # Road heights: on and near the circuit the lap's own (the modelled
+    # road); elsewhere the LiDAR ground along the road's centre line.
+    sel = contains_xy(corridor.buffer(SW_MAX_W + 5), rpts[:, 0], rpts[:, 1]) if len(rpts) else np.zeros(0, bool)
+    rpts = rpts[sel]
+    zr = Raster(ndimage.median_filter(np.nan_to_num(mnt, nan=0.0), 5)).sample(rpts[:, 0], rpts[:, 1])
+    dk, jk = t["kd"].query(rpts)
+    zr = np.where(dk < TRACK_HALF + 4.0, t["z"][jk], zr)
+    ok = np.isfinite(zr)
+    rx = np.r_[rpts[ok, 0], t["x"]]
+    ry = np.r_[rpts[ok, 1], t["y"]]
+    rz = np.r_[zr[ok], t["z"]]
+    from scipy.spatial import cKDTree
+    rkd = cKDTree(np.column_stack([rx, ry]))
+
+    def zroad(x, y):
+        _, j = rkd.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
+        return rz[j]
+
+    # What is not pavement: buildings, water, gardens, car parks, other
+    # people's places (Quai Albert 1er, Mareterra, the Ostende promenade,
+    # the tunnel).
+    blds = unary_union([shapely.force_2d(shape(f["geometry"])).buffer(0) for f in feats
+                        if shape(f["geometry"]).intersects(corridor)])
+    GREENK = ("grass", "park", "garden", "wood", "forest", "meadow", "scrub", "orchard", "playground", "pitch",
+              "flowerbed", "village_green")
+    other = []
+    for tg, p_, closed in ways:
+        if not closed or len(p_) < 4:
+            continue
+        k = tg.get("leisure") or tg.get("landuse") or tg.get("natural")
+        if k in GREENK or tg.get("amenity") == "parking" or tg.get("leisure") in ("swimming_pool", "sports_centre") \
+                or tg.get("amenity") == "fountain" or (tg.get("highway") and tg.get("area") == "yes"
+                                                       and tg.get("highway") != "pedestrian"):
+            g = Polygon(p_).buffer(0)
+            if g.intersects(corridor):
+                other.append(g)
+    if QA is not None:
+        other.append(QA["poly"].buffer(0.3))
+    if MT is not None:
+        other.append(MT["zone"])
+    if TUNNEL is not None:
+        other.append(TUNNEL["ground"].buffer(6))
+        other.append(TUNNEL["approach"])
+        if "open_ground" in TUNNEL:
+            other.append(TUNNEL["open_ground"])
+    if PROM is not None:
+        i = PROM["idx"]
+        a = np.column_stack([t["x"][i], t["y"][i]])
+        b = a + np.column_stack([PROM["nx"], PROM["ny"]]) * (PROM["pd"][:, None] + 1.5)
+        other.append(Polygon(np.r_[a, b[::-1]]).buffer(0))
+    sea_poly = cells_to_poly(ndimage.zoom(sea.astype(np.uint8), 0.25, order=0) > 0, X0, Y1, RES * 4) if sea.any() else Polygon()
+    walk = corridor.intersection(roads.buffer(SW_MAX_W)).difference(roads)
+    walk = walk.difference(blds).difference(unary_union(other)).difference(sea_poly.buffer(4.5))   # quay_walls() lays the 4 m by the water
+    # Only where the ground is near the road's level: a cliff, a garden
+    # wall or a lower quay beside the road stays as it is.
+    mk = raster_mask(walk)
+    rr, cc = np.nonzero(mk)
+    xs, ys = cell_xy(rr, cc)
+    zw = zroad(xs, ys) + SW_KERB
+    g = mnt[rr, cc]
+    level = np.isfinite(g) & (np.abs(g - zw) < 1.2)
+    lv = np.zeros_like(mk)
+    lv[rr[level], cc[level]] = True
+    # Patches of LiDAR humps (stands, vans) count as level if surrounded.
+    lv = ndimage.binary_closing(lv, iterations=4) & mk
+    lv = ndimage.binary_opening(lv, iterations=2)
+    # Only pieces that touch a road.
+    lab, n = ndimage.label(lv)
+    rmask = raster_mask(roads.buffer(1.0))
+    touch = np.unique(lab[lv & rmask])
+    lv &= np.isin(lab, touch[touch > 0])
+    k = 2                                         # polygons from a 1 m grid
+    h_, w_ = lv.shape[0] // k * k, lv.shape[1] // k * k
+    lv1 = lv[:h_, :w_].reshape(h_ // k, k, w_ // k, k).mean(axis=(1, 3)) >= 0.5
+    walk_lv = cells_to_poly(lv1, X0, Y1, RES * k)
+    # Back to the exact road edges and building faces where it meets them.
+    walk = walk_lv.buffer(0.8, join_style=2).intersection(walk)
+    walk = unary_union([q for q in to_polys(walk) if q.area > 6])
+    if walk.is_empty:
+        return None
+    mk = raster_mask(walk)
+    rr, cc = np.nonzero(mk)
+    xs, ys = cell_xy(rr, cc)
+    mnt[rr, cc] = zroad(xs, ys) + SW_KERB
+    print(f"sidewalks: {walk.area:.0f} m2 along the circuit")
+    return {"poly": walk, "zw": lambda x, y: zroad(x, y) + SW_KERB}
+
+
+def sidewalk_ground(X, Y, Zm, Zs):
+    """Ground nodes under the pavement slab: just below it."""
+    if SW is None:
+        return Zm, Zs
+    ins = contains_xy(SW["poly"], X, Y)
+    if ins.any():
+        zw = SW["zw"](X[ins], Y[ins])
+        Zm = Zm.copy(); Zs = Zs.copy()
+        # Only ever lowered (the track's own rules keep the ground under
+        # the road and the barriers).
+        Zm[ins] = np.minimum(Zm[ins], zw - 0.16)
+        Zs[ins] = zw
+    return Zm, Zs
+
+
+def sidewalks(gm, m, stats):
+    """The pavement slab (painted from the ground map) with a kerb face
+    round its edge."""
+    if SW is None:
+        return 0
+    kerb = np.array(hexrgb("#bdb5a6"))
+    n_ = 0
+    for pg in to_polys(SW["poly"]):
+        pg = orient(pg, 1.0)
+        tr = triangulate(pg, area=8)
+        if tr is None:
+            continue
+        v, tri = tr
+        z = SW["zw"](v[:, 0], v[:, 1])
+        P = enu_fast(v[:, 0], v[:, 1], z)
+        uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri)
+        for ring in [pg.exterior] + list(pg.interiors):
+            r = np.asarray(ring.coords)[:, :2]
+            a, b = r[:-1], r[1:]
+            L = np.linalg.norm(b - a, axis=1)
+            keep = L > 0.05
+            a, b = a[keep], b[keep]
+            if not len(a):
+                continue
+            u = (b - a) / np.linalg.norm(b - a, axis=1)[:, None]
+            out = np.column_stack([u[:, 1], -u[:, 0]])
+            if ring is not pg.exterior:
+                out = -out
+            za, zb = SW["zw"](a[:, 0], a[:, 1]), SW["zw"](b[:, 0], b[:, 1])
+            o3 = np.column_stack([out, np.zeros(len(a))])
+            _quad(m, enu_fast(a[:, 0], a[:, 1], za - 0.4), enu_fast(b[:, 0], b[:, 1], zb - 0.4),
+                  enu_fast(b[:, 0], b[:, 1], zb), enu_fast(a[:, 0], a[:, 1], za), kerb, o3)
+        n_ += 1
+    stats["sidewalk_m2"] = int(SW["poly"].area)
+    return n_
+
+
+# ----------------------------------------------------------- starting grid ----
+# The start line and the 20 grid slots behind it on Boulevard Albert 1er,
+# painted on the film set's road as on the tours' modelled track
+# (clean-track.js GRID): 8 m apart, alternating sides, pole on the left.
+GRID_FIRST, GRID_GAP, GRID_SLOTS, GRID_OFF, GRID_HALF = 6.0, 8.0, 20, 2.4, 1.15
+
+
+def start_grid(m, stats):
+    if TRACK is None:
+        return 0
+    t = TRACK
+    n = len(t["x"])
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    L = n * step
+    dx = np.gradient(np.r_[t["x"][-1], t["x"], t["x"][0]])[1:-1]
+    dy = np.gradient(np.r_[t["y"][-1], t["y"], t["y"][0]])[1:-1]
+    ln = np.hypot(dx, dy) + 1e-9
+    white = np.array(hexrgb("#ecebe6"))
+
+    def at(b):
+        """Point, forward and left vectors and road height b metres before the line."""
+        f = ((L - b) % L) / step
+        i = int(f) % n
+        j = (i + 1) % n
+        u = f - int(f)
+        x = t["x"][i] * (1 - u) + t["x"][j] * u
+        y = t["y"][i] * (1 - u) + t["y"][j] * u
+        z = t["z"][i] * (1 - u) + t["z"][j] * u
+        fw = np.array([dx[i], dy[i]]) / ln[i]
+        return np.array([x, y]), fw, np.array([-fw[1], fw[0]]), z
+
+    def patch(b0, b1, w0, w1):
+        """A painted rectangle from b0 to b1 m before the line, w0..w1 m
+        left of the centre (negative: right)."""
+        c0, f0, l0, z0 = at(b0)
+        c1, f1, l1, z1 = at(b1)
+        pts = [c0 + l0 * w0, c0 + l0 * w1, c1 + l1 * w1, c1 + l1 * w0]
+        P = enu_fast(np.array([p[0] for p in pts]), np.array([p[1] for p in pts]),
+                     np.array([z0, z0, z1, z1]) - 0.035)
+        up = np.tile([0.0, 0.0, 1.0], (1, 1))
+        _quad(m, P[None, 0], P[None, 1], P[None, 2], P[None, 3], white, up)
+
+    patch(-0.175, 0.175, -TRACK_HALF + 0.2, TRACK_HALF - 0.2)       # the line
+    for k in range(GRID_SLOTS):
+        b = GRID_FIRST + k * GRID_GAP
+        c = (1 if k % 2 == 0 else -1) * GRID_OFF                  # left is +
+        patch(b, b + 0.15, c - GRID_HALF, c + GRID_HALF)
+        for e in (c - GRID_HALF, c + GRID_HALF):
+            patch(b, b + 1.1, e - 0.07, e + 0.07)
+    stats["grid_slots"] = GRID_SLOTS
+    return GRID_SLOTS
 
 
 def track_dist(x, y):
@@ -5093,6 +5366,11 @@ def main():
         photo = {"mesh": Mesh(), "polys": [], "lean": lean, "edges": edges}
     facades = FacadeData(ways)
     feats = mareterra_feats(feats, ways)
+    global SW
+    SW = sidewalks_setup(ways, mnt_f, sea, feats)
+    if SW is not None and mnt_ground is not mnt_f:
+        m_ = raster_mask(SW["poly"])
+        mnt_ground[m_] = mnt_f[m_]
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -5142,7 +5420,10 @@ def main():
     drive = drive_map(gz, bmask, sea)
     stats["lamps"] = street_lamps(bm, ways, gz, bmask, sea)
     print("crowds…", crowds(bm, mnt_f, sea, bmask, stats))
-    pavements(bm, sea, bmask, stats)
+    if SW is None:
+        pavements(bm, sea, bmask, stats)
+    print("sidewalks…", sidewalks(gm, bm, stats))
+    print("starting grid…", start_grid(bm, stats), "slots")
     ostende_promenade(bm, mnt_f, stats)
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     print("Quai Albert 1er…", quai_albert(gm, bm, tm, ways, pts, Raster(mnt_f), stats, fps), "pines")

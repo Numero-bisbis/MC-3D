@@ -181,7 +181,12 @@
     float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
       return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }`;
+  // Starting grid (metres behind the line): first slot, spacing, how many,
+  // slot centre off the middle of the track, half the slot's width.
+  const GRID = { first: 6.0, gap: 8.0, slots: 20, off: 2.4, half: 1.15 };
   const ROAD = `${NOISE}
+    const float GRID_FIRST = ${GRID.first.toFixed(2)}, GRID_GAP = ${GRID.gap.toFixed(2)}, GRID_SLOTS = ${GRID.slots.toFixed(1)};
+    const float GRID_OFF = ${GRID.off.toFixed(2)}, GRID_HALF = ${GRID.half.toFixed(2)};
     czm_material czm_getMaterial(czm_materialInput mi) {
       czm_material m = czm_getDefaultMaterial(mi);
       float s = mi.st.s, t = mi.st.t, w = (t - 0.5) * 2.0 * halfW;  // metres from the centre
@@ -193,6 +198,19 @@
       c = mix(c, vec3(0.86), edge);
       float sl = min(s, len - s);                                   // start / finish line
       c = mix(c, vec3(0.92), step(sl, 0.35));
+      // The starting grid behind the line: 20 slots, 8 m apart, alternating
+      // sides (pole on the left), each a white bar with two short legs
+      // reaching back.
+      float rel = len - s - GRID_FIRST;
+      float k = floor(rel / GRID_GAP + 0.5);
+      if (k >= 0.0 && k < GRID_SLOTS) {
+        float d = rel - k * GRID_GAP;
+        float c0 = (mod(k, 2.0) < 0.5 ? -1.0 : 1.0) * GRID_OFF;
+        float a = abs(w - c0);
+        float bar = step(0.0, d) * step(d, 0.15) * step(a, GRID_HALF);
+        float legs = step(0.0, d) * step(d, 1.1) * step(abs(a - GRID_HALF), 0.07);
+        c = mix(c, vec3(0.92), max(bar, legs));
+      }
       float inT = smoothstep(tunA - 3.0, tunA + 6.0, s) * (1.0 - smoothstep(tunB - 6.0, tunB + 3.0, s));
       float lamp = 0.75 + 0.25 * (1.0 - smoothstep(0.0, 0.5, abs(fract(s / 2.4) - 0.5)));
       c = mix(c, c * vec3(0.95, 0.82, 0.62) * 0.75 * lamp, inT);
