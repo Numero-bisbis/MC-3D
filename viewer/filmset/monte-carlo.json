@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3204462,
+ "triangles": 3199867,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -61,7 +61,7 @@
  "roof_plants": 55,
  "levels": 1371,
  "towers": 10,
- "trees": 1409,
+ "trees": 1428,
  "yachts": 486,
  "real_floors": 731,
  "styles": [
@@ -92,13 +92,16 @@
  "road_m": 47469,
  "kerb_m": 32847,
  "lamps": 1008,
- "spectators": 5547,
+ "spectators": 5324,
  "pavement_m": 4826,
  "ostende_parapet_m": 421,
  "fountains": 5,
  "statues": 14,
  "flags": 20,
  "sky_mirror": 1,
+ "quai_wall_m": 542,
+ "quai_steps": 2,
+ "quai_pines": 36,
  "track_clear": true,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",

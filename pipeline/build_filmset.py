@@ -482,6 +482,7 @@ def ground_mesh(mnt, sea):
             from scipy.spatial import cKDTree
             _, j = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]])).query(np.column_stack([X[og], Y[og]]))
             Z[og] = np.minimum(Z[og], TUNNEL["z"][j] - 1.2)
+    Z, Zs = quai_ground(X, Y, Z)
     land = valid[r, c] > 0.5
     # A lone land node among sea nodes (the end of a jetty, a quay corner)
     # would stand up from the sea floor as a needle: leave it to the sea.
@@ -521,7 +522,9 @@ def ground_mesh(mnt, sea):
     m.add(P, N, [255, 255, 255], GROUND, uv=uv, idx=tris)
     for Pf, Nf, uvf, tf in fine:
         m.add(Pf, Nf, [255, 255, 255], GROUND, uv=uvf, idx=tf)
-    return m, Z
+    # What stands on the ground (roads, lamps, the drive map) stands on
+    # the esplanade's slab where there is one.
+    return m, np.where(land, Zs, SEA_FLOOR)
 
 
 # Places where the 3 m ground grid is too coarse for the terrain: the
@@ -711,6 +714,18 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             poly(pts, "#dfd9cd")
         if closed and t.get("amenity") == "parking" and t.get("parking") != "underground":
             poly(pts, "#9a9690")
+    if QA is not None:
+        # The quay at the foot of the wall: paving, not the lawn the
+        # aerial photo's pines and awnings made of it.
+        for q in to_polys(QA["poly"].buffer(8.0).difference(QA["poly"])):
+            poly(np.asarray(q.exterior.coords), "#cfc9bd")
+        # The Rainier III pool deck in pale stone (no lawn: the photo's
+        # green there is sun loungers and the pool's glow).
+        pools = [Polygon(p_).buffer(0) for t, p_, c in ways if c and len(p_) > 3 and t.get("leisure") == "swimming_pool"]
+        for t, pts, closed in ways:
+            if closed and len(pts) > 3 and t.get("leisure") in ("sports_centre", "stadium") and \
+                    any(Polygon(pts).buffer(0).intersects(q) for q in pools) and Polygon(pts).buffer(0).distance(QA["poly"]) < 30:
+                poly(pts, QA_DECK)
     # Roads: pavement first, asphalt on top, markings last.
     WIDTH = {"motorway": 12, "trunk": 11, "primary": 10, "secondary": 8.5, "tertiary": 7.5,
              "residential": 6, "unclassified": 6, "service": 4.5, "living_street": 5,
@@ -738,6 +753,13 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
                 poly(pts, "#cfcac0")
             elif len(pts) >= 2:
                 line(pts, "#cfcac0", 2.6)
+    if QA is not None:
+        # Quai Albert 1er: the esplanade in grey asphalt, the walk under
+        # the pines red-brown (over the footway lines drawn across it).
+        for q in to_polys(QA["poly"]):
+            poly(np.asarray(q.exterior.coords), QA_ASPHALT)
+        for q in to_polys(QA["walk"]):
+            poly(np.asarray(q.exterior.coords), QA_WALK)
     # Dashed centre lines on the larger roads.
     for t, pts in roads:
         if t["highway"] not in ("primary", "secondary", "tertiary", "trunk"):
@@ -2507,6 +2529,346 @@ def flatten_port(mnt, sea):
     return out, int(hump.sum() * RES * RES)
 
 
+# --------------------------------------------------------- Quai Albert 1er ----
+# Between Boulevard Albert 1er (the start straight) and the harbour road
+# round the swimming pool, Port Hercule is built on two levels: an upper
+# esplanade level with the boulevard (OSM pedestrian area, asphalt), with
+# its row of stone pines in pale stone planters along the kerb, and the
+# quay below it (Route de la Piscine, the Rainier III pool deck), behind a
+# stone retaining wall with a parapet and flights of steps (OSM
+# barrier=retaining_wall, highway=steps). The 2021 LiDAR was flown while
+# the Grand Prix pit buildings and stands stood on the esplanade: levelled
+# by flatten_harbour() they became a ramp between the two levels, drawn as
+# bare limestone with grass under the pines. Here the esplanade is rebuilt
+# flat at the boulevard's level with a vertical wall down to the quay.
+QA = None
+QA_CENTRE = (7.42189, 43.73505)        # by the esplanade (OSM way 941748453)
+QA_STRAIGHT = [(3080, 3320), (0, 220)]  # lap metres along Boulevard Albert 1er
+QA_ASPHALT = "#7b7874"                 # the esplanade: grey asphalt, as in the street photos
+QA_WALK = "#8f6658"                    # the walk under the pines: red-brown asphalt
+QA_WALK_W = 6.0                        # m, from the boulevard's pavement edge
+QA_DECK = "#e3ddd0"                    # the pool deck: pale stone
+QA_STONE, QA_COPING, QA_FACE = "#e2dbcb", "#efe9dc", "#cfc6b3"
+
+
+def quai_setup(ways, mnt, sea):
+    """Finds the esplanade and the boulevard beside it, sets the terrain
+    model to the two levels (the esplanade at the boulevard's kerb height,
+    the ground just outside its drops at the quay's height) and returns
+    what the mesh, the paint and quai_albert() need."""
+    if TRACK is None:
+        return None
+    tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    c = Point(*tl.transform(*QA_CENTRE))
+    area = None
+    for t, pts, closed in ways:
+        if closed and t.get("highway") == "pedestrian" and t.get("area") == "yes" and len(pts) > 8:
+            g = Polygon(pts).buffer(0)
+            if g.area > 2000 and g.distance(c) < 25 and (area is None or g.area > area.area):
+                area = g
+    if area is None:
+        print("Quai Albert 1er: esplanade not found in OSM")
+        return None
+    t = TRACK
+    step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
+    s_ = np.arange(len(t["x"])) * step
+    on = np.zeros(len(s_), bool)
+    for a, b in QA_STRAIGHT:
+        on |= (s_ >= a) & (s_ <= b)
+    from scipy.spatial import cKDTree
+    kd = cKDTree(np.column_stack([t["x"][on], t["y"][on]]))
+    zs = t["z"][on]
+    # The boulevard's carriageway and pavements stay out (pavements()
+    # lays a stone strip to HALF + 2.6 m); the esplanade starts there.
+    pieces = [LineString(np.column_stack([t["x"][on][i0:i1], t["y"][on][i0:i1]]))
+              for i0, i1 in _runs(on)]
+    road = unary_union([p.buffer(TRACK_HALF + 2.6) for p in pieces])
+    terr = area.difference(road)
+    # The rest of the lap (the harbour road) keeps its own pavements.
+    terr = terr.difference(t["line"].buffer(TRACK_HALF + 2.6))
+    terr = max(to_polys(terr), key=lambda q: q.area) if not terr.is_empty else None
+    if terr is None or terr.area < 1000:
+        return None
+    terr = orient(terr.simplify(0.25), 1.0)
+
+    def zup(x, y):
+        d, j = kd.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
+        return zs[j] + 0.14
+
+    # 50 cm masks: inside, and a 4 m band outside.
+    ins = raster_mask(terr)
+    band = raster_mask(terr.buffer(4.0)) & ~ins & ~sea
+    rr, cc = np.nonzero(ins)
+    xs, ys = cell_xy(rr, cc)
+    zu_cells = zup(xs, ys)
+    # The quay level below: LiDAR ground around the esplanade at least
+    # 1.2 m below it (not the esplanade, not the stands on it), spread
+    # into it from the nearest such cell and smoothed; along the quay
+    # road no lower than the road (the 2021 scan has patches of "ground"
+    # near sea level at the foot of the wall).
+    near = raster_mask(terr.buffer(25.0))
+    nr_, nc_ = np.nonzero(near)
+    nx_, ny_ = cell_xy(nr_, nc_)
+    zu_near = np.full(mnt.shape, np.nan, np.float32)
+    zu_near[nr_, nc_] = zup(nx_, ny_)
+    cand = near & ~ins & ~sea & np.isfinite(mnt) & (mnt < zu_near - 1.2)
+    if cand.sum() < 100:
+        return None
+    idx = ndimage.distance_transform_edt(~cand, return_distances=False, return_indices=True)
+    low = np.where(cand, mnt, np.nan)[idx[0], idx[1]]
+    low = ndimage.percentile_filter(low, 25, size=13)
+    dtr, jt = TRACK["kd"].query(np.column_stack([nx_, ny_]))
+    lz = low[nr_, nc_]
+    by_road = dtr < 14.0
+    lz[by_road] = np.maximum(lz[by_road], TRACK["z"][jt[by_road]] + 0.1)
+    low_full = np.full(mnt.shape, np.nan, np.float32)
+    low_full[nr_, nc_] = lz
+    lowR = Raster(low_full)
+    # Which parts of the outline drop to a lower quay (> 0.8 m below).
+    ring = np.asarray(terr.exterior.coords)[:, :2]
+    dense = []
+    for a, b in zip(ring[:-1], ring[1:]):
+        n = max(1, int(math.ceil(np.linalg.norm(b - a) / 1.0)))
+        for k in range(n):
+            dense.append(a + (b - a) * k / n)
+    dense = np.array(dense + [ring[-1]])
+    a, b = dense[:-1], dense[1:]
+    L = np.linalg.norm(b - a, axis=1) + 1e-9
+    u = (b - a) / L[:, None]
+    out = np.column_stack([u[:, 1], -u[:, 0]])          # ccw ring: right side is outside
+    mid = (a + b) / 2
+    zo = lowR.sample(mid[:, 0] + out[:, 0] * 2.0, mid[:, 1] + out[:, 1] * 2.0)
+    zi = zup(mid[:, 0], mid[:, 1])
+    # Only on the harbour side: away from the boulevard (on its side the
+    # LiDAR pavements were capped by flatten_harbour() from the quay road).
+    dmid = kd.query(mid)[0]
+    dout = kd.query(mid + out * 2.0)[0]
+    drop = np.isfinite(zo) & (zi - zo > 0.8) & (dout > dmid + 1.0)
+    # Lone short runs are noise.
+    lab, nr = ndimage.label(drop)
+    for r in range(1, nr + 1):
+        if (lab == r).sum() < 4:
+            drop[lab == r] = False
+    # The wall steps in and out every 15 m or so (OSM way 856532999):
+    # the short returns between two drops are wall too.
+    lab, nr = ndimage.label(~drop)
+    for r in range(1, nr + 1):
+        if (lab == r).sum() < 7:
+            drop[lab == r] = True
+    segs = [LineString([a[i], b[i]]) for i in np.nonzero(drop)[0]]
+    drop_line = unary_union(segs) if segs else None
+    # Terrain: the esplanade flat; outside its drops, the quay.
+    mnt[rr, cc] = zu_cells
+    if drop_line is not None:
+        br, bc = np.nonzero(band)
+        bx, by = cell_xy(br, bc)
+        near = shapely.distance(drop_line, shapely.points(bx, by)) < 4.0
+        lo = lowR.sample(bx, by)
+        ok = near & np.isfinite(lo)
+        mnt[br[ok], bc[ok]] = np.minimum(mnt[br[ok], bc[ok]], lo[ok])
+    walk = terr.intersection(road.buffer(QA_WALK_W))
+    print(f"Quai Albert 1er: esplanade {terr.area:.0f} m2, retaining wall {sum(s.length for s in segs):.0f} m")
+    return {"poly": terr, "zup": zup, "drop": drop_line, "low": lowR, "mask": ins, "walk": walk,
+            "segs": (a[drop], b[drop], out[drop]), "kd": kd, "on": np.nonzero(on)[0]}
+
+
+def _runs(mask):
+    """(start, end) index pairs of the True runs of a 1-D mask."""
+    lab, n = ndimage.label(mask)
+    return [(int(np.nonzero(lab == r)[0][0]), int(np.nonzero(lab == r)[0][-1]) + 1) for r in range(1, n + 1)]
+
+
+def quai_ground(X, Y, Z):
+    """The 3 m ground grid under the esplanade: next to the drops at the
+    quay's height (so no ground triangle ramps out from the foot of the
+    wall), elsewhere just under the esplanade's own slab. Returns the
+    mesh heights and the heights other things stand on."""
+    if QA is None:
+        return Z, Z
+    ins = contains_xy(QA["poly"], X, Y)
+    if not ins.any():
+        return Z, Z
+    zu = QA["zup"](X[ins], Y[ins])
+    Zm, Zs = Z.copy(), Z.copy()
+    Zs[ins] = zu
+    if QA["drop"] is not None:
+        d = shapely.distance(QA["drop"], shapely.points(X[ins], Y[ins]))
+        lo = QA["low"].sample(X[ins], Y[ins])
+        lo = np.where(np.isfinite(lo), lo, zu - 2.0)
+        Zm[ins] = np.where(d < 4.5, np.minimum(lo, zu - 0.3), zu - 0.12)
+    else:
+        Zm[ins] = zu - 0.12
+    # Ground nodes just outside a drop: the quay.
+    if QA["drop"] is not None:
+        out = ~ins & contains_xy(QA["poly"].buffer(3.2), X, Y)
+        d = shapely.distance(QA["drop"], shapely.points(X[out], Y[out]))
+        lo = QA["low"].sample(X[out], Y[out])
+        sel = (d < 3.2) & np.isfinite(lo)
+        zz = Zm[out]
+        zz[sel] = np.minimum(zz[sel], lo[sel])
+        Zm[out] = zz
+        zs2 = Zs[out]
+        zs2[sel] = np.minimum(zs2[sel], lo[sel])
+        Zs[out] = zs2
+    return Zm, Zs
+
+
+def _stairs(m, a, b, za, zb, w, col, side_col):
+    """A straight flight from a (za) down to b (zb), w wide, solid to the
+    ground below, with a low stone wall on each side."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    L = float(np.linalg.norm(b - a))
+    ax = (b - a) / L
+    n = max(2, int(round(abs(za - zb) / 0.16)))
+    for k in range(n):
+        c = a + ax * L * (k + 0.5) / n
+        z1 = za + (zb - za) * (k + 0.5) / n + 0.08
+        _box(m, c[0], c[1], ax, L / n + 0.02, w, min(za, zb) - 0.5, z1, col)
+    sd = np.array([-ax[1], ax[0]])
+    for s in (-1, 1):
+        for k in range(n):
+            c = a + ax * L * (k + 0.5) / n + sd * s * (w / 2 + 0.15)
+            z1 = za + (zb - za) * (k + 0.5) / n + 0.9
+            _box(m, c[0], c[1], ax, L / n + 0.02, 0.3, min(za, zb) - 0.5, z1, side_col)
+
+
+def _quad(m, p0, p1, p2, p3, col, want):
+    """Quads p0-p1-p2-p3 (arrays of points) as two triangles each, wound
+    so that they face along `want` (k x 3, model axes)."""
+    for a, b, c in ((p0, p1, p2), (p0, p2, p3)):
+        n = np.cross(b - a, c - a)
+        flip = (n * want).sum(1) < 0
+        b2 = np.where(flip[:, None], c, b)
+        c2 = np.where(flip[:, None], b, c)
+        m.tri(a, b2, c2, col, PLAIN)
+
+
+def quai_albert(gm, m, tm, ways, pts, mntR, stats, fps=()):
+    """The esplanade's slab (painted from the ground map), the retaining
+    wall with its parapet and coping, the steps down to the quay and the
+    stone pines in their planters along the boulevard."""
+    if QA is None:
+        return 0
+    terr = QA["poly"]
+    blds = unary_union([p for p in fps if p.intersects(terr)]) if fps else None
+    slab = terr.difference(blds) if blds is not None and not blds.is_empty else terr
+    for pg in to_polys(slab):
+        if pg.area < 2:
+            continue
+        tr = triangulate(orient(pg, 1.0), area=6)
+        if tr is None:
+            continue
+        v, tri = tr
+        z = QA["zup"](v[:, 0], v[:, 1])
+        P = enu_fast(v[:, 0], v[:, 1], z)
+        uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri)
+    # Steps that leave the esplanade over a drop.
+    stair_heads = []
+    nst = 0
+    for t, p_, closed in ways:
+        if t.get("highway") != "steps" or closed or len(p_) < 2:
+            continue
+        ls = LineString(p_)
+        if ls.distance(terr) > 2.0 or ls.length < 3:
+            continue
+        a, b = np.array(p_[0], float), np.array(p_[-1], float)
+        ina, inb = terr.buffer(0.5).contains(Point(*a)), terr.buffer(0.5).contains(Point(*b))
+        if ina == inb:
+            continue
+        top, bot = (a, b) if ina else (b, a)
+        # The flight starts at the wall line.
+        cut = ls.intersection(terr.exterior)
+        if not cut.is_empty:
+            q = cut if cut.geom_type == "Point" else min(getattr(cut, "geoms", [cut]), key=lambda g: g.distance(Point(*top)))
+            top = np.array([q.x, q.y]) if q.geom_type == "Point" else top
+        zt = float(QA["zup"](top[0], top[1])[0])
+        zb_ = float(np.nan_to_num(QA["low"].sample(np.array([bot[0]]), np.array([bot[1]]))[0], nan=zt - 2))
+        zb_ = max(zb_, float(np.nan_to_num(mntR.sample(np.array([bot[0]]), np.array([bot[1]]))[0], nan=zb_)))
+        if zt - zb_ < 0.5 or np.linalg.norm(bot - top) < 2:
+            continue
+        w = float(t.get("width", 3.2)) if str(t.get("width", "")).replace(".", "").isdigit() else 3.2
+        _stairs(m, top, bot, zt, zb_, w, np.array(hexrgb(QA_STONE)), np.array(hexrgb(QA_FACE)))
+        stair_heads.append((top, w))
+        nst += 1
+    # The wall: face from the quay up to the esplanade, then a 0.9 m
+    # parapet with a coping, left open at the head of each flight.
+    a, b, out = QA["segs"]
+    if len(a):
+        mid = (a + b) / 2
+        keep = np.ones(len(a), bool)
+        for h, w in stair_heads:
+            keep &= np.hypot(mid[:, 0] - h[0], mid[:, 1] - h[1]) > w / 2 + 0.2
+        if blds is not None and not blds.is_empty:
+            keep &= ~contains_xy(blds.buffer(0.3), mid[:, 0], mid[:, 1])
+        keep &= track_dist(mid[:, 0], mid[:, 1]) > TRACK_HALF + 1.5
+        a, b, out, mid = a[keep], b[keep], out[keep], mid[keep]
+        za, zb = QA["zup"](a[:, 0], a[:, 1]), QA["zup"](b[:, 0], b[:, 1])
+        la = QA["low"].sample(a[:, 0] + out[:, 0] * 2, a[:, 1] + out[:, 1] * 2)
+        la = np.where(np.isfinite(la), la, za - 2.5) - 0.4
+        lb = QA["low"].sample(b[:, 0] + out[:, 0] * 2, b[:, 1] + out[:, 1] * 2)
+        lb = np.where(np.isfinite(lb), lb, zb - 2.5) - 0.4
+        face, stone, coping = (np.array(hexrgb(c)) for c in (QA_FACE, QA_STONE, QA_COPING))
+        k = len(a)
+        o3 = np.column_stack([out, np.zeros(k)])
+        up = np.tile([0.0, 0.0, 1.0], (k, 1))
+        P = lambda p, z: enu_fast(p[:, 0], p[:, 1], z)
+        Hp = 0.9
+        ai, bi = a - out * 0.35, b - out * 0.35
+        ao, bo = a + out * 0.06, b + out * 0.06
+        ai2, bi2 = a - out * 0.41, b - out * 0.41
+        # Retaining wall face, flush with the outline, up to the parapet top.
+        _quad(m, P(a, la), P(b, lb), P(b, zb + Hp), P(a, za + Hp), face, o3)
+        # Parapet's inner face (0.35 m thick).
+        _quad(m, P(ai, za), P(bi, zb), P(bi, zb + Hp), P(ai, za + Hp), stone, -o3)
+        # Coping: a pale slab overhanging both faces.
+        zc_a, zc_b = za + Hp + 0.1, zb + Hp + 0.1
+        _quad(m, P(ao, zc_a), P(bo, zc_b), P(bi2, zc_b), P(ai2, zc_a), coping, up)
+        _quad(m, P(ao, zc_a - 0.12), P(bo, zc_b - 0.12), P(bo, zc_b), P(ao, zc_a), coping, o3)
+        _quad(m, P(ai2, zc_a - 0.12), P(bi2, zc_b - 0.12), P(bi2, zc_b), P(ai2, zc_a), coping, -o3)
+        stats["quai_wall_m"] = int(np.linalg.norm(b - a, axis=1).sum())
+    stats["quai_steps"] = nst
+    # Stone pines in square planters along the boulevard (OSM trees).
+    rnd = np.random.default_rng(11)
+    zone = terr.buffer(3.0)
+    trunk = []
+    for (x, y), t in pts:
+        if t.get("natural") == "tree" and zone.contains(Point(x, y)):
+            trunk.append((x, y))
+    # The row is unbroken in the street photos (2025): fill the gaps of
+    # the OSM mapping at the row's own spacing, in line with the
+    # neighbours.
+    if len(trunk) > 2:
+        T = np.array(trunk)
+        order = QA["on"][QA["kd"].query(T)[1]]
+        T = T[np.argsort(order)]
+        blds_ = blds if blds is not None and not blds.is_empty else None
+        for p0, p1 in zip(T[:-1], T[1:]):
+            gap = float(np.linalg.norm(p1 - p0))
+            if gap < 15 or gap > 60:
+                continue
+            k = int(round(gap / 10.5))
+            for i in range(1, k):
+                q = p0 + (p1 - p0) * i / k
+                if zone.contains(Point(*q)) and (blds_ is None or not blds_.contains(Point(*q))):
+                    trunk.append((float(q[0]), float(q[1])))
+    planter, soil = np.array(hexrgb("#e6dfcf")), np.array(hexrgb("#5d4a3a"))
+    for x, y in trunk:
+        z = float(QA["zup"](x, y)[0])
+        # Square to the boulevard.
+        j = QA["on"][QA["kd"].query([x, y])[1]]
+        j0, j1 = max(0, j - 2), min(len(TRACK["x"]) - 1, j + 2)
+        ax = np.array([TRACK["x"][j1] - TRACK["x"][j0], TRACK["y"][j1] - TRACK["y"][j0]])
+        _box(m, x, y, ax, 2.3, 2.3, z - 0.3, z + 0.5, planter)
+        _box(m, x, y, ax, 1.8, 1.8, z + 0.5, z + 0.52, soil)
+        h = float(rnd.uniform(11.5, 15.0))
+        r = float(rnd.uniform(4.2, 5.4))
+        add_tree(tm, x, y, z + 0.5, h, r, "pine", rnd)
+        stats["trees"] += 1
+    stats["quai_pines"] = len(trunk)
+    return len(trunk)
+
+
 def track_dist(x, y):
     """Distance from the track centre line (inf without a track)."""
     x, y = np.atleast_1d(x), np.atleast_1d(y)
@@ -3243,6 +3605,8 @@ def no_tree_zones(ways):
     if TRACK is not None:
         out += [crowd_free(a, b, 32.0) for a, b in TREELESS]
         out += [crowd_free(a, b, TRACK_HALF + 10.0) for a, b in CROWD_ZONES]
+    if QA is not None:
+        out.append(QA["poly"].buffer(3.0))         # quai_albert() plants its own pines
     return unary_union(out) if out else None
 
 
@@ -4698,6 +5062,16 @@ def main():
         mns = mns - np.nan_to_num(mnt_f - flat, nan=0.0)
         mnt_f = flat
         PROM = ostende_setup(mnt_f)
+        global QA
+        mnt_before = mnt_f.copy()
+        QA = quai_setup(ways, mnt_f, sea)
+        if QA is not None:
+            # The pit buildings and stands on the esplanade come off the
+            # surface model too (no shadows, no "trees"); the pines stay.
+            o_ = ortho.astype(np.float32)
+            green = (2 * o_[..., 1] - o_[..., 0] - o_[..., 2]) > 10
+            chg = np.isfinite(mnt_f) & (np.nan_to_num(mnt_f) != np.nan_to_num(mnt_before))
+            mns = np.where(chg & ~(green & (mns - mnt_before > 3)), mnt_f, mns)
     mnt_ground = mnt_f
     if TUNNEL is not None:
         timg = Image.new("L", (mnt.shape[1], mnt.shape[0]), 0)
@@ -4771,6 +5145,7 @@ def main():
     pavements(bm, sea, bmask, stats)
     ostende_promenade(bm, mnt_f, stats)
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
+    print("Quai Albert 1er…", quai_albert(gm, bm, tm, ways, pts, Raster(mnt_f), stats, fps), "pines")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
