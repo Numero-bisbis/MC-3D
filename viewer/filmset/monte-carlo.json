@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 2192743,
+ "triangles": 2308808,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -75,7 +75,7 @@
   78,
   184
  ],
- "balconies": 1140,
+ "balconies": 1145,
  "photo_facade_colours": 26,
  "photo_facade_types": 29,
  "photo_roofs": 1328,
