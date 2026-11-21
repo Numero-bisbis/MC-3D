@@ -233,7 +233,11 @@
           float vr = hash12(floor(c.rgb * 255.0 + 0.5).rg + floor(c.b * 255.0 + 0.5) * 0.03);   // per building
           vec3 col = base;
           vec3 glass = mix(vec3(0.05, 0.07, 0.09), vec3(0.22, 0.28, 0.34), smoothstep(0.3, 1.0, f.y));
-          bool gnd = uv.y < 1.0;
+          bool lowF = uv.y < 1.0;          // the ground floor
+          // texCoord_1.x: 1 where a real shop (OpenStreetMap) is behind
+          // the wall, 0 for flats, hotel and office lobbies.
+          bool shopF = fsInput.attributes.texCoord_1.x > 0.5;
+          bool gnd = lowF && shopF;        // a shopfront
           float shine = 0.0;               // how much of this pixel is glass
           vec3 farCol = mix(base, glass, 0.18);
           if (uv.y < 0.0) {
@@ -282,7 +286,7 @@
             // Belle Époque palace: rusticated, arched ground floor; tall
             // French windows with moulded surrounds and hoods; a stone
             // balcony along the first floor, iron balconettes above.
-            if (gnd) {
+            if (lowF) {
               float groove = 1.0 - 0.18 * (1.0 - smoothstep(0.0, 0.05, abs(fract(f.y * 4.0) - 0.5) * 2.0 - 0.9));
               col = base * groove;
               float arch_ = archMask(f, 0.18, 0.82, 0.0, 0.58, aa);
@@ -336,7 +340,7 @@
             col = mix(col, base * 1.08, archF);
             col = mix(col, base * 1.12, pil);
             col = mix(col, base * 0.85, pil * box(f, vec2(0.08, -1.0), vec2(0.1, 2.0), aa));
-            vec3 g = gnd ? glass * 1.5 + vec3(0.07, 0.05, 0.0) : glass;
+            vec3 g = lowF ? glass * 1.5 + vec3(0.07, 0.05, 0.0) : glass;
             col = mix(col, g, arch_);
             col = mix(col, base * 1.1, arch_ * (box(f, vec2(0.49, 0.1), vec2(0.51, 0.9), aa) + box(f, vec2(0.25, 0.58), vec2(0.75, 0.6), aa)));
             col *= 1.0 - 0.35 * arch_ * box(f, vec2(0.25, 0.1), vec2(0.29, 0.62), aa);
@@ -377,7 +381,7 @@
             vec3 g2 = mix(vec3(0.10, 0.14, 0.18), vec3(0.42, 0.52, 0.58), smoothstep(0.1, 1.0, f.y));
             g2 *= 0.9 + 0.2 * hash12(cell);
             float slab = box(f, vec2(-1.0, 0.0), vec2(2.0, 0.08), aa);
-            float balu = box(f, vec2(-1.0, 0.08), vec2(2.0, 0.34), aa) * step(0.5, gnd ? 0.0 : 1.0);
+            float balu = box(f, vec2(-1.0, 0.08), vec2(2.0, 0.34), aa) * step(0.5, lowF ? 0.0 : 1.0);
             float fin = 1.0 - box(f, vec2(0.035, -1.0), vec2(0.965, 2.0), aa);
             vec3 finC = vr < 0.6 ? vec3(0.9, 0.9, 0.88) : vec3(0.55, 0.42, 0.30);
             col = g2;
@@ -472,6 +476,41 @@
             col = sc;
             shine = win * (door ? 0.3 : 1.0);
             farCol = mix(stoneC, signC, 0.25);
+          } else if (lowF && uv.y >= 0.0 && !(style > 0.5 && style < 3.5) && !(style > 5.5 && style < 6.5)) {
+            // No shop: the ground floor of flats, a hotel or offices. A
+            // rendered stone base with rustication, barred windows and,
+            // every few bays, a glazed entrance hall under a canopy.
+            vec3 stoneC = mix(base, vec3(0.80, 0.76, 0.68), 0.35);
+            float groove = 1.0 - 0.12 * (1.0 - smoothstep(0.0, 0.06, abs(fract(f.y * 4.0) - 0.5) * 2.0 - 0.88)) * fine;
+            vec3 sc = stoneC * groove;
+            sc = mix(sc, stoneC * 0.66, 1.0 - step(0.07, f.y));                 // plinth
+            bool door = hash12(cell * 1.9 + vr * 13.0 + 4.2) < 0.16;
+            vec3 g3 = mix(vec3(0.07, 0.08, 0.09), vec3(0.24, 0.28, 0.32), smoothstep(0.2, 1.0, f.y));
+            if (door) {
+              vec2 dlo = vec2(0.26, 0.07), dhi = vec2(0.74, 0.76);
+              float d_ = box(f, dlo, dhi, aa);
+              sc = mix(sc, stoneC * 1.12, box(f, dlo - vec2(0.05, 0.0), dhi + vec2(0.05, 0.04), aa));   // surround
+              vec3 hall = mix(vec3(0.32, 0.27, 0.20), vec3(0.62, 0.55, 0.44), smoothstep(dlo.y, dhi.y, f.y) * 0.5);
+              sc = mix(sc, mix(hall, vec3(0.30, 0.34, 0.38), 0.4), d_);
+              sc = mix(sc, vec3(0.16, 0.13, 0.10), d_ * (box(f, vec2(0.49, dlo.y), vec2(0.51, dhi.y), aa)
+                       + box(f, dlo, vec2(dhi.x, dlo.y + 0.03), aa) + box(f, vec2(dlo.x, dhi.y - 0.03), dhi, aa)));
+              float canopy = box(f, vec2(0.16, 0.82), vec2(0.84, 0.87), aa);
+              sc *= 1.0 - 0.3 * box(f, vec2(0.18, 0.76), vec2(0.82, 0.82), aa);   // its shadow
+              sc = mix(sc, base * 1.1, canopy);
+              shine = d_;
+            } else {
+              vec2 wlo = vec2(0.32, 0.30), whi = vec2(0.68, 0.80);
+              float w_ = box(f, wlo, whi, aa);
+              sc = mix(sc, stoneC * 1.1, box(f, wlo - 0.035, whi + 0.035, aa));
+              sc = mix(sc, stoneC * 1.18, box(f, vec2(wlo.x - 0.05, wlo.y - 0.06), vec2(whi.x + 0.05, wlo.y - 0.02), aa));  // sill
+              sc = mix(sc, g3, w_);
+              sc *= 1.0 - 0.35 * w_ * box(f, vec2(wlo.x, whi.y - 0.06), whi, aa);
+              float bars = step(0.72, fract(f.x * 26.0)) + box(f, vec2(wlo.x, 0.54), vec2(whi.x, 0.565), aa);
+              sc = mix(sc, vec3(0.08), w_ * clamp(bars, 0.0, 1.0) * fine * 0.8);    // iron grille
+              shine = w_;
+            }
+            col = sc;
+            farCol = mix(stoneC, g3, 0.12);
           }
           if (style < 5.5 || style > 6.5) {
             // Weathering, kept subtle: plaster that varies in patches and
@@ -494,7 +533,7 @@
           if (u_night > 0.0 && uv.y > 0.0) {
             // Night: about half the flats lit, warm; a few cool TV-blue
             // ones; every shop on the ground floor.
-            float lit = gnd ? 1.0 : step(hash12(cell * 1.31 + vr * 7.7), style > 5.5 && style < 6.5 ? 0.3 : 0.48);
+            float lit = gnd ? 1.0 : (lowF && (style < 0.5 || style > 3.5) && !(style > 5.5 && style < 6.5)) ? step(hash12(cell * 1.7 + 2.0), 0.35) : step(hash12(cell * 1.31 + vr * 7.7), style > 5.5 && style < 6.5 ? 0.3 : 0.48);
             vec3 wc = mix(vec3(1.0, 0.72, 0.4), vec3(0.62, 0.78, 1.0), step(0.88, hash12(cell + 3.1)));
             wc *= 0.7 + 0.5 * hash12(cell * 2.7 + 1.3);
             material.emissive = wc * u_night * mix(0.16, shine * lit * 1.1, detail);
