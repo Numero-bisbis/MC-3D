@@ -787,6 +787,8 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             dm_.polygon(xy(np.asarray(q.exterior.coords)), fill=255)
             for h in q.interiors:
                 dm_.polygon(xy(np.asarray(h.coords)), fill=0)
+        for q in to_polys(SW.get("islands", Polygon())):
+            dm_.polygon(xy(np.asarray(q.exterior.coords)), fill=255)
         img.paste(tuple(hexrgb(SW_PAVING)), (0, 0) + img.size, mk_)
         mk2 = Image.new("L", img.size, 0)
         dm2 = ImageDraw.Draw(mk2)
@@ -3234,6 +3236,8 @@ def sidewalks_setup(ways, mnt, sea, feats):
         skip.append(prom_poly.buffer(1.0))
     steps = [LineString(p_).buffer(2.0) for tg, p_, cl in ways
              if tg.get("highway") == "steps" and len(p_) > 1 and LineString(p_).intersects(corridor)]
+    others = unary_union([q for q in rp if q.intersects(corridor)]).difference(track_poly.buffer(0.5))
+    kerbs = side_street_steps(walk, others, mnt, zfn)
     walls = edge_walls(unary_union([walk, roads.intersection(corridor)]), mnt, zfn,
                        unary_union(skip + steps))
     mk = raster_mask(walk)
@@ -3245,7 +3249,76 @@ def sidewalks_setup(ways, mnt, sea, feats):
     step = float(np.median(np.hypot(np.diff(t["x"]), np.diff(t["y"]))))
     i0, i1 = int(SW_PALE_S[0] / step), int(SW_PALE_S[1] / step)
     pale_zone = LineString(np.column_stack([t["x"][i0:i1], t["y"][i0:i1]])).buffer(SW_REACH + SW_MAX_W)
-    return {"poly": walk, "pale": walk.intersection(pale_zone), "zw": zfn, "walls": walls}
+    # The corners where a side street comes into the circuit (the paved
+    # islands between the two): paved like the pavements, at their own
+    # height, not left as the photo's dark smudge.
+    isl = []
+    for tg, p_, cl in ways:
+        hw = tg.get("highway")
+        if hw not in ROAD_W or cl or len(p_) < 2 or tg.get("tunnel") or tg.get("bridge") or is_carpark_way(p_):
+            continue
+        q_ = np.asarray(p_, dtype=float)
+        if LineString(q_).length < 20:
+            continue
+        de = track_dist(q_[[0, -1], 0], q_[[0, -1], 1])
+        for e in (0, -1):
+            if de[e if e == 0 else 1] < 1.5 and track_dist(q_[[1 if e == 0 else -2], 0], q_[[1 if e == 0 else -2], 1])[0] > 3.0:
+                isl.append(Point(*q_[e]).buffer(12.0))
+    islands = Polygon()
+    if isl:
+        islands = unary_union(isl).intersection(t["line"].buffer(SW_START + SW_STRIP_W + 2.0))
+        islands = islands.difference(roads).difference(walk.buffer(-0.05)).difference(blds).difference(unary_union(skip + other))
+        islands = unary_union([q for q in to_polys(islands) if q.area > 4 and q.buffer(0.3).intersects(walk)])
+        print(f"side street corners paved: {islands.area:.0f} m2")
+    return {"poly": walk, "pale": walk.intersection(pale_zone), "zw": zfn, "walls": walls, "steps": kerbs,
+            "islands": islands}
+
+
+def side_street_steps(walk, others, mnt, zfn):
+    """Where a pavement of the circuit meets a side street that runs above
+    it (Avenue de la Costa coming down beside Avenue d'Ostende), the step
+    between them: without it the 3 m terrain grid smeared a dark slope over
+    the side street's edge. Segments of the pavement's edge whose outside
+    is that street, with the street's ground (LiDAR, beside the edge) as
+    the top."""
+    R = Raster(mnt)
+    A, B, O, ZW, TOP = [], [], [], [], []
+    for pg in to_polys(walk):
+        for ring in [pg.exterior] + list(pg.interiors):
+            L = ring.length
+            if L < 3:
+                continue
+            ss = np.linspace(0, L, max(3, int(L / 1.0)) + 1)
+            q = shapely.line_interpolate_point(ring, ss)
+            P = np.column_stack([shapely.get_x(q), shapely.get_y(q)])
+            a, b = P[:-1], P[1:]
+            mid = (a + b) / 2
+            u = b - a
+            ln = np.linalg.norm(u, axis=1)
+            ok = ln > 0.05
+            a, b, mid, u, ln = a[ok], b[ok], mid[ok], u[ok], ln[ok]
+            u = u / ln[:, None]
+            out = np.column_stack([u[:, 1], -u[:, 0]])
+            t_ = mid + out * 0.3
+            out[contains_xy(walk, t_[:, 0], t_[:, 1])] *= -1
+            o1 = mid + out * 0.6
+            on = contains_xy(others, o1[:, 0], o1[:, 1])
+            if not on.any():
+                continue
+            zw = zfn(mid[:, 0], mid[:, 1])
+            sm = np.stack([R.sample(mid[:, 0] + out[:, 0] * d, mid[:, 1] + out[:, 1] * d) for d in (1.0, 1.5, 2.0)])
+            fin = np.isfinite(sm).all(0)
+            top = np.where(fin, np.median(np.where(fin, sm, 0), 0), zw)
+            up = on & fin & (top - zw > 0.45) & (top - zw < 6.0)
+            up = ndimage.binary_opening(ndimage.binary_closing(up, iterations=1), iterations=1)
+            top = ndimage.median_filter(top, 5, mode="nearest")
+            A.append(a[up]); B.append(b[up]); O.append(out[up]); ZW.append(zw[up]); TOP.append(top[up] + 0.05)
+    if not A:
+        return None
+    w = {k_: np.concatenate(v) for k_, v in (("a", A), ("b", B), ("out", O), ("zw", ZW), ("top", TOP))}
+    w["m"] = float(np.linalg.norm(w["b"] - w["a"], axis=1).sum())
+    print(f"side street steps: {w['m']:.0f} m")
+    return w
 
 
 SW_WALL = "#d9ccb1"                    # Monaco's retaining walls: warm stone and render
@@ -3396,6 +3469,19 @@ def street_walls(gm, m, stats):
             ci, cb_ = A[t_] - O[t_, :2] * 0.04, B[t_] - O[t_, :2] * 0.04
             co, cob = Ao[t_] + O[t_, :2] * 0.04, Bo[t_] + O[t_, :2] * 0.04
             _quad(m, E(ci, Zt[t_] + 0.06), E(cb_, Zt[t_] + 0.06), E(cob, Zt[t_] + 0.06), E(co, Zt[t_] + 0.06), cope, upz)
+    k_ = SW.get("steps")
+    if k_ is not None and len(k_["a"]):
+        A, B = k_["a"], k_["b"]
+        O = np.column_stack([k_["out"], np.zeros(len(A))])
+        nk = len(A)
+        st = np.array(hexrgb(SW_WALL))[None] * (0.93 + 0.09 * rng.random(nk))[:, None]
+        _quad(m, E(A, k_["zw"] - 0.4), E(B, k_["zw"] - 0.4), E(B, k_["top"]), E(A, k_["top"]), st, -O)
+        ca, cb = A - O[:, :2] * 0.05, B - O[:, :2] * 0.05
+        c1a, c1b = A + O[:, :2] * 0.3, B + O[:, :2] * 0.3
+        upz = np.tile([0.0, 0.0, 1.0], (nk, 1))
+        _quad(m, E(ca, k_["top"] + 0.04), E(cb, k_["top"] + 0.04), E(c1b, k_["top"] + 0.04), E(c1a, k_["top"] + 0.04),
+              cope, upz)
+        stats["side_street_steps_m"] = int(k_["m"])
     stats["street_wall_up_m"] = int(w["up_m"])
     stats["street_wall_down_m"] = int(w["down_m"])
     return n
@@ -5513,6 +5599,11 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
         X = P[:, 0, None] + nx_[:, None] * offs
         Y = P[:, 1, None] + ny_[:, None] * offs
         Z = ground_z(gz, X, Y)
+        if TRACK is not None and float(np.median(track_dist(P[:, 0], P[:, 1]))) > 2.5:
+            # Side streets level across (the 3 m grid's humps beside them,
+            # walls and banks, had tilted their edges into dark ramps).
+            zc = Z[:, len(offs) // 2:len(offs) // 2 + 1]
+            Z = np.clip(Z, zc - 0.15, zc + 0.15)
         # Not over the water (a road ending on a quay edge).
         wet = (Z <= SEA_FLOOR + 0.5).any(1)
         Z = Z + ROAD_LIFT + 0.004 * ROAD_RANK.get(hw, 0)

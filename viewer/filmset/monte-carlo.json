@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3375491,
+ "triangles": 3376949,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -90,10 +90,11 @@
  "bridges": 18,
  "diving_towers": 1,
  "road_m": 47458,
- "kerb_m": 32847,
+ "kerb_m": 32849,
  "lamps": 1008,
  "spectators": 5602,
  "sidewalk_m2": 37692,
+ "side_street_steps_m": 325,
  "street_wall_up_m": 688,
  "street_wall_down_m": 563,
  "carpark_doors": 1,
