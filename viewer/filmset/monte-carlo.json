@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3376949,
+ "triangles": 3375377,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -76,6 +76,7 @@
   183
  ],
  "balconies": 1193,
+ "shop_buildings": 163,
  "landmarks": 1,
  "mareterra_slabs": 139,
  "photo_facade_colours": 27,

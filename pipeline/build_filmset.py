@@ -931,6 +931,105 @@ def triangulate(poly, area=None):
 
 BAY_NOW = None    # window spacing measured in the photos for the building being built
 GROUND_R = None   # the terrain, while buildings() runs: street level along each wall
+SHOP_NOW = None   # the real shops of the building being built (shop_spans)
+
+# Shopfronts only where OpenStreetMap has a real shop, café, restaurant,
+# bank or agency: most ground floors in Monte-Carlo are hotel entrances,
+# office lobbies and flats. TEXCOORD_1.x on a wall = 1 where the ground
+# floor is a shopfront, 0 for a plain residential / lobby ground floor.
+SHOP_AMENITY = {"restaurant", "cafe", "bar", "pub", "fast_food", "ice_cream", "bank", "pharmacy",
+                "bureau_de_change", "nightclub", "post_office", "car_rental", "driving_school",
+                "veterinary", "marketplace", "atm_shop"}
+SHOP_OFFICE = {"estate_agent", "insurance", "travel_agent"}     # agencies with a display window
+SHOPS = None
+SHOP_REACH = 6.0       # metres of frontage either side of each shop's point
+
+
+def shop_places(ways, pts):
+    """The real shops: points (L93) and areas (a shop mapped as a building)."""
+    def is_shop(t):
+        return (("shop" in t and t["shop"] not in ("no",)) or t.get("amenity") in SHOP_AMENITY
+                or t.get("office") in SHOP_OFFICE or t.get("craft") in ("bakery", "confectionery"))
+    P = [np.asarray(xy, float) for xy, t in pts if is_shop(t)]
+    A = []
+    for t, w, closed in ways:
+        if closed and len(w) >= 4 and (is_shop(t) or t.get("building") == "retail"):
+            g = Polygon(w).buffer(0)
+            if g.area > 10:
+                A.append(g)
+    return {"pts": np.array(P).reshape(-1, 2), "areas": A}
+
+
+def shops_for(poly, shops, others):
+    """The shops of one building: points inside its outline, or just
+    outside it (mapped on the pavement at the door) and in no other
+    building; each with its distance to the nearest wall, so a shop
+    fronts the street nearest it, not every side of the block."""
+    if shops is None or not len(shops["pts"]):
+        return None
+    P = shops["pts"]
+    x0, y0, x1, y1 = poly.bounds
+    near = np.nonzero((P[:, 0] > x0 - 3) & (P[:, 0] < x1 + 3) & (P[:, 1] > y0 - 3) & (P[:, 1] < y1 + 3))[0]
+    out = []
+    for i in near:
+        pt = Point(P[i])
+        inside = poly.contains(pt)
+        d = poly.exterior.distance(pt)
+        if inside or (d < 3.0 and i not in others):
+            out.append((P[i], d if inside else 0.0))
+    areas = [a for a in shops["areas"] if a.intersection(poly).area > 0.5 * poly.area]
+    if not out and not areas:
+        return None
+    return {"pts": out, "areas": areas}
+
+
+def shop_spans(a, b):
+    """Stretches (fractions 0-1, snapped to whole bays later) of the wall
+    a-b with a real shop behind them, from SHOP_NOW."""
+    if SHOP_NOW is None:
+        return []
+    if SHOP_NOW["areas"]:
+        return [(0.0, 1.0)]
+    L = float(np.linalg.norm(b - a))
+    if L < 1.0:
+        return []
+    u = (b - a) / L
+    out_ = np.array([u[1], -u[0]])          # walls are built CCW: outside on the right
+    spans = []
+    for p, dmin in SHOP_NOW["pts"]:
+        d = p - a
+        t, s = float(d @ u), float(d @ out_)
+        # On this wall's side of the building: no deeper than the nearest
+        # wall to it plus a little, and not far past either end.
+        if -(dmin + 1.5) <= s <= 3.0 and -3.0 <= t <= L + 3.0:
+            spans.append((max(0.0, (t - SHOP_REACH) / L), min(1.0, (t + SHOP_REACH) / L)))
+    spans.sort()
+    merged = []
+    for s0, s1 in spans:
+        if merged and s0 <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], s1))
+        else:
+            merged.append((s0, s1))
+    return merged
+
+
+def split_shops(t0, t1, nb, spans):
+    """Cut [t0, t1] of a wall with nb bays into (t0, t1, shop) pieces at
+    whole bays."""
+    if not spans:
+        return [(t0, t1, 0.0)]
+    cuts = {t0, t1}
+    for s0, s1 in spans:
+        for s in (math.floor(s0 * nb) / nb, math.ceil(s1 * nb) / nb):
+            if t0 < s < t1:
+                cuts.add(s)
+    cuts = sorted(cuts)
+    res = []
+    for c0, c1 in zip(cuts[:-1], cuts[1:]):
+        mid = (c0 + c1) / 2
+        res.append((c0, c1, 1.0 if any(math.floor(s0 * nb) / nb <= mid <= math.ceil(s1 * nb) / nb
+                                       for s0, s1 in spans) else 0.0))
+    return res
 
 
 def street_rise(a, b, base, z0, z1, fh):
@@ -938,7 +1037,8 @@ def street_rise(a, b, base, z0, z1, fh):
     building on a hill: its base is the lowest ground round it), the
     shops follow the street: the ground-floor row starts at the pavement
     all along the wall, and the floors above stay level. Returns the wall
-    split into pieces (a, b, rise at a, rise at b), or None when the street
+    split into pieces (a, b, rise at a, rise at b, t at a, t at b, wall
+    index), or None when the street
     is level with the base."""
     if GROUND_R is None or z0 > base + 0.5 or z1 - base < 2 * fh:
         return None
@@ -958,11 +1058,11 @@ def street_rise(a, b, base, z0, z1, fh):
         g = np.where(g > 6.0, 0.0, np.clip(g, 0.0, None))
         g = np.minimum(g, z1 - base - fh - 0.5)
         if g.max() < 0.4:
-            res.append((a[i], b[i], 0.0, 0.0, 0.0, 1.0))
+            res.append((a[i], b[i], 0.0, 0.0, 0.0, 1.0, i))
             continue
         any_ = True
         for j in range(n):
-            res.append((p[j], p[j + 1], float(g[j]), float(g[j + 1]), t[j], t[j + 1]))
+            res.append((p[j], p[j + 1], float(g[j]), float(g[j + 1]), t[j], t[j + 1], i))
     return res if any_ else None
 
 
@@ -983,19 +1083,32 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None, mi
         a, b, L = a[ok], b[ok], L[ok]
         if not len(a):
             continue
-        k = len(a)
         bay = BAY_NOW or STYLE_BAY[style] if style is not None else {WALL_OLD: 3.2, WALL_NEW: 3.4, WALL_GLASS: 2.2}.get(kind, 3.0)
         nb = np.maximum(1, np.round(L / bay))
+        u0, u1, shop = np.zeros(len(a)), nb.copy(), np.zeros(len(a))
+        if style is not None and not inward and SHOP_NOW is not None:
+            # Walls with a real shop behind part of them: cut at whole bays
+            # into shopfront and plain stretches.
+            A_, B_, U0, U1, F = [], [], [], [], []
+            for i in range(len(a)):
+                for c0, c1, fl in split_shops(0.0, 1.0, nb[i], shop_spans(a[i], b[i])):
+                    A_.append(a[i] + (b[i] - a[i]) * c0); B_.append(a[i] + (b[i] - a[i]) * c1)
+                    U0.append(nb[i] * c0); U1.append(nb[i] * c1); F.append(fl)
+            a, b = np.array(A_), np.array(B_)
+            u0, u1, shop = np.array(U0), np.array(U1), np.array(F)
+        k = len(a)
         P = enu_fast(np.column_stack([a[:, 0], b[:, 0], b[:, 0], a[:, 0]]).ravel(),
                      np.column_stack([a[:, 1], b[:, 1], b[:, 1], a[:, 1]]).ravel(),
                      np.tile([z0, z0, z1, z1], k)).reshape(k, 4, 3)
         nrm = np.cross(P[:, 1] - P[:, 0], P[:, 3] - P[:, 0])
         nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
         v0, v1 = (z0 - base) / fh, (z1 - base) / fh
-        uv = np.stack([np.column_stack([np.zeros(k), nb, nb, np.zeros(k)]),
+        uv = np.stack([np.column_stack([u0, u1, u1, u0]),
                        np.column_stack([np.full(k, v0), np.full(k, v0), np.full(k, v1), np.full(k, v1)])], -1)
         idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
-        m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style)
+        uv2 = np.column_stack([np.repeat(shop, 4), np.zeros(4 * k)])
+        m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style,
+              uv2=uv2)
 
 
 def sloped_walls(m, pieces, A, B, z0, z1, base, fh, col, kind, style):
@@ -1003,21 +1116,28 @@ def sloped_walls(m, pieces, A, B, z0, z1, base, fh, col, kind, style):
     piece, the ground-floor band from the pavement up one storey, its
     window rows measured from the pavement, then the level floors above."""
     bay = BAY_NOW or STYLE_BAY[style]
-    quads, uvs = [], []
-    for (p, q, ga, gb, t0, t1) in pieces:
+    quads, uvs, flags = [], [], []
+    spans = {}
+    for (p, q, ga, gb, t0, t1, wi) in pieces:
         # The bay count of the whole wall the piece belongs to.
         L = float(np.linalg.norm(q - p) / max(t1 - t0, 1e-9))
         nb = max(1.0, round(L / bay))
+        if wi not in spans:
+            spans[wi] = shop_spans(A[wi], B[wi])
+        tm = (t0 + t1) / 2
+        fl = 1.0 if any(math.floor(s0 * nb) / nb <= tm <= math.ceil(s1 * nb) / nb for s0, s1 in spans[wi]) else 0.0
         u0, u1 = nb * t0, nb * t1
         ta, tb = base + ga + fh, base + gb + fh
         if ga < 0.01 and gb < 0.01:
             quads.append((p, q, (z0, z0, z1, z1)))
             uvs.append(((u0, (z0 - base) / fh), (u1, (z0 - base) / fh), (u1, (z1 - base) / fh), (u0, (z1 - base) / fh)))
+            flags.append(fl)
             continue
         quads.append((p, q, (z0, z0, tb, ta)))
         uvs.append(((u0, (z0 - base - ga) / fh), (u1, (z0 - base - gb) / fh), (u1, 1.0), (u0, 1.0)))
         quads.append((p, q, (ta, tb, z1, z1)))
         uvs.append(((u0, (ta - base) / fh), (u1, (tb - base) / fh), (u1, (z1 - base) / fh), (u0, (z1 - base) / fh)))
+        flags += [fl, fl]
     k = len(quads)
     xs = np.array([[p[0], q[0], q[0], p[0]] for p, q, _ in quads]).ravel()
     ys = np.array([[p[1], q[1], q[1], p[1]] for p, q, _ in quads]).ravel()
@@ -1030,8 +1150,9 @@ def sloped_walls(m, pieces, A, B, z0, z1, base, fh, col, kind, style):
     nrm = np.cross(H, np.broadcast_to(Up, H.shape))
     nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
     idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
+    uv2 = np.column_stack([np.repeat(np.array(flags), 4), np.zeros(4 * k)])
     m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=np.array(uvs, np.float64).reshape(-1, 2),
-          idx=idx, style=style)
+          idx=idx, style=style, uv2=uv2)
 
 
 # Roofs are painted with the aerial photo itself: real tiles, skylights,
@@ -1645,11 +1766,13 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
                             add_walls(m, orient(qq, 1.0), z, z + 0.45, z, 100, pale * 0.96, PLAIN)
                             add_roof(m, orient(qq, 1.0), z + 0.45, pale, False)
                 n_ += 1
-        # Shop awnings over the pavement at street level.
-        if d_mid < 28:
+        # Shop awnings over the pavement at street level, only in front of
+        # real shops.
+        spans = shop_spans(a, b)
+        if d_mid < 28 and spans:
             seg = max(1, int(L / 6.5))
             for j in range(seg):
-                if rnd.random() < 0.3:
+                if rnd.random() < 0.3 or not any(s0 <= (j + 0.5) / seg <= s1 for s0, s1 in spans):
                     continue
                 w0 = a + u * (j * L / seg + 0.5)
                 w1 = a + u * ((j + 1) * L / seg - 0.5)
@@ -1769,9 +1892,14 @@ def church_sainte_devote(m, mntR):
 
 
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
-    global BAY_NOW, GROUND_R
+    global BAY_NOW, GROUND_R, SHOP_NOW
     mntR = Raster(mnt)
     GROUND_R = mntR
+    # Shops whose point lies inside some outline belong to that building only.
+    in_any = set()
+    if SHOPS is not None and len(SHOPS["pts"]):
+        allb = unary_union([shapely.force_2d(shape(f["geometry"])).buffer(0) for f in feats])
+        in_any = set(np.nonzero(contains_xy(allb, SHOPS["pts"][:, 0], SHOPS["pts"][:, 1]))[0].tolist())
     extent = box(X0, Y0, X1, Y1)
     footprint = []
     for f in feats:
@@ -1980,6 +2108,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if win.shape == (5, 5) and win.max() > win[2, 2] * 1.06:
                     iy_, ix_ = np.unravel_index(np.argmax(win), win.shape)
                     adj = ((ix_ - 2) * RES, -(iy_ - 2) * RES)
+            SHOP_NOW = None if hero else shops_for(poly, SHOPS, in_any)
+            if SHOP_NOW is not None:
+                stats["shop_buildings"] = stats.get("shop_buildings", 0) + 1
             zb = base - 1.0
             for li, (region, hz) in enumerate(levels):
                 zt = base + hz
@@ -2120,10 +2251,11 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 stats["balconies"] = stats.get("balconies", 0) + facade_depth(
                     m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
                     info["balconies"], info["depth"])
+            SHOP_NOW = None
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
-    BAY_NOW = GROUND_R = None
+    BAY_NOW = GROUND_R = SHOP_NOW = None
     return footprint
 
 
@@ -5842,6 +5974,9 @@ def main():
     sizes = ndimage.sum(sea, lab, np.arange(1, n + 1))
     sea &= ~np.isin(lab, np.nonzero(sizes < 8000)[0] + 1)
     ways, pts = load_osm()
+    global SHOPS
+    SHOPS = shop_places(ways, pts)
+    print("real shops:", len(SHOPS["pts"]), "points,", len(SHOPS["areas"]), "areas")
     # Yachts moored against a quay merge with it in the LiDAR terrain. The
     # OpenStreetMap coastline follows the quays, so anything outside it is sea.
     land = coast_land(ways, sea)
