@@ -4019,9 +4019,10 @@ def _quad_uv(m, p0, p1, p2, p3, col, want, uv, kind=None, style=None):
         m.tri(a, b2, c2, col_, kind, uv=np.stack([ua, ub2, uc2], 1), style=style)
 
 
-def railing(m, A, B, z, col, h=1.1):
-    """See-through railings from A to B (k x 2) standing on z (k,): both
-    faces, the bars drawn by the shader (PLAIN style RAIL)."""
+def railing(m, A, B, z, col, h=1.1, zb=None):
+    """See-through railings from A to B (k x 2) standing on z (k,) (or z at
+    A and zb at B, so a sloping railing has no steps): both faces, the bars
+    drawn by the shader (PLAIN style RAIL)."""
     if not len(A):
         return 0.0
     L = np.linalg.norm(B - A, axis=1)
@@ -4030,12 +4031,13 @@ def railing(m, A, B, z, col, h=1.1):
     u = (B - A) / np.maximum(L, 1e-6)[:, None]
     nrm = np.column_stack([u[:, 1], -u[:, 0], np.zeros(len(A))])
     z = np.asarray(z, float)
-    zb = z if z.ndim else np.full(len(A), float(z))
+    za = z if z.ndim else np.full(len(A), float(z))
+    zb = za if zb is None else np.asarray(zb, float)
     E = lambda p, zz: enu_fast(p[:, 0], p[:, 1], zz)
     uv = [np.column_stack([s0, np.zeros(len(A))]), np.column_stack([s1, np.zeros(len(A))]),
           np.column_stack([s1, np.ones(len(A))]), np.column_stack([s0, np.ones(len(A))])]
     for sg in (1.0, -1.0):
-        _quad_uv(m, E(A, zb), E(B, zb), E(B, zb + h), E(A, zb + h), np.array(hexrgb(col)), nrm * sg, uv, style=RAIL)
+        _quad_uv(m, E(A, za), E(B, zb), E(B, zb + h), E(A, za + h), np.array(hexrgb(col)), nrm * sg, uv, style=RAIL)
     return float(L.sum())
 
 
@@ -4713,28 +4715,47 @@ def hairpin_island(blds, mnt=None):
         _, j = kd_out.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
         return z_out[j]
     # Which part is up at the way in's level and which down at the way
-    # out's, from the LiDAR, half a metre at a time: the wall stands
-    # where the ground drops more than 1.5 m below the way in.
+    # out's. The wall runs parallel to the way in, at one distance past
+    # its kerb (the LiDAR's: where the ground first drops 1.5 m below the
+    # road, median along the stretch), from where the legs are 1.2 m apart
+    # in height on back. (Following the LiDAR's own outline half a metre
+    # at a time made the wall and its railing zigzag.)
     upper = isl
     lower = Polygon()
     if mnt is not None:
         R = Raster(mnt)
-        bx0, by0, bx1, by1 = isl.bounds
-        gx, gy = np.meshgrid(np.arange(bx0, bx1 + RES, RES), np.arange(by0, by1 + RES, RES))
-        g = R.sample(gx.ravel(), gy.ravel()).reshape(gx.shape)
-        inside = contains_xy(isl.buffer(1.0), gx, gy)
-        low = inside & np.isfinite(g) & (g < zi(gx.ravel(), gy.ravel()).reshape(gx.shape) - 1.5)
-        low = ndimage.binary_opening(ndimage.binary_closing(low, iterations=2), iterations=2)
-        if low.any():
-            boxes = [box(x_ - RES / 2, y_ - RES / 2, x_ + RES / 2, y_ + RES / 2)
-                     for x_, y_ in zip(gx[low], gy[low])]
-            lp = unary_union(boxes).buffer(0.3).buffer(-0.3).simplify(0.25)
-            # (Never right against the way in: its kerb keeps a metre of
-            # pavement and the wall's coping.)
-            lower = unary_union([q for q in to_polys(lp.intersection(isl).difference(leg_in.buffer(SW_START + 1.0)))
-                                 if q.area > 3])
-            upper = unary_union([q for q in to_polys(isl.difference(lower.buffer(0.05))) if q.area > 3])
-            lower = lower.difference(upper.buffer(0.05)) if not upper.is_empty else lower
+        xi, yi = t["x"][i_in], t["y"][i_in]
+        dx, dy = np.gradient(xi), np.gradient(yi)
+        ln = np.hypot(dx, dy) + 1e-9
+        nx_, ny_ = -dy / ln, dx / ln
+        probe = np.column_stack([xi + nx_ * 8.0, yi + ny_ * 8.0])
+        sgn = np.where(contains_xy(loop, probe[:, 0], probe[:, 1]), 1.0, -1.0)
+        nx_, ny_ = nx_ * sgn, ny_ * sgn
+        dz = z_in - zo(xi, yi)
+        drops = []
+        for k in np.nonzero(dz > 2.0)[0]:
+            for d in np.arange(SW_START, SW_START + 6.0, 0.25):
+                g = R.sample(np.array([xi[k] + nx_[k] * d]), np.array([yi[k] + ny_[k] * d]))[0]
+                if np.isfinite(g) and g < z_in[k] - 1.5:
+                    drops.append(d - SW_START)
+                    break
+        w = float(np.clip(np.median(drops), 1.0, 2.5)) if drops else 1.2
+        # Where the wall ends: the last point back from the apex with the
+        # legs within 1.2 m of each other in height.
+        k_cut = np.nonzero(dz > 1.2)[0]
+        if len(k_cut):
+            kc = int(k_cut.max())
+            u = np.array([dx[kc], dy[kc]]) / ln[kc]
+            c = np.array([xi[kc], yi[kc]])
+            # Everything on the way in's start side of the cut line.
+            half = Polygon([c + 60 * np.array([-u[1], u[0]]), c + 60 * np.array([-u[1], u[0]]) - 200 * u,
+                            c - 60 * np.array([-u[1], u[0]]) - 200 * u, c - 60 * np.array([-u[1], u[0]])])
+            wall_line = leg_in.buffer(SW_START + w)
+            lp = isl.difference(wall_line).intersection(half)
+            lower = unary_union([q for q in to_polys(lp) if q.area > 3])
+            if not lower.is_empty:
+                upper = unary_union([q for q in to_polys(isl.difference(lower.buffer(0.05))) if q.area > 3])
+        print(f"Fairmont hairpin wall {w:.1f} m past the way in's kerb, from lap {i_in[kc] * st if len(k_cut) else 0:.0f} m")
     lower = unary_union([q for q in to_polys(lower) if q.area > 3]) if not lower.is_empty else lower
     up_zone = upper.buffer(0.03) if not upper.is_empty else upper
 
@@ -4798,7 +4819,7 @@ def hairpin_wall(m):
           np.array(hexrgb(KERB_GRANITE)), np.array([[0.0, 0.0, 1.0]]))
     rt = (np.minimum(zt_a - zl_a, zt_b - zl_b) > 1.3)
     if rt.any():
-        railing(m, (a - out * 0.15)[rt], (b - out * 0.15)[rt], np.minimum(zt_a, zt_b)[rt] + 0.08, STREET_RAIL, 1.0)
+        railing(m, (a - out * 0.15)[rt], (b - out * 0.15)[rt], zt_a[rt] + 0.08, STREET_RAIL, 1.0, zb=zt_b[rt] + 0.08)
     print(f"Fairmont hairpin retaining wall: {c1[-1]:.0f} m, up to {np.max(zt_a - zl_a):.1f} m high")
     return float(c1[-1])
 
@@ -5082,7 +5103,7 @@ def sidewalks(gm, m, stats):
                           np.column_stack([c1, hh_b]), np.column_stack([c0, hh_a])], style=RUBBLE)
                 rt = tk & (np.minimum(za - zra, zb - zrb) > 1.0)
                 if rt.any():
-                    railing(m, (a - out * 0.12)[rt], (b - out * 0.12)[rt], np.minimum(za, zb)[rt] + 0.01, STREET_RAIL, 0.9)
+                    railing(m, (a - out * 0.12)[rt], (b - out * 0.12)[rt], za[rt] + 0.01, STREET_RAIL, 0.9, zb=zb[rt] + 0.01)
             # (On top of a wall the kerb is a plain granite coping.)
             for sel, sty in ((~rw | tall, KERB), (rw & ~tall, KERB_RW)):
                 if not sel.any():
