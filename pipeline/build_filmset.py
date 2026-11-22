@@ -4006,9 +4006,10 @@ def sidewalks_setup(ways, mnt, sea, feats):
     # The Fairmont hairpin's island, between the way in and the way out
     # (2.5 m lower by the time they part): paved at the way in's level, a
     # wall down to the way out.
-    hp = hairpin_island(blds)
+    global HP
+    hp = HP = hairpin_island(blds, mnt)
     if hp is not None:
-        walk = unary_union([walk.difference(hp["poly"].buffer(1.0)), hp["poly"]])
+        walk = unary_union([walk.difference(hp["poly"].buffer(1.0)), hp["upper"], hp["lower"]])
         hp_zone = hp["poly"].buffer(0.5)       # (its edge points too)
     walk = unary_union([q for q in to_polys(walk) if q.area > 6])
     if walk.is_empty:
@@ -4394,13 +4395,21 @@ def track_strip(blds, stop, mnt):
     return unary_union([q for q in to_polys(strip) if q.area > 4])
 
 
-HAIRPIN = (1190.0, 1265.0, 1345.0)     # lap metres: the Fairmont hairpin's way in, apex, way out
+HAIRPIN = (1100.0, 1265.0, 1400.0)     # lap metres: the Fairmont hairpin's way in, apex, way out
+HAIRPIN_GAP = 22.0                     # m: the island is where both legs are this close
+HP = None
 
 
-def hairpin_island(blds):
-    """The paved island inside the Fairmont hairpin, between its two legs,
-    up to 45 m back from the apex (buildings cut out), with its level: the
-    way in's (the higher leg)."""
+def hairpin_island(blds, mnt=None):
+    """The island inside the Fairmont hairpin, between its two legs, all
+    the way back to where they part (buildings cut out), at the way in's
+    level. The way in (Avenue des Spélugues) really is the higher leg: the
+    LiDAR has the way out (Avenue Princesse Grace) 3 m lower 30 m from the
+    apex and 8 to 11 m lower where the two part, behind a vertical
+    retaining wall at the edge of the way in. The island stops at the way
+    out's kerb, where sidewalks() stands that wall. (It used to stop 45 m
+    from the apex: past it the 3 m ground grid hung over the 11 m drop as
+    one long pale slope ahead of the cars on the way out.)"""
     if TRACK is None:
         return None
     t = TRACK
@@ -4408,8 +4417,12 @@ def hairpin_island(blds):
     idx = np.arange(int(HAIRPIN[0] / st), int(HAIRPIN[2] / st))
     loop = Polygon(np.column_stack([t["x"][idx], t["y"][idx]])).buffer(0)
     ia = int(HAIRPIN[1] / st)
-    apex = Point(t["x"][ia], t["y"][ia])
-    isl = loop.difference(t["line"].buffer(SW_START)).intersection(apex.buffer(45.0))
+    i_in = np.arange(int(HAIRPIN[0] / st), ia + 1)
+    i_out = np.arange(ia, int(HAIRPIN[2] / st))
+    leg_in = LineString(np.column_stack([t["x"][i_in], t["y"][i_in]]))
+    leg_out = LineString(np.column_stack([t["x"][i_out], t["y"][i_out]]))
+    both = leg_in.buffer(HAIRPIN_GAP).intersection(leg_out.buffer(HAIRPIN_GAP))
+    isl = loop.intersection(both).difference(t["line"].buffer(SW_START))
     if not blds.is_empty:
         isl = isl.difference(blds)
     parts = [q for q in to_polys(isl) if q.area > 8]
@@ -4417,15 +4430,106 @@ def hairpin_island(blds):
         return None
     isl = max(parts, key=lambda q: q.area)
     from scipy.spatial import cKDTree
-    i_in = np.arange(int(HAIRPIN[0] / st), ia + 1)
     kd_in = cKDTree(np.column_stack([t["x"][i_in], t["y"][i_in]]))
-    z_in = t["z"][i_in]
+    kd_out = cKDTree(np.column_stack([t["x"][i_out], t["y"][i_out]]))
+    z_in, z_out = t["z"][i_in], t["z"][i_out]
 
-    def z(x, y):
+    def zi(x, y):
         _, j = kd_in.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
         return z_in[j]
-    print(f"Fairmont hairpin island: {isl.area:.0f} m2")
-    return {"poly": isl, "z": z}
+
+    def zo(x, y):
+        _, j = kd_out.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
+        return z_out[j]
+    # Which part is up at the way in's level and which down at the way
+    # out's, from the LiDAR, half a metre at a time: the wall stands
+    # where the ground drops more than 1.5 m below the way in.
+    upper = isl
+    lower = Polygon()
+    if mnt is not None:
+        R = Raster(mnt)
+        bx0, by0, bx1, by1 = isl.bounds
+        gx, gy = np.meshgrid(np.arange(bx0, bx1 + RES, RES), np.arange(by0, by1 + RES, RES))
+        g = R.sample(gx.ravel(), gy.ravel()).reshape(gx.shape)
+        inside = contains_xy(isl.buffer(1.0), gx, gy)
+        low = inside & np.isfinite(g) & (g < zi(gx.ravel(), gy.ravel()).reshape(gx.shape) - 1.5)
+        low = ndimage.binary_opening(ndimage.binary_closing(low, iterations=2), iterations=2)
+        if low.any():
+            boxes = [box(x_ - RES / 2, y_ - RES / 2, x_ + RES / 2, y_ + RES / 2)
+                     for x_, y_ in zip(gx[low], gy[low])]
+            lp = unary_union(boxes).buffer(0.3).buffer(-0.3).simplify(0.25)
+            # (Never right against the way in: its kerb keeps a metre of
+            # pavement and the wall's coping.)
+            lower = unary_union([q for q in to_polys(lp.intersection(isl).difference(leg_in.buffer(SW_START + 1.0)))
+                                 if q.area > 3])
+            upper = unary_union([q for q in to_polys(isl.difference(lower.buffer(0.05))) if q.area > 3])
+            lower = lower.difference(upper.buffer(0.05)) if not upper.is_empty else lower
+    lower = unary_union([q for q in to_polys(lower) if q.area > 3]) if not lower.is_empty else lower
+    up_zone = upper.buffer(0.03) if not upper.is_empty else upper
+
+    def z(x, y):
+        x, y = np.atleast_1d(x), np.atleast_1d(y)
+        if up_zone.is_empty:
+            return zo(x, y)
+        return np.where(contains_xy(up_zone, x, y), zi(x, y), np.minimum(zo(x, y), zi(x, y)))
+    print(f"Fairmont hairpin island: {isl.area:.0f} m2, {upper.area:.0f} at the way in's level, "
+          f"{lower.area:.0f} down at the way out's")
+    return {"poly": isl, "upper": upper, "lower": lower, "z": z, "z_in": zi, "z_out": zo}
+
+
+def hairpin_wall(m):
+    """The retaining wall inside the Fairmont hairpin: from the lower part
+    of the island (at the way out's level) up to the higher part (the way
+    in's), in rubble limestone like the walls on the Mirabeau descent, a
+    white railing on top."""
+    hp = HP
+    if hp is None or hp["lower"].is_empty or hp["upper"].is_empty:
+        return 0.0
+    near = hp["lower"].buffer(0.3)
+    A, B_, OUT = [], [], []
+    for pg in to_polys(hp["upper"]):
+        for ring in [pg.exterior] + list(pg.interiors):
+            L = ring.length
+            ss = np.linspace(0, L, max(2, int(np.ceil(L / 0.8))) + 1)
+            q = shapely.line_interpolate_point(ring, ss)
+            P = np.column_stack([shapely.get_x(q), shapely.get_y(q)])
+            a, b = P[:-1], P[1:]
+            u = b - a
+            ln = np.linalg.norm(u, axis=1)
+            ok = ln > 0.05
+            a, b, u, ln = a[ok], b[ok], u[ok], ln[ok]
+            u = u / ln[:, None]
+            out = np.column_stack([u[:, 1], -u[:, 0]])
+            mid = (a + b) / 2
+            out[contains_xy(pg, mid[:, 0] + out[:, 0] * 0.15, mid[:, 1] + out[:, 1] * 0.15)] *= -1
+            k = contains_xy(near, mid[:, 0] + out[:, 0] * 0.25, mid[:, 1] + out[:, 1] * 0.25)
+            A.append(a[k]); B_.append(b[k]); OUT.append(out[k])
+    a, b, out = np.concatenate(A), np.concatenate(B_), np.concatenate(OUT)
+    if not len(a):
+        return 0.0
+    zt_a, zt_b = hp["z_in"](a[:, 0], a[:, 1]) + SW_KERB, hp["z_in"](b[:, 0], b[:, 1]) + SW_KERB
+    zl_a = hp["z_out"](a[:, 0] + out[:, 0], a[:, 1] + out[:, 1]) - 0.3
+    zl_b = hp["z_out"](b[:, 0] + out[:, 0], b[:, 1] + out[:, 1]) - 0.3
+    zl_a, zl_b = np.minimum(zl_a, zt_a - 0.3), np.minimum(zl_b, zt_b - 0.3)
+    c1 = np.cumsum(np.linalg.norm(b - a, axis=1))
+    c0 = np.r_[0.0, c1[:-1]]
+    o3 = np.column_stack([out, np.zeros(len(a))])
+    _quad_uv(m, enu_fast(a[:, 0], a[:, 1], zl_a), enu_fast(b[:, 0], b[:, 1], zl_b),
+             enu_fast(b[:, 0], b[:, 1], zt_b + 0.08), enu_fast(a[:, 0], a[:, 1], zt_a + 0.08),
+             np.array(hexrgb(WALL_RUBBLE)), o3,
+             [np.column_stack([c0, np.zeros(len(a))]), np.column_stack([c1, np.zeros(len(a))]),
+              np.column_stack([c1, zt_b + 0.08 - zl_b]), np.column_stack([c0, zt_a + 0.08 - zl_a])], style=RUBBLE)
+    # A coping stone on top, then the railing where the drop is over a metre.
+    ins = -out * 0.3
+    _quad(m, enu_fast(a[:, 0], a[:, 1], zt_a + 0.08), enu_fast(b[:, 0], b[:, 1], zt_b + 0.08),
+          enu_fast(b[:, 0] + ins[:, 0], b[:, 1] + ins[:, 1], zt_b + 0.08),
+          enu_fast(a[:, 0] + ins[:, 0], a[:, 1] + ins[:, 1], zt_a + 0.08),
+          np.array(hexrgb(KERB_GRANITE)), np.array([[0.0, 0.0, 1.0]]))
+    rt = (np.minimum(zt_a - zl_a, zt_b - zl_b) > 1.3)
+    if rt.any():
+        railing(m, (a - out * 0.15)[rt], (b - out * 0.15)[rt], np.minimum(zt_a, zt_b)[rt] + 0.08, STREET_RAIL, 1.0)
+    print(f"Fairmont hairpin retaining wall: {c1[-1]:.0f} m, up to {np.max(zt_a - zl_a):.1f} m high")
+    return float(c1[-1])
 
 
 def sidewalk_ground(X, Y, Zm, Zs):
@@ -4440,6 +4544,23 @@ def sidewalk_ground(X, Y, Zm, Zs):
         # the road and the barriers).
         Zm[ins] = np.minimum(Zm[ins], zw - 0.16)
         Zs[ins] = zw
+    if HP is not None and not HP["lower"].is_empty:
+        # Inside the Fairmont hairpin the 3 m ground grid ran from the way
+        # in straight down to the way out as one steep slope, standing out
+        # in front of the retaining wall: every node off the road within a
+        # grid step of the lower part goes down to it (the wall hides the
+        # rest). Under the way in's own road too (the road is its own
+        # mesh at the lap's height): a node left up there made a cone of
+        # ground in front of the wall with its lowered neighbours.
+        nr = contains_xy(HP["lower"].buffer(GRID * 1.2), X, Y)
+        if nr.any():
+            zl = HP["z_out"](X[nr], Y[nr]) - 0.3
+            off = track_dist(X[nr], Y[nr]) > TRACK_HALF + 0.2
+            Zm = Zm.copy(); Zs = Zs.copy()
+            Zm[nr] = np.minimum(Zm[nr], zl)
+            zs = Zs[nr]
+            zs[off] = np.minimum(zs[off], zl[off] + 0.16)
+            Zs[nr] = zs
     return wall_ground(X, Y, Zm), Zs
 
 
@@ -4578,6 +4699,7 @@ def sidewalks(gm, m, stats):
     if steep:
         st_s = lap_s(np.array(steep)[:, 0], np.array(steep)[:, 1])
         print("  at lap m:", sorted(set((st_s // 20 * 20).astype(int).tolist()))[:40])
+    stats["hairpin_wall_m"] = int(hairpin_wall(m))
     return n_
 
 
