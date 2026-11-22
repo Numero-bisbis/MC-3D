@@ -2099,7 +2099,7 @@ LANDMARKS = [
     ("One Monte-Carlo", (1056433, 6303407), S_MODERN, "#eeede8"),
     ("Fairmont", (1056743, 6303450), S_RIBBON, "#eee8dc"),
     ("Théâtre Princesse Grace", (1056443, 6303173), S_DECO, "#efe2c8"),
-    ("Yacht Club de Monaco", (1056540, 6303156), S_MODERN, "#f2f2ee"),
+    ("Yacht Club de Monaco", (1056540, 6303156), S_RIBBON, "#f4f3ef"),   # white decks like a yacht
     ("Église Saint-Charles", (1056513, 6303731), S_ARCH, "#e9dcc4"),
 ]
 
@@ -3554,7 +3554,7 @@ def flatten_harbour(mnt):
 
 # Port Hercule's quays, jetties and car parks (lon/lat box). The 2021 LiDAR
 # was flown while Grand Prix stands, cabins and cranes stood there.
-PORT_BOX = (7.4205, 43.7325, 7.4285, 43.7372)
+PORT_BOX = (7.4205, 43.7325, 7.4300, 43.7372)     # (to the Quai Louis II, east of the Yacht Club)
 
 
 def flatten_port(mnt, sea):
