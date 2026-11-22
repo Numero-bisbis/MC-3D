@@ -113,14 +113,15 @@ def fetch():
         # Dated places around the square (year built, style, floors).
         "wikidata.json": "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(WD_QUERY),
     }
-    # The roofs, at about 20 cm: four tiles of 3840 px.
+    # The roofs, at about 20 cm (the photo's own resolution): four tiles of
+    # 3840 px, PNG so the WMS's JPEG blocks do not land on the roofs.
     half = (X1 - X0) / 2
     for i in (0, 1):
         for j in (0, 1):
             bx, by = X0 + half * i, Y0 + half * j
-            urls[f"ortho20_{i}{j}.jpg"] = (
+            urls[f"ortho20_{i}{j}.png"] = (
                 f"{WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ORTHOIMAGERY.ORTHOPHOTOS"
-                f"&STYLES=&FORMAT=image/jpeg&CRS=EPSG:2154&BBOX={bx},{by},{bx + half},{by + half}"
+                f"&STYLES=&FORMAT=image/png&CRS=EPSG:2154&BBOX={bx},{by},{bx + half},{by + half}"
                 f"&WIDTH=3840&HEIGHT=3840")
     for name, url in urls.items():
         out = RAW / name
@@ -134,7 +135,9 @@ def fetch():
 
 def load_ortho_hi():
     """The four 20 cm photo tiles as one image (north up), or None."""
-    tiles = [[RAW / f"ortho20_{i}{j}.jpg" for j in (0, 1)] for i in (0, 1)]
+    tiles = [[RAW / f"ortho20_{i}{j}.png" for j in (0, 1)] for i in (0, 1)]
+    if not all(t.exists() for row in tiles for t in row):
+        tiles = [[RAW / f"ortho20_{i}{j}.jpg" for j in (0, 1)] for i in (0, 1)]
     if not all(t.exists() for row in tiles for t in row):
         return None
     k = Image.open(tiles[0][0]).size[0]
@@ -1258,6 +1261,90 @@ def photo_uv(x, y):
     return np.column_stack([(x - X0) / (X1 - X0), (Y1 - y) / (Y1 - Y0)])
 
 
+ATLAS = 4096                        # roof texture size, px (phones take 4096)
+
+
+def roof_atlas(hi, photo):
+    """The real roofs' own texture: each roof's patch of the 20 cm photo
+    (shifted back by the photo's lean, tidied by clean_roof_patch), turned
+    square to its outline's own rectangle (Monaco's blocks run on the
+    diagonal; a north-up box wastes half the space) and packed side by side
+    into one 4096 px image at as close to the photo's resolution as fits,
+    instead of the 37 cm ground map the roofs used to sample. Rewrites the
+    roof mesh's UVs (plan metres until now) to point into it.
+    Returns (jpeg bytes, texels per metre)."""
+    n = hi.size[0]
+    ppm = n / (X1 - X0)
+    G = 0.6                                  # gutter round every patch, m
+    rects = []
+    for pg, (sx, sy), _z in photo["polys"]:
+        q = pg.buffer(0.6, join_style=2)
+        c = np.asarray(q.minimum_rotated_rectangle.exterior.coords)[:3]
+        e0, e1 = c[1] - c[0], c[2] - c[1]
+        e = e0 if np.hypot(*e0) >= np.hypot(*e1) else e1
+        U = e / max(np.hypot(*e), 1e-9)
+        V = np.array([-U[1], U[0]])
+        P = np.asarray(q.exterior.coords)[:, :2]
+        pu, pv = P @ U, P @ V
+        rects.append((q, U, V, pu.min() - G, pv.min() - G, pu.max() - pu.min() + 2 * G,
+                      pv.max() - pv.min() + 2 * G, sx, sy))
+    area = sum(r[5] * r[6] for r in rects)
+    # As fine as fits, up to 1.6x the photo's own 20 cm (a sharp resample
+    # beats the GPU's bilinear stretch), shrinking until the shelves fit.
+    T = min(1.6 * ppm, math.sqrt(0.92 * ATLAS * ATLAS / max(area, 1)))
+    order = sorted(range(len(rects)), key=lambda k: -rects[k][6])
+    while True:
+        place, x, y, shelf = {}, 0, 0, 0
+        for k in order:
+            w, h = int(math.ceil(rects[k][5] * T)), int(math.ceil(rects[k][6] * T))
+            if x + w > ATLAS:
+                x, y, shelf = 0, y + shelf, 0
+            if y + h > ATLAS:
+                break
+            place[k] = (x, y, w, h)
+            x += w
+            shelf = max(shelf, h)
+        if len(place) == len(rects):
+            break
+        T *= 0.97
+    atlas = Image.new("RGB", (ATLAS, ATLAS), (128, 128, 128))
+    grade = np.array([1.03, 1.0, 0.96], np.float32)
+    for k, (q, U, V, u0, v0, _, _, sx, sy) in enumerate(rects):
+        x, y, w, h = place[k]
+        # Patch texel (i, j) -> plan point u0 + i/T along U, v0 + j/T along V
+        # -> photo pixel, shifted by the lean.
+        cx = (u0 * U[0] + v0 * V[0] + sx - X0) * ppm
+        cy = (Y1 - (u0 * U[1] + v0 * V[1] + sy)) * ppm
+        coef = (U[0] * ppm / T, V[0] * ppm / T, cx, -U[1] * ppm / T, -V[1] * ppm / T, cy)
+        patch = hi.transform((w, h), Image.AFFINE, coef, resample=Image.BICUBIC)
+        pm = Image.new("L", (w, h), 0)
+        dpm = ImageDraw.Draw(pm)
+        to_px = lambda pts: [((X * U[0] + Y * U[1] - u0) * T, (X * V[0] + Y * V[1] - v0) * T) for X, Y in pts]
+        dpm.polygon(to_px(q.exterior.coords), fill=255)
+        for hole in q.interiors:
+            dpm.polygon(to_px(hole.coords), fill=0)
+        ph = np.asarray(clean_roof_patch(patch, pm, T)).astype(np.float32)
+        # The same grade as the roofs in the ground map: a little crisper
+        # and warmer than the raw photo.
+        gray = ph.mean(2, keepdims=True)
+        ph = gray + (ph - gray) * 1.12
+        ph = (ph - 118) * 1.1 + 126
+        im = Image.fromarray(np.clip(ph * grade, 0, 255).astype(np.uint8))
+        atlas.paste(im.filter(ImageFilter.UnsharpMask(radius=1.4, percent=70, threshold=2)), (x, y))
+    mesh = photo["mesh"]
+    for mi, k in photo["uvmap"]:
+        _, U, V, u0, v0, _, _, _, _ = rects[k]
+        x, y, _, _ = place[k]
+        d = mesh.uv[mi].astype(np.float64)
+        wx, wy = d[:, 0] + X0, Y1 - d[:, 1]
+        mesh.uv[mi] = np.column_stack([(x + (wx * U[0] + wy * U[1] - u0) * T) / ATLAS,
+                                       (y + (wx * V[0] + wy * V[1] - v0) * T) / ATLAS]).astype(np.float32)
+    b = io.BytesIO()
+    atlas.save(b, "JPEG", quality=90)
+    atlas.save(RAW / "roof-atlas-preview.jpg", quality=80)
+    return b.getvalue(), round(T, 2)
+
+
 def tidy_outline(poly, r=0.45):
     """Footprint without the small jogs, notches and spikes a traced
     outline (or a 1 m raster region) carries: an opening and a closing of
@@ -1348,9 +1435,12 @@ def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
         zz = np.full(len(v), z)
     P = enu_fast(v[:, 0], v[:, 1], zz)
     if photo is not None:
-        uv = photo_uv(v[:, 0], v[:, 1])
+        # UVs hold the plan position (metres east of X0, south of Y1) for
+        # now; roof_atlas() turns them into this roof's place in its texture.
+        uv = np.column_stack([v[:, 0] - X0, Y1 - v[:, 1]])
         photo["mesh"].tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], [255, 255, 255], ROOF_FLAT,
                           uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
+        photo["uvmap"].append((len(photo["mesh"].uv) - 1, len(photo["polys"])))
         photo["polys"].append((poly, photo["shift"], z))
         return
     m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, ROOF_TILE if tiled else ROOF_FLAT)
@@ -5834,8 +5924,9 @@ def sea_plane(m):
 
 
 # --------------------------------------------------------------------- glb ----
-def write_glb(path, prims, ground_jpg):
-    """prims: list of (Mesh, textured). Positions are ENU; glTF is y-up."""
+def write_glb(path, prims, ground_jpg, roof_jpg=None):
+    """prims: list of (Mesh, textured): textured False, True (the ground
+    map) or "roof" (the roof atlas). Positions are ENU; glTF is y-up."""
     bin_ = bytearray()
     views, accs, meshes_p = [], [], []
 
@@ -5863,6 +5954,11 @@ def write_glb(path, prims, ground_jpg):
                                   "metallicFactor": 0, "roughnessFactor": 0.95}},
     ]
     tex_view = add_view(ground_jpg)
+    images = [{"bufferView": tex_view, "mimeType": "image/jpeg"}]
+    if roof_jpg is not None:
+        materials.append({"pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1], "baseColorTexture": {"index": 1},
+                                                   "metallicFactor": 0, "roughnessFactor": 0.8}})
+        images.append({"bufferView": add_view(roof_jpg), "mimeType": "image/jpeg"})
     for mesh, textured in prims:
         arr = mesh.arrays()
         if arr is None:
@@ -5879,7 +5975,8 @@ def write_glb(path, prims, ground_jpg):
             "TEXCOORD_1": acc(np.concatenate(mesh.uv2).astype("<f4"), 5126, "VEC2", 34962),
         }
         idx = acc(i.astype("<u4"), 5125, "SCALAR", 34963)
-        meshes_p.append({"attributes": attrs, "indices": idx, "material": 1 if textured else 0})
+        mat = 2 if textured == "roof" and roof_jpg is not None else (1 if textured else 0)
+        meshes_p.append({"attributes": attrs, "indices": idx, "material": mat})
     gltf = {
         "asset": {"version": "2.0", "generator": "MC-3D build_filmset.py"},
         # One mesh (and node) per primitive: the compressor quantises each
@@ -5890,9 +5987,9 @@ def write_glb(path, prims, ground_jpg):
         "nodes": [{"mesh": k} for k in range(len(meshes_p))],
         "meshes": [{"primitives": [q]} for q in meshes_p],
         "materials": materials,
-        "images": [{"bufferView": tex_view, "mimeType": "image/jpeg"}],
+        "images": images,
         "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}],
-        "textures": [{"source": 0, "sampler": 0}],
+        "textures": [{"source": k, "sampler": 0} for k in range(len(images))],
         "buffers": [{"byteLength": len(bin_)}],
         "bufferViews": views, "accessors": accs,
     }
@@ -6323,7 +6420,7 @@ def main():
         edges = photo_edges(ortho_hi)
         lean = estimate_lean(edges, feats, mns, mnt)
         print("photo lean per metre of height (east, north):", lean)
-        photo = {"mesh": Mesh(), "polys": [], "lean": lean, "edges": edges}
+        photo = {"mesh": Mesh(), "polys": [], "uvmap": [], "lean": lean, "edges": edges}
     facades = FacadeData(ways)
     feats = mareterra_feats(feats, ways)
     global SW
@@ -6416,9 +6513,12 @@ def main():
         write_glb(OUT / "monte-carlo-tunnel.glb", [(tun_m, False)], tiny.getvalue())
     raw = OUT / "monte-carlo.raw.glb"
     prims = [(gm, True), (rm, True), (bm, False), (tm, False), (hm, False), (sm, False)]
+    roof_jpg = None
     if photo and photo["mesh"].p:
-        prims.append((photo["mesh"], True))
-    write_glb(raw, prims, jpg)
+        roof_jpg, stats["roof_texels_per_m"] = roof_atlas(ortho_hi, photo)
+        print("roof atlas:", stats["roof_texels_per_m"], "texels per metre")
+        prims.append((photo["mesh"], "roof"))
+    write_glb(raw, prims, jpg, roof_jpg)
     out = OUT / "monte-carlo.glb"
     if args.no_compress:
         raw.replace(out)
