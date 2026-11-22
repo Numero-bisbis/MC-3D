@@ -45,6 +45,7 @@ Usage:
 import argparse
 import hashlib
 import io
+import itertools
 import json
 import math
 import struct
@@ -58,6 +59,7 @@ from pathlib import Path
 import numpy as np
 import pyproj
 import shapely
+import shapely.prepared
 import triangle
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 from scipy import ndimage
@@ -4978,6 +4980,9 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats, no_tree=None):
 
 
 # ---------------------------------------------------------------- harbour ----
+YACHT_PLANS = []          # hull plans as built (for checks)
+
+
 def hull_outline(L, W):
     """Yacht plan in (along, across) metres: square stern, parallel sides,
     a rounded bow coming to a point."""
@@ -4991,19 +4996,335 @@ def hull_outline(L, W):
     return pts + right
 
 
-def yachts(m, ortho, sea, stats, ways=()):
-    """Moored yachts traced from the white shapes on the water in the IGN
-    photo (newer than the LiDAR), rebuilt as clean stylised yachts: white
-    hull with a dark boot stripe, decks and stepped superstructures with
-    dark window bands, bow pointing away from the quay."""
-    land = ~sea
-    dist_land = ndimage.distance_transform_edt(~land) * RES
-    o = ortho.astype(np.float32)
-    lum = o.mean(-1)
-    sat = o.max(-1) - o.min(-1)
-    boat = sea & (lum > 135) & (sat < 70)
-    boat = ndimage.binary_opening(boat, iterations=1)
-    boat = ndimage.binary_closing(boat, iterations=1)
+def marina_basins():
+    """The harbours' water areas from OpenStreetMap (leisure=marina, as
+    closed ways or multipolygon relations: Port Hercule is a relation):
+    boats are only looked for inside them, not on the sea face of the
+    breakwater or along the open coast."""
+    from shapely.ops import linemerge, polygonize
+    root = ET.parse(RAW / "osm.xml").getroot()
+    tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    nodes = {n.get("id"): (float(n.get("lon")), float(n.get("lat"))) for n in root.findall("node")}
+    wnodes = {w.get("id"): [nd.get("ref") for nd in w.findall("nd")] for w in root.findall("way")}
+    tags = lambda e: {k.get("k"): k.get("v") for k in e.findall("tag")}
+
+    def line(refs):
+        ll = np.array([nodes[r] for r in refs if r in nodes])
+        if len(ll) < 2:
+            return None
+        x, y = tl.transform(ll[:, 0], ll[:, 1])
+        return LineString(np.column_stack([x, y]))
+
+    out = []
+    for w in root.findall("way"):
+        r = wnodes[w.get("id")]
+        if tags(w).get("leisure") == "marina" and r[0] == r[-1] and (g := line(r)) is not None and len(g.coords) > 3:
+            out.append(Polygon(g.coords).buffer(0))
+    for rel in root.findall("relation"):
+        if tags(rel).get("leisure") != "marina":
+            continue
+        ls = [line(wnodes[m.get("ref")]) for m in rel.findall("member")
+              if m.get("type") == "way" and m.get("role") == "outer" and m.get("ref") in wnodes]
+        ls = [g for g in ls if g is not None]
+        if ls:
+            out += list(polygonize(linemerge(ls)))
+    return unary_union(out) if out else None
+
+
+def mooring_lines(ways):
+    """The edges boats tie up to: the quays (OpenStreetMap coastline, which
+    follows them round the harbour) and the outlines of piers and
+    pontoons."""
+    out = []
+    bb = box(X0, Y0, X1, Y1)
+    for t, p, closed in ways:
+        if t.get("natural") != "coastline" and t.get("man_made") not in ("pier", "breakwater", "quay") \
+                and t.get("floating") != "yes":
+            continue
+        g = LineString(p).intersection(bb)
+        out += [q for q in getattr(g, "geoms", [g]) if not q.is_empty and q.geom_type == "LineString"]
+    return out
+
+
+def photo_berths(photo, water, ways, moor_d):
+    """Where the boats really are, read from the IGN photo (20 cm) along the
+    quays and pontoons, as berths: boats in Port Hercule lie stern-to, side
+    by side, square to the pontoon. Every 40 cm along each straight stretch
+    of quay or pontoon a ray goes out over the water; the white run it
+    meets within 4.5 m (a boat's stern) gives that boat's length. Along the
+    pontoon the runs make a row: a dip in length between two plateaus is
+    the gap between two bows, so each plateau is a boat; a plateau too wide
+    for one boat holds several of the same size. A long run no deeper than
+    a big yacht's beam, solid along its outer side, is a yacht lying
+    alongside. Big white shapes left over (superyachts rafted beside
+    another, yachts at anchor) keep their own outline; small ones out in
+    the fairway (tenders under way, glints) are dropped.
+    Yields (stern point, bow direction, length, beam, how)."""
+    ph = np.asarray(photo)
+    HR = (X1 - X0) / ph.shape[1]
+    rr = np.clip(((np.arange(ph.shape[0]) + 0.5) * HR / RES).astype(int), 0, water.shape[0] - 1)
+    cc = np.clip(((np.arange(ph.shape[1]) + 0.5) * HR / RES).astype(int), 0, water.shape[1] - 1)
+    wat = water[rr][:, cc]
+    lum = ph.astype(np.uint16).sum(-1)
+    sat = ph.max(-1).astype(np.int16) - ph.min(-1)
+    white = wat & (lum > 315) & (sat < 85)          # brighter than water (~120) and its glints
+    # Teak decks: warm brown, never the colour of the water.
+    white |= wat & (lum > 230) & (ph[..., 0].astype(np.int16) > ph[..., 2].astype(np.int16) + 25)
+    del lum, sat
+    k1 = max(1, int(round(0.2 / HR)))
+    white = ndimage.binary_opening(white, iterations=k1)
+    white = ndimage.binary_closing(white, iterations=2 * k1)
+    white = ndimage.binary_fill_holes(white)
+    white = ndimage.binary_opening(white, iterations=2 * k1) & wat
+
+    def wsample(x, y):
+        c = ((np.asarray(x) - X0) / HR).astype(int)
+        r = ((Y1 - np.asarray(y)) / HR).astype(int)
+        ok = (c >= 0) & (c < white.shape[1]) & (r >= 0) & (r < white.shape[0])
+        o = np.zeros(np.shape(x), bool)
+        o[ok] = white[r[ok], c[ok]]
+        return o
+
+    waterR = Raster(water.astype(np.float32))
+    STEP, DS, MAXD = 0.4, HR, 110.0
+    d = np.arange(0, MAXD, DS)
+    # A boat's stern is within 4.5 m of the quay (a gangway's length), a
+    # superyacht's up to 12 m.
+    n_start, n_far, n_gap = int(4.5 / DS), int(12 / DS), int(1.0 / DS)
+    rows = []
+    for ln in mooring_lines(ways):
+        c = np.asarray(ln.simplify(0.8).coords)
+        for a, b in zip(c[:-1], c[1:]):
+            L = float(np.hypot(*(b - a)))
+            if L < 4:
+                continue
+            t = (b - a) / L
+            for nrm in (np.array([-t[1], t[0]]), np.array([t[1], -t[0]])):
+                f_ = np.linspace(0.1, 0.9, 9)[:, None, None]
+                m_ = (a + (b - a) * f_ + nrm * np.array([[2.0], [4.0], [6.0]])[None]).reshape(-1, 2)
+                if np.nanmean(waterR.sample(m_[:, 0], m_[:, 1])) < 0.6:
+                    continue
+                u = np.arange(STEP / 2, L, STEP)
+                w = wsample(a[0] + t[0] * u[:, None] + nrm[0] * d[None], a[1] + t[1] * u[:, None] + nrm[1] * d[None])
+                s0 = np.full(len(u), -1.0)
+                Lr = np.zeros(len(u))
+                for i in np.nonzero(w[:, :n_far].any(1))[0]:
+                    row = w[i]
+                    k = int(np.argmax(row[:n_far]))
+                    # the run, through dark patches (windows, teak) under 1 m
+                    off = np.nonzero(~row[k:])[0]
+                    j = k
+                    for g0 in np.split(off, np.nonzero(np.diff(off) > 1)[0] + 1) if len(off) else []:
+                        if len(g0) > n_gap or g0[-1] == len(row) - k - 1:
+                            j = k + g0[0] - 1
+                            break
+                    else:
+                        j = len(row) - 1
+                    if k < n_start or (j - k + 1) * DS >= 20:
+                        s0[i], Lr[i] = k * DS, (j - k + 1) * DS
+                rows.append((a, t, nrm, u, s0, Lr))
+
+    boats = []
+    for a, t, nrm, u, s0, Lr in rows:
+        Lm = ndimage.median_filter(Lr, 3, mode="nearest")
+        # Yachts lying alongside first: a long stretch (short breaks
+        # allowed: dark decks) no deeper than a big yacht's beam, solid
+        # down its middle line, where a row of boats has water between hulls.
+        along = np.zeros(len(u), bool)
+        lab, nr = ndimage.label(ndimage.binary_closing(Lm >= 3.0, iterations=int(4.0 / STEP)))
+        for k in range(1, nr + 1):
+            sel = np.nonzero((lab == k) & (Lm >= 3.0))[0]
+            if not len(sel):
+                continue
+            idx = np.arange(sel.min(), sel.max() + 1)
+            Lp = Lm[sel]
+            if len(Lp) < 4:
+                continue
+            w = len(idx) * STEP
+            Lmed = float(np.percentile(Lp, 75))
+            st0 = float(np.median(s0[idx][s0[idx] >= 0]))
+            # A hull side is straight: the depth hardly changes along the
+            # middle of the yacht, where a row of bows is a saw.
+            mid = Lp[len(Lp) // 6: len(Lp) - len(Lp) // 6]
+            flat = float(np.mean(np.abs(mid - np.median(mid)) < 0.1 * np.median(mid))) if len(mid) else 0.0
+            if 5.5 <= Lmed <= 16 and w >= max(1.8 * Lmed, 18):
+                uu = u[idx]
+                dd = st0 + 0.5 * Lmed
+                cov = wsample(a[0] + t[0] * uu + nrm[0] * dd, a[1] + t[1] * uu + nrm[1] * dd).mean()
+                # One solid hull, not a comb of bows: the white in the
+                # strip fills most of its convex outline.
+                gu, gd = np.meshgrid(uu, np.arange(st0, st0 + Lmed, 0.4))
+                gx, gy = a[0] + t[0] * gu + nrm[0] * gd, a[1] + t[1] * gu + nrm[1] * gd
+                on = wsample(gx, gy)
+                solid = 0.0
+                if on.sum() > 10:
+                    hull_ = shapely.MultiPoint(np.column_stack([gu[on], gd[on]])).convex_hull
+                    solid = on.sum() * 0.4 * STEP / max(hull_.area, 1e-6)
+                if (cov > 0.7 and solid > 0.8 and flat > 0.8) or (cov > 0.85 and solid > 0.85 and flat > 0.7):
+                    along[idx] = True
+                    # The yacht may reach past the end of the quay: follow
+                    # it along its middle line both ways.
+                    mid_ = a + nrm * (st0 + Lmed / 2)
+                    ends = []
+                    for sg, u0 in ((-1, uu[0]), (1, uu[-1])):
+                        e = np.arange(0, 120, DS)
+                        q = u0 + sg * e
+                        on = wsample(mid_[0] + t[0] * q, mid_[1] + t[1] * q)
+                        gap = np.convolve(~on, np.ones(int(1.5 / DS)), "valid") >= int(1.5 / DS)
+                        stop = int(np.argmax(gap)) if gap.any() else len(e) - 1
+                        ends.append(u0 + sg * e[stop])
+                    Lal = float(min(ends[1] - ends[0], 120))
+                    boats.append((mid_ + t * ends[0], t, Lal, Lmed, "alongside", Lal))
+        lab, nr = ndimage.label((Lm >= 3.0) & ~along)
+        for k in range(1, nr + 1):
+            idx = np.nonzero(lab == k)[0]
+            w = len(idx) * STEP
+            if w < 1.6:
+                continue
+            Lp = Lm[idx]
+            cuts = []
+            for i in range(2, len(Lp) - 2):
+                if Lp[i] <= Lp[i - 1] and Lp[i] <= Lp[i + 1]:
+                    lh = min(Lp[:i].max(), Lp[i + 1:].max())
+                    if lh - Lp[i] > max(1.5, 0.2 * lh) and (not cuts or (i - cuts[-1]) * STEP > 1.6):
+                        cuts.append(i)
+            for pp in np.split(np.arange(len(idx)), cuts):
+                if len(pp) * STEP < 1.4:
+                    continue
+                ii = idx[pp]
+                Lb = float(np.percentile(Lm[ii], 80))
+                if Lb < 4:
+                    continue
+                wb = len(ii) * STEP
+                nb = max(1, int(round(wb / (np.clip(Lb / 3.2, 2.2, 13) + 0.4))))
+                pitch = wb / nb
+                # (superyachts are slim: a 60 m yacht is about 11 m wide)
+                beam = float(np.clip(pitch - 0.35, Lb / (3.8 if Lb < 20 else 6.5), min(Lb / 2.5, 14)))
+                st = float(np.median(s0[ii]))
+                st = float(np.clip(st, 0.4, 3.0 if Lb < 20 else 11.0))
+                for j in range(nb):
+                    uc = u[ii[0]] - STEP / 2 + pitch * (j + 0.5)
+                    boats.append((a + t * uc + nrm * st, nrm, Lb, beam, "stern-to", w))
+    # Long rows first: where two rows meet at a corner, the row wins.
+    boats.sort(key=lambda b: -b[5])
+    for b in boats:
+        yield b[:5]
+
+    # What the rows did not explain: big yachts rafted outside another one,
+    # or at anchor; a mid-size boat right by a quay.
+    img = Image.new("L", (white.shape[1], white.shape[0]), 0)
+    dr = ImageDraw.Draw(img)
+    for st, ax, L, W, _, _ in boats:
+        sd = np.array([-ax[1], ax[0]])
+        q = [st + ax * uu + sd * vv for uu, vv in hull_outline(L, W)]
+        dr.polygon([((x - X0) / HR, (Y1 - y) / HR) for x, y in q], fill=255)
+    taken = ndimage.binary_dilation(np.asarray(img) > 0, iterations=int(1.0 / HR))
+    lab, n = ndimage.label(white)
+    for i, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        mk = lab[sl] == i
+        if mk.sum() * HR * HR < 12:
+            continue
+        left = ndimage.binary_opening(mk & ~taken[sl], iterations=int(0.6 / HR))
+        if left.sum() < 0.35 * mk.sum() or left.sum() * HR * HR < 12:
+            continue
+        r_, c_ = np.nonzero(left)
+        x = X0 + (c_ + sl[1].start + 0.5) * HR
+        y = Y1 - (r_ + sl[0].start + 0.5) * HR
+        yield from _outline_boats(np.column_stack([x, y]), HR, moor_d)
+
+
+def _outline_boats(pts, HR, moor_d, depth=0):
+    """One white shape left over by the rows: a yacht in its own outline,
+    or several side by side (a raft of superyachts touching), split where
+    the shape narrows between hulls."""
+    cen = pts.mean(0)
+    ev, v = np.linalg.eigh(np.cov((pts - cen).T))
+    ax = v[:, 1]
+    pr, pe = (pts - cen) @ ax, (pts - cen) @ v[:, 0]
+    L, W = pr.max() - pr.min() + HR, pe.max() - pe.min() + HR
+    if L >= 20 and W > L / 3.2 and depth < 3:
+        bins = np.arange(pe.min(), pe.max() + 0.4, 0.4)
+        h, _ = np.histogram(pe, bins)
+        h = ndimage.uniform_filter1d(h.astype(float), 3)
+        lo = int(np.argmin(h[len(h) // 6: len(h) - len(h) // 6])) + len(h) // 6 if len(h) > 12 else -1
+        if lo > 0 and h[lo] < 0.6 * min(h[:lo].max(), h[lo + 1:].max()):
+            cut = bins[lo]
+            for part in (pe < cut, pe >= cut):
+                if part.sum() * HR * HR > 12:
+                    yield from _outline_boats(pts[part], HR, moor_d, depth + 1)
+            return
+    fill = len(pts) * HR * HR / max(L * W, 1)
+    if fill < 0.5 or L / W > 6 or L > 140 or W < 1.8:
+        return
+    mid = cen + ax * (pr.max() + pr.min()) / 2
+    dl = lambda p: float(moor_d[int(np.clip((Y1 - p[1]) / RES, 0, moor_d.shape[0] - 1)),
+                                int(np.clip((p[0] - X0) / RES, 0, moor_d.shape[1] - 1))])
+    near = min(dl(mid + ax * L / 2), dl(mid - ax * L / 2), dl(mid))
+    if L < 14 and (L < 7 or near > 6):
+        return                             # under way in the fairway, or a glint
+    if dl(mid + ax * L / 2) < dl(mid - ax * L / 2):
+        ax = -ax                           # bow away from the quay
+    yield mid - ax * L / 2, ax, L, float(min(W, L / 2.8)), "photo outline"
+
+
+def mareterra_berths(ways, sea, on_pier):
+    """Port du Petit Portier, Mareterra's marina (opened 2024, after the
+    photo): about 16 berths for boats up to 16 m, stern-to along its two
+    long quays, the fairway down the middle kept clear, nothing across the
+    head of the basin or in its mouth. Yields like photo_berths."""
+    mm = None
+    for t, pts_, closed in ways:
+        if closed and t.get("leisure") == "marina" and len(pts_) > 3:
+            g = Polygon(pts_).buffer(0)
+            if MT["zone"].buffer(30).contains(g.representative_point()):
+                mm = g
+    if mm is None:
+        return
+    seaR = Raster((sea & ~on_pier).astype(np.float32))
+    wet = lambda p: seaR.sample(np.array([p[0]]), np.array([p[1]]))[0] > 0.5
+    rb = np.random.default_rng(16)
+    ring = np.asarray(orient(mm, 1.0).exterior.coords)
+    # The basin's long sides: the two longest edges of its outline that
+    # face each other (roughly parallel).
+    edges = []
+    for a, b in zip(ring[:-1], ring[1:]):
+        L = float(np.hypot(*(b - a)))
+        if L > 25:
+            edges.append((L, a, b))
+    edges.sort(key=lambda e: -e[0])
+    if not edges:
+        return
+    t0 = (edges[0][2] - edges[0][1]) / edges[0][0]
+    facing = [e for e in edges[1:] if abs(float((e[2] - e[1]) @ t0)) / e[0] > 0.8]
+    edges = edges[:1] + facing[:1]
+    tot = sum(e[0] - 14 for e in edges)
+    for L, a, b in edges:
+        used, cap = 0, int(round(16 * (L - 14) / tot))
+        t = (b - a) / L
+        n = np.array([-t[1], t[0]])        # inward for a counter-clockwise ring
+        if not wet((a + b) / 2 + n * 4):
+            n = -n
+        # Keep clear of the corners (the quay's ends, the mouth).
+        s = 7.0
+        while s < L - 7.0 and used < cap:
+            Lb = float(rb.choice([9.5, 11, 12, 13, 14, 15, 16]))
+            beam = round(Lb / 3.1, 1)
+            p = a + t * (s + beam / 2) + n * 0.8
+            if all(wet(p + n * q) for q in (1.0, Lb * 0.5, Lb + 0.5)):
+                if rb.random() > 0.12:     # one or two berths free
+                    yield p, n, Lb, beam, "marina"
+                    used += 1
+            s += beam + 0.9
+
+
+def yachts(m, ortho, sea, stats, ways=(), photo=None):
+    """The boats in Port Hercule, where the IGN photo shows them (see
+    photo_berths), and in Mareterra's marina (see mareterra_berths), rebuilt
+    as clean stylised boats: white hull with a dark boot stripe, decks and
+    stepped superstructures with dark window bands; small open boats and
+    a few sailing yachts among them."""
     # Piers and pontoons (built as decks by piers()): white shapes on them
     # are tents, kiosks and roofs, never boats.
     pim = Image.new("L", (sea.shape[1], sea.shape[0]), 0)
@@ -5016,17 +5337,23 @@ def yachts(m, ortho, sea, stats, ways=()):
             dpi.polygon([((x - X0) / RES, (Y1 - y) / RES) for x, y in q.exterior.coords], fill=255)
     on_pier = np.asarray(pim) > 0
     rnd = np.random.default_rng(5)
-    # Where boats tie up: quays, pontoons and piers. Distance to them, the
-    # nearest one, and their edge (for the line of the quay).
     moor = ~sea | on_pier
-    moor_d, moor_i = ndimage.distance_transform_edt(~moor, return_indices=True)
-    moor_d = moor_d * RES
-    moor_edge = moor & ~ndimage.binary_erosion(moor)
+    moor_d = ndimage.distance_transform_edt(~moor) * RES
+    water = sea & ~on_pier
+    if MT is not None:
+        water &= ~MT["mask"]          # Mareterra: the 2022 photo shows work barges
+    stats["boats_by_berth"] = {}
 
     placed = []
 
-    def build(stern, ax, L, W):
+    def build(stern, ax, L, W, sail_odds=0.1):
         side = np.array([-ax[1], ax[0]])
+        # What sort of boat: under 8.5 m an open day boat; a share of the
+        # 9-18 m berths are sailing yachts (slimmer, a mast); the rest
+        # motor yachts.
+        sail = 9 <= L <= 18 and rnd.random() < sail_odds
+        if sail:
+            W = min(W, L / 3.3)
 
         def plan(along0, along1, half):
             q = [(stern + ax * a + side * s) for a, s in
@@ -5037,12 +5364,13 @@ def yachts(m, ortho, sea, stats, ways=()):
         if not hull.is_valid:
             hull = hull.buffer(0)
         if not isinstance(hull, Polygon):
-            return
+            return False
         # Two rows meeting at a quay corner: no boat inside another.
         for h_ in placed:
             if h_.intersects(hull) and h_.intersection(hull).area > 0.08 * min(h_.area, hull.area):
-                return
+                return False
         placed.append(hull)
+        YACHT_PLANS.append(hull)
         hull_h = min(0.8 + 0.045 * L, 4.5)
         white = np.array(hexrgb(rnd.choice(["#f6f5f1"] * 5 + ["#eceae4", "#eceae4", "#2a3c55"])))
         dark_hull = white.mean() < 100
@@ -5067,6 +5395,41 @@ def yachts(m, ortho, sea, stats, ways=()):
             inner = to_xy(np.array(hull_outline(L * 0.985, W * 0.94)) + [0.01 * L, 0])
             loft(m, DK, zdk, DK, zdk + 0.55, white, HULL)
             loft(m, inner, zdk + 0.55, inner, zdk, white * 0.92, HULL)     # inside face
+        if L < 8.5:
+            # Open day boat: a low cockpit, a centre console with its
+            # windscreen, a sun cushion on the foredeck.
+            stats["yachts"] += 1
+            stats["day_boats"] = stats.get("day_boats", 0) + 1
+            for q in to_polys(plan(0.08 * L, 0.6 * L, W * 0.36).intersection(hull.buffer(-0.25))):
+                add_roof(m, orient(q, 1.0), hull_h * 1.06 + 0.03, hexrgb("#d8d3c7"), False)
+            c_ = to_xy(np.array([[0.5 * L, 0.0]]))[0]
+            _box(m, *c_, ax, 0.9, 0.75, hull_h, hull_h + 0.75, white * 0.97)
+            g_ = to_xy(np.array([[0.5 * L + 0.5, 0.0]]))[0]
+            _box(m, *g_, ax, 0.08, 0.9, hull_h + 0.75, hull_h + 1.15, glass)
+            for q in to_polys(plan(0.66 * L, 0.84 * L, W * 0.3).intersection(hull.buffer(-0.2))):
+                add_roof(m, orient(q, 1.0), hull_h + 0.12, hexrgb(rnd.choice(["#e9e4d6", "#2f4a68", "#d8d2c0"])), False)
+            return True
+        if sail:
+            # Sailing yacht: a low coachroof with dark ports, a cockpit
+            # aft, the mast a third of the way back and the boom to the
+            # cockpit, sail furled under a blue cover.
+            stats["yachts"] += 1
+            stats["sailing_yachts"] = stats.get("sailing_yachts", 0) + 1
+            lo = to_xy(np.array(hull_outline(0.42 * L, W * 0.62)) + [0.3 * L, 0])
+            hi = to_xy(np.array(hull_outline(0.4 * L, W * 0.55)) + [0.31 * L, 0])
+            loft(m, lo, np.full(len(lo), hull_h), hi, np.full(len(hi), hull_h + 0.7), top, HULL, band=True)
+            roof = Polygon(hi).buffer(0)
+            if isinstance(roof, Polygon):
+                add_roof(m, orient(roof, 1.0), hull_h + 0.7, top * 0.97, False)
+            for q in to_polys(plan(0.05 * L, 0.28 * L, W * 0.33).intersection(hull.buffer(-0.3))):
+                add_roof(m, orient(q, 1.0), hull_h * 1.06 + 0.03, hexrgb("#b88a5c"), False)
+            mp = to_xy(np.array([[0.62 * L, 0.0]]))[0]
+            mh = 1.35 * L + 1.5
+            steel = np.array(hexrgb("#c9ccd0"))
+            _box(m, *mp, ax, 0.22, 0.16, hull_h + 0.7, hull_h + mh, steel, style=METAL)
+            bm_ = to_xy(np.array([[0.62 * L - 0.18 * L, 0.0]]))[0]
+            _box(m, *bm_, ax, 0.36 * L, 0.42, hull_h + 1.6, hull_h + 2.05, np.array(hexrgb("#1f3f66")))
+            return True
         if L > 9:
             aft = plan(0.03 * L, 0.2 * L, W * 0.4).intersection(hull.buffer(-0.4))
             for q in to_polys(aft):
@@ -5114,75 +5477,18 @@ def yachts(m, ortho, sea, stats, ways=()):
             if L > 30:
                 _box(m, *c_, ax, 0.25, 0.25, z + ah, z + ah + min(3.5, 0.06 * L), np.array(hexrgb("#dedad2")))
         stats["yachts"] += 1
+        return True
 
-    lab, n = ndimage.label(boat)
-    for i, sl in enumerate(ndimage.find_objects(lab), 1):
-        if sl is None:
-            continue
-        rr, cc = np.nonzero(lab[sl] == i)
-        if len(rr) < 40 or len(rr) > 60000:
-            continue
-        rr = rr + sl[0].start; cc = cc + sl[1].start
-        if on_pier[rr, cc].mean() > 0.15:
-            continue
-        if MT is not None and MT["mask"][rr, cc].mean() > 0.2:
-            continue                     # Mareterra: the 2022 photo shows work barges
-        x, y = cell_xy(rr, cc)
-        pts = np.column_stack([x, y])
-        cen = pts.mean(0)
-        w, v = np.linalg.eigh(np.cov((pts - cen).T))
-        ax = v[:, 1]
-        proj = (pts - cen) @ ax
-        perp = (pts - cen) @ v[:, 0]
-        L = proj.max() - proj.min() + RES
-        Wr = perp.max() - perp.min() + RES
-        fill = len(rr) * RES * RES / max(L * Wr, 1)
-        if L < 5 or Wr < 1.8 or fill < 0.45 or L / Wr > 7 or L > 140:
-            continue                     # wakes, glints, foam
-        if fill > 0.9 and L > 12:
-            continue                     # a crisp rectangle: a tent or roof on a quay, not a hull
-        W = min(Wr, L / 2.6)
-        mid = cen + ax * (proj.max() + proj.min()) / 2
-        for stern, ax_, L_, W_ in moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
-            build(stern, ax_, L_, W_)
-    # Mareterra's marina (Port du Petit Portier, opened 2024): the photo
-    # predates it, so its berths are laid out here: yachts of 12-30 m
-    # moored stern-to along the quays, bows to the middle of the basin,
-    # some berths empty.
+    found = photo_berths(photo if photo is not None else ortho, water, ways, moor_d)
+    basins = marina_basins()
+    if basins is not None:
+        bz = shapely.prepared.prep(basins.buffer(4.0))
+        found = (b for b in found if b[4] == "marina" or bz.contains(Point(*(b[0] + b[1] * b[2] / 2))))
     if MT is not None:
-        mm = np.zeros(sea.shape, bool)
-        for t, pts_, closed in ways:
-            if closed and t.get("leisure") == "marina" and len(pts_) > 3:
-                g = Polygon(pts_).buffer(0)
-                if MT["zone"].buffer(30).contains(g.representative_point()):
-                    mm |= raster_mask(g.buffer(2.0))
-        Wm = sea & mm & ~on_pier
-        if Wm.sum() > 400:
-            wp = cells_to_poly(Wm, X0, Y1, RES)
-            wp = max(to_polys(wp), key=lambda q: q.area).simplify(0.6)
-            WmR = Raster(Wm.astype(np.float32))
-            moorR = Raster(moor.astype(np.float32))
-            _s1 = lambda R_, q_: float(R_.sample(np.array([q_[0]]), np.array([q_[1]]))[0])
-            rb = np.random.default_rng(47)
-            ring_ = wp.exterior
-            for s_ in np.arange(3.0, ring_.length, 5.5):
-                p0 = np.array(ring_.interpolate(s_).coords[0])
-                p1 = np.array(ring_.interpolate(s_ + 1.0).coords[0])
-                t_ = (p1 - p0) / (np.linalg.norm(p1 - p0) + 1e-9)
-                n_ = np.array([-t_[1], t_[0]])
-                if _s1(WmR, p0 + n_ * 2.0) < 0.5:
-                    n_ = -n_
-                if _s1(WmR, p0 + n_ * 2.0) < 0.5 or _s1(moorR, p0 - n_ * 1.2) < 0.5:
-                    continue                 # the basin's mouth, not a quay
-                if rb.random() < 0.3:
-                    continue                 # an empty berth
-                free = 0.0
-                while free < 80 and _s1(WmR, p0 + n_ * (free + 1.0)) > 0.5:
-                    free += 1.0
-                Lb = float(min(rb.choice([12, 14, 16, 18, 20, 24, 28, 30]), 0.45 * free))
-                if Lb < 9:
-                    continue
-                build(p0 + n_ * 0.8, n_, Lb, float(np.clip(Lb / 3.4, 3.2, 7.5)))
+        found = itertools.chain(found, mareterra_berths(ways, sea, on_pier))
+    for stern, ax, L, W, how in found:
+        if build(stern, ax, L, W, sail_odds=0.3 if how == "marina" else 0.1):
+            stats["boats_by_berth"][how] = stats["boats_by_berth"].get(how, 0) + 1
 
 
 def loft(m, A, za, B, zb, col, kind, band=False):
@@ -5221,72 +5527,6 @@ def fan(m, ring, z, centre, zc, col, kind):
     c = enu_fast(np.array([centre[0]]), np.array([centre[1]]), np.array([zc]))
     a, b = p, np.roll(p, -1, 0)
     m.tri(np.repeat(c, len(p), 0), a, b, col, kind)
-
-
-def moor_boats(pts, mid, ax, L, W, moor_d, moor_i, moor_edge):
-    """Lay a white shape on the water out as moored boats. In Port Hercule
-    boats lie stern-to: bow out, perpendicular to the quay or pontoon,
-    side by side. A shape touching a quay is read in the quay's frame: its
-    depth out from the quay is the boat length, its width along the quay
-    holds as many boats as fit side by side (neighbours merge into one
-    shape in the photo). Shapes out in the open keep their own axis.
-    Yields (stern point, bow direction, length, beam)."""
-    rows = np.clip(((Y1 - pts[:, 1]) / RES).astype(int), 0, moor_d.shape[0] - 1)
-    cols = np.clip(((pts[:, 0] - X0) / RES).astype(int), 0, moor_d.shape[1] - 1)
-    d = moor_d[rows, cols]
-    if d.min() > 6.0:
-        # Free: bow away from the nearest quay.
-        def dl(p):
-            c_ = int(np.clip((p[0] - X0) / RES, 0, moor_d.shape[1] - 1)); r_ = int(np.clip((Y1 - p[1]) / RES, 0, moor_d.shape[0] - 1))
-            return moor_d[r_, c_]
-        if dl(mid + ax * L / 2) < dl(mid - ax * L / 2):
-            ax = -ax
-        yield mid - ax * L / 2, ax, L, W
-        return
-    k = int(np.argmin(d))
-    qr, qc = moor_i[0][rows[k], cols[k]], moor_i[1][rows[k], cols[k]]
-    q0 = np.array(cell_xy(qr, qc), float)
-    # The line of the quay: its edge cells within 12 m of where the boat
-    # touches it.
-    w_ = int(12 / RES)
-    r0, r1 = max(0, qr - w_), min(moor_d.shape[0], qr + w_ + 1)
-    c0, c1 = max(0, qc - w_), min(moor_d.shape[1], qc + w_ + 1)
-    er, ec = np.nonzero(moor_edge[r0:r1, c0:c1])
-    tdir = None
-    if len(er) > 10:
-        ex, ey = cell_xy(er + r0, ec + c0)
-        e = np.column_stack([ex, ey])
-        e = e[np.hypot(e[:, 0] - q0[0], e[:, 1] - q0[1]) < 12]
-        if len(e) > 10:
-            ev, evec = np.linalg.eigh(np.cov((e - e.mean(0)).T))
-            if ev[1] > 4 * max(ev[0], 1e-6):
-                tdir = evec[:, 1]
-    if tdir is None:
-        # A corner or a ragged edge: square to the shape's own axis.
-        tdir = np.array([-ax[1], ax[0]])
-    nrm = np.array([-tdir[1], tdir[0]])
-    if (mid - q0) @ nrm < 0:
-        nrm = -nrm
-    a = (pts - q0) @ nrm
-    b = (pts - q0) @ tdir
-    depth = a.max() - max(a.min(), 0.0) + RES
-    width = b.max() - b.min() + RES
-    if depth < 4.5 and width > 2.5 * depth:
-        # Lying alongside the quay.
-        Lb = min(width, 70.0)
-        yield (q0 + nrm * (max(a.min(), 0.6) + depth / 2) + tdir * (b.min() + (width - Lb) / 2),
-               tdir, Lb, min(depth, Lb / 3.2))
-        return
-    Lb = float(np.clip(depth, 5.0, 90.0))
-    beam = float(np.clip(Lb / 3.1, 2.2, 13.0))
-    n_ = max(1, int(round(width / (beam + 0.9))))
-    pitch = width / n_
-    beam = min(beam, pitch - 0.7)
-    if beam < 1.8:
-        n_ = max(1, int(width // 2.6)); pitch = width / n_; beam = pitch - 0.7
-    a_st = max(a.min(), 0.8)
-    for j in range(n_):
-        yield q0 + nrm * a_st + tdir * (b.min() + pitch * (j + 0.5)), nrm, Lb, beam
 
 
 def pool_features(m, ways, mnt):
@@ -6460,7 +6700,7 @@ def main():
     print("Mareterra planting…", mareterra_trees(tm, ways, mnt_f, bgrow, stats))
     print("harbour…")
     hm = Mesh()
-    yachts(hm, ortho, sea, stats, ways)
+    yachts(hm, ortho, sea, stats, ways, ortho_hi)
     piers(hm, ways, sea)
     print("quay walls…", quay_walls(hm, sea, mnt_f, stats))
     stats["bridges"] = bridges(bm, ways, mns, mnt)
