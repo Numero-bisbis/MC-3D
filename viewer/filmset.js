@@ -72,6 +72,23 @@
         float top = (1.0 - smoothstep(rr - aa.x, rr + aa.x, d)) * step(ys, f.y);
         return max(rect, top);
       }
+      // Roman (canal) tiles: a: across the slope, s: down it, in metres;
+      // aa: their screen footprints. Rounded caps in rows across the slope
+      // with dark channels between them, each course overlapping the next
+      // with a shadowed lip, every tile a slightly different fired colour.
+      vec3 romanTiles(float a, float s, float aaA, float aaS) {
+        float fa = fract(a / 0.42), fs = fract(s / 0.40);
+        float capW = 1.0 - smoothstep(0.3, 0.6, aaA / 0.42);       // fades once a row is under ~3 px
+        float lipW = 1.0 - smoothstep(0.3, 0.6, aaS / 0.40);
+        float cap = sin(fa * 3.1416);                         // 0 in the channel, 1 on the crown
+        float shade = mix(1.0, 0.72 + 0.4 * pow(cap, 0.7), capW);
+        float lip = smoothstep(0.78, 0.97, fs) * 0.4 * lipW;            // shadow under the next course
+        float lit = (1.0 - smoothstep(0.0, 0.12, fs)) * 0.12 * lipW;      // the course's sunlit front edge
+        float w = capW * lipW;
+        float h = hash12(floor(vec2(a / 0.42, s / 0.40)) + 11.0) - 0.5;
+        vec3 tone = mix(vec3(1.0), vec3(1.0 + 0.16 * h, 1.0 + 0.05 * h, 1.0 - 0.10 * h) * (0.93 + 0.14 * hash12(floor(vec2(a / 0.42, s / 0.40)))), w);
+        return tone * shade * (1.0 - lip + lit);
+      }
       void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
         vec4 c = fsInput.attributes.color_0;
         float a255 = floor(c.a * 255.0 + 0.5);
@@ -587,11 +604,11 @@
             nM *= sign(nM.y + 1e-4);
             float pitched = 1.0 - smoothstep(0.94, 0.985, nM.y);
             float lum = dot(d, vec3(0.3, 0.59, 0.11));
-            float terra = smoothstep(0.04, 0.12, d.r - d.b) * smoothstep(1.04, 1.2, d.r / (d.g + 0.02));
+            float terra = smoothstep(0.03, 0.10, d.r - d.b) * smoothstep(1.03, 1.15, d.r / (d.g + 0.02));
             vec3 det = vec3(0.9 + 0.18 * grain);
             vec3 tileF = vec3(1.0);
             // Tiles read from further away than gravel does.
-            float nearT = 1.0 - smoothstep(0.08, 0.4, pxr);
+            float nearT = 1.0 - smoothstep(0.1, 0.55, pxr);
             if (pitched > 0.0) {
               // Tiles: courses down the slope, each with a shadowed lower
               // lip; on terracotta, round Roman tiles across it; on slate
@@ -600,11 +617,7 @@
               float sDown = dot(pr.xz, dn) / max(nM.y, 0.5);
               float sAlong = dot(pr.xz, vec2(-dn.y, dn.x));
               float aaS = fwidth(sDown) * 1.5, aaA = fwidth(sAlong) * 1.5;
-              float course = fract(sDown / 0.36);
-              float lip = smoothstep(0.82 - aaS / 0.36, 0.95, course) * 0.2;
-              float barrel = 0.97 + 0.14 * sin(sAlong / 0.21 * 3.1416) * (1.0 - smoothstep(0.03, 0.09, aaA));
-              float tileTone = 0.96 + 0.08 * hash12(floor(vec2(sAlong / 0.21, sDown / 0.36)));
-              vec3 roman = vec3(barrel * tileTone * (1.0 - lip));
+              vec3 roman = romanTiles(sAlong, sDown, aaA, aaS);
               float dm = (0.5 - abs(fract(sAlong / 0.55) - 0.5)) * 0.55;    // metres to the nearest seam
               float seam = mix(0.72, 1.0, smoothstep(0.0, 0.025 + aaA, dm));
               vec3 metal = vec3(seam * (0.95 + 0.08 * grain));
@@ -628,10 +641,7 @@
               det = mix(vec3(1.0), mix(membrane, paver, pale), near);
               // Terracotta seen on a flat-modelled roof is a tiled roof the
               // set keeps flat: tile courses lined up with the building.
-              float lipF = smoothstep(0.82 - aa.y / 0.36, 0.95, fract(f2.y / 0.36)) * 0.2;
-              float barF = 0.97 + 0.14 * sin(f2.x / 0.21 * 3.1416) * (1.0 - smoothstep(0.03, 0.09, aa.x * 1.5));
-              float toneF = 0.96 + 0.08 * hash12(floor(vec2(f2.x / 0.21, f2.y / 0.36)));
-              det = mix(det, mix(vec3(1.0), vec3(barF * toneF * (1.0 - lipF)), nearT), terra);
+              det = mix(det, mix(vec3(1.0), romanTiles(f2.x, f2.y, aa.x, aa.y), nearT), terra);
             }
             material.diffuse = d * mix(det, tileF, pitched);
             material.roughness = 0.8;
