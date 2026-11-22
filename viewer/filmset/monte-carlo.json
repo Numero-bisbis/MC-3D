@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3346440,
+ "triangles": 3345284,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -62,7 +62,7 @@
  "levels": 1371,
  "towers": 10,
  "trees": 1430,
- "yachts": 486,
+ "yachts": 575,
  "real_floors": 731,
  "styles": [
   265,
@@ -87,6 +87,14 @@
   -0.009999999999999676
  ],
  "mareterra_trees": 120,
+ "boats_by_berth": {
+  "alongside": 6,
+  "stern-to": 531,
+  "photo outline": 22,
+  "marina": 16
+ },
+ "day_boats": 265,
+ "sailing_yachts": 28,
  "quay_wall_m": 2471,
  "bridges": 18,
  "diving_towers": 1,
