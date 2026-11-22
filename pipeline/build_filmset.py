@@ -2257,6 +2257,197 @@ def church_sainte_devote(m, mntR):
     return body.union(tp)
 
 
+# ------------------------------------------------------------ Grimaldi Forum
+# The congress centre on the Larvotto seafront (Ferrier & Notari, 2000):
+# most of it lies under the ground; above it shows a long hull clad in
+# green metal, a ribbon of glass under a jutting cornice, and at its south
+# end the faceted glass hall of the entrance, which slopes down to the
+# esplanade. Volumes from the LiDAR, outline from BD TOPO, the glass hall's
+# outline from the 20 cm photo, colours from street photos (Mapillary).
+GF_PARTS = ("BATIMENT0000000074070278", "BATIMENT0000000324292897",
+            # two small blocks BD TOPO draws inside its outline (a kiosk on
+            # the east terrace, a stair head on the south steps)
+            "BATIMENT0000002476006697", "BATIMENT0000002476006736")
+GF_GLASS = [(1056820.5, 6303839.1), (1056828.1, 6303842.5), (1056833.1, 6303856.9), (1056836.8, 6303858.5),
+            (1056852.0, 6303858.0), (1056852.0, 6303814.0), (1056847.2, 6303814.3), (1056841.3, 6303816.2),
+            (1056834.7, 6303818.7), (1056829.2, 6303820.8)]
+GF_GREEN, GF_TRIM = "#3f6c49", "#4c7b55"
+GF_HALL, GF_RIBBON = "#9cc9e0", "#2c3b42"
+GF_TIERS = (12.8, 18.0)            # NGF m: the LiDAR's roof levels split here
+GF_HALL_EAVE, GF_HALL_TOP, GF_HALL_RUN = 8.2, 16.2, 6.0
+FORUM_GLASS, FORUM_CLAD = 13, 14   # PLAIN styles (viewer: faceted glass, green cladding)
+
+
+def _ring_offset(pts, o):
+    """Closed ring (n, 2), CCW, each vertex pushed out by o along the mitre."""
+    a = np.roll(pts, 1, 0)
+    b = np.roll(pts, -1, 0)
+    def nrm(d):
+        d = d / np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+        return np.column_stack([d[:, 1], -d[:, 0]])
+    n1, n2 = nrm(pts - a), nrm(b - pts)
+    bis = n1 + n2
+    bis /= np.maximum(np.linalg.norm(bis, axis=1, keepdims=True), 1e-9)
+    cosh = np.clip(np.sum(bis * n1, 1), 0.5, 1.0)
+    return pts + bis * (o / cosh)[:, None]
+
+
+def _loft(m, pts, zo, col, style, uv2=None):
+    """Wall rings: zo = [(z, offset), ...] bottom to top; uv = (m along, z)."""
+    pts = np.asarray(pts, float)
+    n = len(pts)
+    along = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1))])
+    j0 = np.arange(n)
+    j1 = (j0 + 1) % n
+    for (za, oa), (zb, ob) in zip(zo[:-1], zo[1:]):
+        A = _ring_offset(pts, oa)
+        B_ = _ring_offset(pts, ob)
+        a0 = enu_fast(A[j0, 0], A[j0, 1], np.full(n, za)); a1 = enu_fast(A[j1, 0], A[j1, 1], np.full(n, za))
+        b0 = enu_fast(B_[j0, 0], B_[j0, 1], np.full(n, zb)); b1 = enu_fast(B_[j1, 0], B_[j1, 1], np.full(n, zb))
+        u0, u1 = along[j0], along[j0] + np.linalg.norm(pts[j1] - pts[j0], axis=1)
+        uva = np.stack([np.column_stack([u0, np.full(n, za)]), np.column_stack([u1, np.full(n, za)]),
+                        np.column_stack([u1, np.full(n, zb)])], 1)
+        uvb = np.stack([np.column_stack([u0, np.full(n, za)]), np.column_stack([u1, np.full(n, zb)]),
+                        np.column_stack([u0, np.full(n, zb)])], 1)
+        k0 = len(m.uv2)
+        m.tri(a0, a1, b1, col, PLAIN, uv=uva, style=style)
+        m.tri(a0, b1, b0, col, PLAIN, uv=uvb, style=style)
+        if uv2 is not None:
+            for k in range(k0, len(m.uv2)):
+                m.uv2[k] = np.tile(np.asarray(uv2, np.float32), (len(m.uv2[k]), 1))
+
+
+def _flat_ring(m, outer, inner, z, col):
+    """A flat band at z between two rings with the same vertices (cornice tops)."""
+    n = len(outer)
+    j0 = np.arange(n)
+    j1 = (j0 + 1) % n
+    o0 = enu_fast(outer[j0, 0], outer[j0, 1], np.full(n, z)); o1 = enu_fast(outer[j1, 0], outer[j1, 1], np.full(n, z))
+    i0 = enu_fast(inner[j0, 0], inner[j0, 1], np.full(n, z)); i1 = enu_fast(inner[j1, 0], inner[j1, 1], np.full(n, z))
+    m.tri(o0, o1, i1, col, PLAIN)
+    m.tri(o0, i1, i0, col, PLAIN)
+
+
+def _soffit(m, inner, outer, z, col):
+    n = len(outer)
+    j0 = np.arange(n)
+    j1 = (j0 + 1) % n
+    o0 = enu_fast(outer[j0, 0], outer[j0, 1], np.full(n, z)); o1 = enu_fast(outer[j1, 0], outer[j1, 1], np.full(n, z))
+    i0 = enu_fast(inner[j0, 0], inner[j0, 1], np.full(n, z)); i1 = enu_fast(inner[j1, 0], inner[j1, 1], np.full(n, z))
+    m.tri(o0, i1, o1, col, PLAIN)
+    m.tri(o0, i0, i1, col, PLAIN)
+
+
+def forum_hull(m, part, zb, zt, top):
+    """One tier's walls: green cladding (on the top tier a hull that leans
+    out towards the roof), a ribbon of dark glass, a jutting cornice."""
+    green, trim = np.array(hexrgb(GF_GREEN)), np.array(hexrgb(GF_TRIM))
+    for ring in [part.exterior]:
+        pts = np.asarray(orient(Polygon(ring), 1.0).exterior.coords)[:-1, :2]
+        h = zt - zb
+        if h < 2.0:
+            continue
+        lean = 1.3 if top else 0.0
+        rib = min(3.0 if top else 2.2, max(h - 2.5, 0.0))
+        zr = zt - 1.2 - rib
+        zo = [(zb, 0.0)]
+        if top:
+            zs = zt - 13.0
+            for t_ in (0.0, 0.3, 0.55, 0.78, 1.0):
+                z_ = zs + (zr - zs) * t_
+                if z_ > zb + 0.3:
+                    zo.append((z_, lean * t_ * t_))
+        if zo[-1][0] < zr - 0.05:
+            zo.append((zr, lean))
+        _loft(m, pts, zo, green, FORUM_CLAD)
+        if rib > 0.5:
+            _loft(m, pts, [(zr, lean), (zt - 1.2, lean)], hexrgb(GF_RIBBON), FORUM_GLASS, uv2=(1.0, 0.0))
+        co = lean + (0.55 if top else 0.35)
+        _soffit(m, _ring_offset(pts, lean), _ring_offset(pts, co), zt - 1.2, trim * 0.7)
+        _loft(m, pts, [(zt - 1.2, co), (zt + 0.6, co)], trim, None)
+        _flat_ring(m, _ring_offset(pts, co), _ring_offset(pts, -0.3), zt + 0.6, trim * 1.04)
+        _loft(m, _ring_offset(pts, -0.3)[::-1], [(zt, 0.0), (zt + 0.6, 0.0)], trim * 0.85, None)
+
+
+def forum_hall(m, mntR):
+    """The entrance: a hall of glass, flat on top and faceted down to the
+    street and the esplanade like a cut crystal (LiDAR: 16 m NGF on top,
+    eaves at the esplanade's level)."""
+    g = orient(Polygon(GF_GLASS), 1.0)
+    ring = np.asarray(g.exterior.coords)[:-1, :2]
+    gz = mntR.sample(ring[:, 0], ring[:, 1])
+    base = float(np.nanmin(gz)) if np.isfinite(gz).any() else 6.0
+    col = np.array(hexrgb(GF_HALL))
+    _loft(m, ring, [(base - 1.0, 0.0), (GF_HALL_EAVE, 0.0)], col, FORUM_GLASS)
+    slope = (GF_HALL_TOP - GF_HALL_EAVE) / GF_HALL_RUN
+    t = skeleton_roof(g, GF_HALL_EAVE, slope, GF_HALL_RUN, dt=GF_HALL_RUN / 2)
+    if t is not None:
+        v, zz, tri = t
+        P = enu_fast(v[:, 0], v[:, 1], zz)
+        # uv: plan metres for the facets' mullion lattice.
+        uv = np.column_stack([v[:, 0] - X0, v[:, 1] - Y0])
+        m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, PLAIN,
+              uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=FORUM_GLASS)
+    # A slim steel frame along the eaves.
+    _loft(m, ring, [(GF_HALL_EAVE - 0.25, 0.08), (GF_HALL_EAVE + 0.05, 0.08)], hexrgb("#d9dedf"), None)
+    return g
+
+
+def grimaldi_forum(m, polys, mns, mntR, photo, stats):
+    """Builds the Forum from its BD TOPO parts; returns its outlines."""
+    hall = forum_hall(m, mntR)
+    body = unary_union([p.buffer(0.3, join_style=2) for p in polys]).buffer(-0.3, join_style=2)
+    body = body.difference(hall.buffer(0.05, join_style=2))
+    body = unary_union([tidy_outline(orient(q, 1.0), 0.8) for q in to_polys(body) if q.area > 30])
+    ring = body.boundary
+    s = np.linspace(0, ring.length, int(ring.length))
+    p_ = shapely.line_interpolate_point(ring, s)
+    gz = mntR.sample(shapely.get_x(p_), shapely.get_y(p_))
+    base = float(np.nanmin(gz))
+    # Tiers from the LiDAR roof heights (NGF): the long hull at about 21 m,
+    # the north wing and the south steps at about 15, terraces lower.
+    x0, y0, x1, y1 = body.bounds
+    c0, c1 = int((x0 - X0) / RES), int(math.ceil((x1 - X0) / RES))
+    r0, r1 = int((Y1 - y1) / RES), int(math.ceil((Y1 - y0) / RES))
+    sub = mns[r0:r1, c0:c1]
+    gx, gy = cell_xy(r0 + np.arange(sub.shape[0])[:, None], c0 + np.arange(sub.shape[1])[None, :])
+    gx, gy = np.broadcast_arrays(gx, gy)
+    ins = contains_xy(body, gx, gy) & np.isfinite(sub)
+    tiers = []
+    prev = body
+    for li, thr in enumerate((-99.0,) + GF_TIERS):
+        mk = ins & (sub >= thr)
+        if li:
+            mk = ndimage.binary_opening(ndimage.binary_closing(mk, iterations=3), iterations=3) & ins
+            reg = cells_to_poly(mk, X0 + c0 * RES, Y1 - r0 * RES, RES).intersection(prev)
+            reg = unary_union([q for q in to_polys(reg) if q.area > 80])
+            if reg.is_empty:
+                break
+        else:
+            reg = body
+        nxt = (ins & (sub >= GF_TIERS[li])) if li < len(GF_TIERS) else np.zeros_like(ins)
+        own = mk & ~nxt
+        zt = float(np.percentile(sub[own], 75)) if own.sum() > 20 else float(np.percentile(sub[mk], 75))
+        if tiers and zt < tiers[-1][1] + 2.0:
+            break
+        tiers.append((reg, zt))
+        prev = reg
+    zb = base - 1.0
+    lx, ly = photo["lean"] if photo is not None else (0.0, 0.0)
+    for li, (reg, zt) in enumerate(tiers):
+        top = li == len(tiers) - 1
+        for part in to_polys(reg):
+            part = orient(part.simplify(0.4), 1.0)
+            forum_hull(m, part, zb, zt, top)
+            ph = None if photo is None else dict(photo, shift=((zt - base) * lx, (zt - base) * ly))
+            add_roof(m, part, zt, np.array(hexrgb(GF_GREEN)), False, photo=ph)
+        zb = zt
+    stats["landmarks"] = stats.get("landmarks", 0) + 1
+    stats["forum_tiers"] = [round(z, 1) for _, z in tiers]
+    print("Grimaldi Forum tiers (NGF):", stats["forum_tiers"])
+    return [orient(q, 1.0) for q in to_polys(body)] + [hall]
+
+
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
     global BAY_NOW, GROUND_R, SHOP_NOW
     mntR = Raster(mnt)
@@ -2268,6 +2459,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
         in_any = set(np.nonzero(contains_xy(allb, SHOPS["pts"][:, 0], SHOPS["pts"][:, 1]))[0].tolist())
     extent = box(X0, Y0, X1, Y1)
     footprint = []
+    forum = []
     for f in feats:
         g = shapely.force_2d(shape(f["geometry"])).buffer(0)
         for poly in to_polys(g):
@@ -2286,6 +2478,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
             key = f["properties"].get("cleabs") or poly.wkt[:60]
+            if key in GF_PARTS:
+                forum.append(poly)
+                continue
             if key == CHURCH_SD:
                 body = church_sainte_devote(m, mntR)
                 footprint.append(body)
@@ -2644,6 +2839,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
+    if forum:
+        footprint += grimaldi_forum(m, forum, mns, mntR, photo, stats)
     BAY_NOW = GROUND_R = SHOP_NOW = None
     return footprint
 

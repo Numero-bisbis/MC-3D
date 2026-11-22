@@ -816,6 +816,45 @@
             material.diffuse = base;
             material.roughness = 0.5;
             material.specular = vec3(0.06);
+          } else if (st > 12.5 && st < 13.5) {
+            // Grimaldi Forum glass (uv: metres). The entrance hall is a
+            // lattice of triangles in pale steel; the ribbon under the
+            // cornice (texCoord_1.x = 1) has upright mullions only.
+            bool ribbon = fsInput.attributes.texCoord_1.x > 0.5;
+            vec2 aa = max(fwidth(uv) * 1.2, vec2(0.002));
+            vec2 q = uv / (ribbon ? vec2(1.6, 99.0) : vec2(2.4, 2.4));
+            vec2 qa = aa / (ribbon ? vec2(1.6, 99.0) : vec2(2.4, 2.4));
+            float w = ribbon ? 0.035 : 0.025;
+            float lx = 1.0 - smoothstep(w, w + qa.x, abs(fract(q.x + 0.5) - 0.5));
+            float ly = ribbon ? 0.0 : 1.0 - smoothstep(w, w + qa.y, abs(fract(q.y + 0.5) - 0.5));
+            float qd = q.x + q.y;
+            float ld = ribbon ? 0.0 : 1.0 - smoothstep(w, w + qa.x + qa.y, abs(fract(qd + 0.5) - 0.5));
+            float frame = clamp(lx + ly + ld, 0.0, 1.0);
+            float far_ = smoothstep(0.08, 0.3, max(qa.x, qa.y));
+            frame = mix(frame, 0.12, far_);
+            float pane = hash12(floor(q * vec2(1.0, 1.0)) + step(0.5, fract(q.x)) * 7.0);
+            vec3 g = base * mix(0.9, 1.08, pane);
+            material.diffuse = mix(g, ribbon ? vec3(0.2, 0.3, 0.23) : vec3(0.84, 0.86, 0.86), frame);
+            material.specular = vec3(mix(ribbon ? 0.28 : 0.5, 0.08, frame));
+            material.roughness = mix(0.1, 0.5, frame);
+            // Lit from inside at night.
+            material.emissive = vec3(1.0, 0.86, 0.62) * (ribbon ? 0.45 : 0.3) * u_night * (1.0 - frame);
+          } else if (st > 13.5 && st < 14.5) {
+            // Grimaldi Forum cladding (uv: metres along, metres up): green
+            // metal panels with a horizontal fin every 0.9 m that throws
+            // a thin shadow, joints every 3 m.
+            vec2 aa = max(fwidth(uv) * 1.2, vec2(0.002));
+            float fy = fract(uv.y / 0.9);
+            float fin = 1.0 - smoothstep(0.06, 0.06 + aa.y / 0.9, fy);
+            float shade = smoothstep(0.06, 0.06 + aa.y / 0.9, fy) * (1.0 - smoothstep(0.1, 0.32, fy));
+            float joint = 1.0 - smoothstep(0.012, 0.012 + aa.x / 3.0, abs(fract(uv.x / 3.0 + 0.5) - 0.5));
+            float near = 1.0 - smoothstep(0.05, 0.25, aa.y);
+            vec3 col = base * mix(0.96, 1.04, hash12(floor(uv / vec2(3.0, 0.9))));
+            col = mix(col, base * 1.18, fin * near);
+            col *= 1.0 - 0.28 * shade * near - 0.2 * joint * near;
+            material.diffuse = col;
+            material.specular = vec3(0.12);
+            material.roughness = 0.45;
           } else {
             material.diffuse = base;
           }
