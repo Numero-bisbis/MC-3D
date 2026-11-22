@@ -1264,7 +1264,67 @@ def photo_uv(x, y):
 ATLAS = 4096                        # roof texture size, px (phones take 4096)
 
 
-def roof_atlas(hi, photo):
+KIT_COLS = ["#dfe1de", "#d3d6d4", "#e8e6df", "#c9ccca", "#b9bdbd"]
+
+
+def roof_kit(m, a, mask, T, U, V, u0, v0, z):
+    """Air-conditioning units, vents and water tanks on a flat roof, read
+    off its patch of the 20 cm photo (a, mask: texels along U, V; T texels
+    per metre): small bright compact blobs that stand out from the roof
+    around them. Each becomes a box of metal on the roof. Returns how many."""
+    if mask.sum() < 25 * T * T:                 # roofs under ~25 m2: none
+        return 0
+    L = a @ np.array([0.3, 0.59, 0.11], np.float32)
+    inner = ndimage.binary_erosion(mask, iterations=max(2, int(0.7 * T)))
+    w = inner.astype(np.float32)
+    r = 2.0 * T
+    local = ndimage.gaussian_filter(L * w, r) / (ndimage.gaussian_filter(w, r) + 1e-4)
+    spread = np.sqrt(np.maximum(ndimage.gaussian_filter((L - local) ** 2 * w, 3 * T) /
+                                (ndimage.gaussian_filter(w, 3 * T) + 1e-4), 1.0))
+    bright = inner & (L - local > np.maximum(26.0, 1.6 * spread)) & (L > 135)
+    bright = ndimage.binary_opening(bright)
+    lab, nb = ndimage.label(bright)
+    if nb == 0:
+        return 0
+    cap = 2 + int(mask.sum() / (T * T) / 14)
+    found = []
+    for j, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        cells = lab[sl] == j
+        n_ = cells.sum()
+        area = n_ / (T * T)
+        hgt, wid = (sl[0].stop - sl[0].start) / T, (sl[1].stop - sl[1].start) / T
+        if area < 0.35 or area > 9 or n_ < 0.55 * cells.size or max(hgt, wid) > 4.5 * max(min(hgt, wid), 0.3):
+            continue
+        found.append((float((L[sl][cells] - local[sl][cells]).mean()), sl, area))
+    found.sort(key=lambda t: -t[0])
+    rng = np.random.default_rng(int(abs(u0 * 7 + v0 * 13)) % (2 ** 31))
+    out = 0
+    for _, sl, area in found[:cap]:
+        i0, i1 = sl[1].start / T, sl[1].stop / T
+        j0, j1 = sl[0].start / T, sl[0].stop / T
+        # At least 60 cm a side, a little smaller than the blob (its edge
+        # is half shadow, half photo blur).
+        cu, cv = (i0 + i1) / 2, (j0 + j1) / 2
+        hu, hv = max(0.3, (i1 - i0) / 2 - 0.05), max(0.3, (j1 - j0) / 2 - 0.05)
+        corners = [(cu - hu, cv - hv), (cu + hu, cv - hv), (cu + hu, cv + hv), (cu - hu, cv + hv)]
+        q = orient(Polygon([((u0 + a_) * U[0] + (v0 + b_) * V[0], (u0 + a_) * U[1] + (v0 + b_) * V[1])
+                            for a_, b_ in corners]), 1.0)
+        h = 0.7 if area < 1.5 else (1.0 if area < 4 else 1.4)
+        col = np.array(hexrgb(KIT_COLS[int(rng.integers(len(KIT_COLS)))]), np.float32)
+        add_walls(m, q, z - 0.05, z + h, z, 10, col * 0.93, PLAIN)
+        add_roof(m, q, z + h, col, False)
+        if area > 1.0:
+            # A darker fan grille on top of the bigger units.
+            g = q.buffer(-min(hu, hv) * 0.35, join_style=2)
+            if isinstance(g, Polygon) and not g.is_empty:
+                add_roof(m, orient(g, 1.0), z + h + 0.02, col * 0.55, False)
+        out += 1
+    return out
+
+
+def roof_atlas(hi, photo, kit=None, stats=None):
     """The real roofs' own texture: each roof's patch of the 20 cm photo
     (shifted back by the photo's lean, tidied by clean_roof_patch), turned
     square to its outline's own rectangle (Monaco's blocks run on the
@@ -1272,6 +1332,9 @@ def roof_atlas(hi, photo):
     into one 4096 px image at as close to the photo's resolution as fits,
     instead of the 37 cm ground map the roofs used to sample. Rewrites the
     roof mesh's UVs (plan metres until now) to point into it.
+    TEXCOORD_1 gets each roof's own plan metres along its rectangle, so
+    the viewer lines paving and membrane seams up with the building.
+    kit: a Mesh for the roof kit read off the photo (roof_kit).
     Returns (jpeg bytes, texels per metre)."""
     n = hi.size[0]
     ppm = n / (X1 - X0)
@@ -1308,6 +1371,7 @@ def roof_atlas(hi, photo):
             break
         T *= 0.97
     atlas = Image.new("RGB", (ATLAS, ATLAS), (128, 128, 128))
+    debug = []
     grade = np.array([1.03, 1.0, 0.96], np.float32)
     for k, (q, U, V, u0, v0, _, _, sx, sy) in enumerate(rects):
         x, y, w, h = place[k]
@@ -1323,7 +1387,19 @@ def roof_atlas(hi, photo):
         dpm.polygon(to_px(q.exterior.coords), fill=255)
         for hole in q.interiors:
             dpm.polygon(to_px(hole.coords), fill=0)
+        nk = 0
+        if kit is not None and not photo["tiled"][k]:
+            nk = roof_kit(kit, np.asarray(patch).astype(np.float32), np.asarray(pm) > 0, T, U, V, u0, v0,
+                          photo["polys"][k][2])
+            if stats is not None:
+                stats["roof_kit"] = stats.get("roof_kit", 0) + nk
         ph = np.asarray(clean_roof_patch(patch, pm, T)).astype(np.float32)
+        if q.area > 150:
+            c_ = q.centroid
+            lo_, la_ = to_lonlat(np.array([c_.x]), np.array([c_.y]))
+            debug.append({"lon": round(float(lo_[0]), 6), "lat": round(float(la_[0]), 6), "z": round(photo["polys"][k][2], 1),
+                          "area": round(q.area), "tiled": photo["tiled"][k], "kit": nk,
+                          "rgb": [round(float(v)) for v in ph[np.asarray(pm) > 0].mean(0)]})
         # The same grade as the roofs in the ground map: a little crisper
         # and warmer than the raw photo.
         gray = ph.mean(2, keepdims=True)
@@ -1337,11 +1413,13 @@ def roof_atlas(hi, photo):
         x, y, _, _ = place[k]
         d = mesh.uv[mi].astype(np.float64)
         wx, wy = d[:, 0] + X0, Y1 - d[:, 1]
-        mesh.uv[mi] = np.column_stack([(x + (wx * U[0] + wy * U[1] - u0) * T) / ATLAS,
-                                       (y + (wx * V[0] + wy * V[1] - v0) * T) / ATLAS]).astype(np.float32)
+        lu, lv = wx * U[0] + wy * U[1] - u0, wx * V[0] + wy * V[1] - v0
+        mesh.uv[mi] = np.column_stack([(x + lu * T) / ATLAS, (y + lv * T) / ATLAS]).astype(np.float32)
+        mesh.uv2[mi] = np.column_stack([lu, lv]).astype(np.float32)
     b = io.BytesIO()
     atlas.save(b, "JPEG", quality=90)
     atlas.save(RAW / "roof-atlas-preview.jpg", quality=80)
+    (RAW / "roof-debug.json").write_text(json.dumps(debug))
     return b.getvalue(), round(T, 2)
 
 
@@ -1442,6 +1520,7 @@ def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
                           uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
         photo["uvmap"].append((len(photo["mesh"].uv) - 1, len(photo["polys"])))
         photo["polys"].append((poly, photo["shift"], z))
+        photo["tiled"].append(bool(tiled))
         return
     m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, ROOF_TILE if tiled else ROOF_FLAT)
 
@@ -6420,7 +6499,7 @@ def main():
         edges = photo_edges(ortho_hi)
         lean = estimate_lean(edges, feats, mns, mnt)
         print("photo lean per metre of height (east, north):", lean)
-        photo = {"mesh": Mesh(), "polys": [], "uvmap": [], "lean": lean, "edges": edges}
+        photo = {"mesh": Mesh(), "polys": [], "uvmap": [], "tiled": [], "lean": lean, "edges": edges}
     facades = FacadeData(ways)
     feats = mareterra_feats(feats, ways)
     global SW
@@ -6515,7 +6594,7 @@ def main():
     prims = [(gm, True), (rm, True), (bm, False), (tm, False), (hm, False), (sm, False)]
     roof_jpg = None
     if photo and photo["mesh"].p:
-        roof_jpg, stats["roof_texels_per_m"] = roof_atlas(ortho_hi, photo)
+        roof_jpg, stats["roof_texels_per_m"] = roof_atlas(ortho_hi, photo, bm, stats)
         print("roof atlas:", stats["roof_texels_per_m"], "texels per metre")
         prims.append((photo["mesh"], "roof"))
     write_glb(raw, prims, jpg, roof_jpg)

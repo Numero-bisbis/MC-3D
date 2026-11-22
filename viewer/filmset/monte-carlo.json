@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3346440,
+ "triangles": 3383219,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -113,6 +113,7 @@
  "quai_steps": 2,
  "quai_pines": 36,
  "track_clear": false,
+ "roof_kit": 3221,
  "roof_texels_per_m": 4.57,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
