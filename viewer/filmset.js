@@ -574,7 +574,13 @@
           }
         } else if (kind < 3.5) {        // flat roofs
           if (a255 - kind * 16.0 < 1.5) {
-            // A real roof: its 20 cm aerial photo, kept from the ground map.
+            // A real roof: its 20 cm aerial photo, from the roof texture.
+            // Up close, a fine grain of gravel and membrane over it, so the
+            // photo reads as a surface rather than a blur.
+            vec3 pr = fsInput.attributes.positionMC * length(czm_model[0].xyz);
+            float pxr = length(fwidth(pr.xz));
+            float grain = vnoise(pr.xz * 5.0) * 0.55 + vnoise(pr.xz * 19.0) * 0.45;
+            material.diffuse *= mix(1.0, 0.9 + 0.18 * grain, 1.0 - smoothstep(0.04, 0.25, pxr));
             material.roughness = 0.8;
             return;
           }

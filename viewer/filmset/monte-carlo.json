@@ -121,6 +121,7 @@
  "quai_steps": 2,
  "quai_pines": 36,
  "track_clear": false,
+ "roof_texels_per_m": 4.57,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
