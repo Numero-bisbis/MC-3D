@@ -78,6 +78,7 @@
         float kind = floor(a255 / 16.0);
         if (kind < 0.5) {               // ground: the painted map
           material.roughness = 0.95;
+          vec3 mapC = material.diffuse;
           {
             // Close up, the 37 cm map gets fine detail of its own: grain
             // and patches everywhere, paving joints on the pale stone of
@@ -143,6 +144,39 @@
               rock = mix(rock, rock * vec3(1.06, 0.95, 0.80), smoothstep(0.55, 0.8, vnoise(p.xz * 0.09 + p.y * 0.05)) * 0.6);
               material.diffuse = mix(d, rock, steep * (1.0 - 0.7 * veg));
             }
+          }
+          if (a255 > 8.5) {
+            // Pavements along the circuit (style 9 red brick pavers, 10
+            // pale stone slabs): laid brick by brick in world metres, so
+            // they stay crisp up close instead of the 37 cm map's blur.
+            // The map still gives the shade (sun shadows, darker at the
+            // foot of walls): its brightness against the paving colour.
+            float sc = length(czm_model[0].xyz);
+            vec2 wp = fsInput.attributes.positionMC.xz * sc;
+            float px = length(fwidth(wp));
+            bool brick = a255 < 9.5;
+            vec3 ref = czm_srgbToLinear(brick ? vec3(0.647, 0.443, 0.373) : vec3(0.827, 0.796, 0.741));
+            float shade = clamp(dot(mapC, vec3(0.3, 0.59, 0.11)) / dot(ref, vec3(0.3, 0.59, 0.11)), 0.4, 1.1);
+            vec2 bs = brick ? vec2(0.20, 0.10) : vec2(0.60, 0.40);
+            vec2 q = wp / bs;
+            q.x += 0.5 * step(0.5, fract(q.y * 0.5));
+            vec2 cell = floor(q), f = fract(q);
+            vec2 aa = max(fwidth(q) * 1.2, vec2(0.001));
+            vec2 jw = brick ? vec2(0.04, 0.08) : vec2(0.012, 0.018);
+            float face = box(f, jw, 1.0 - jw, aa);
+            float h = hash12(cell);
+            vec3 col = ref * (brick ? mix(0.8, 1.14, h) : mix(0.92, 1.06, h));
+            if (brick) col = mix(col, ref * vec3(0.78, 0.86, 0.95), step(0.92, hash12(cell + 7.3)) * 0.6);
+            else col *= 1.0 - 0.06 * vnoise(wp * 3.1 + h * 9.0);
+            vec3 joint = brick ? ref * vec3(0.62, 0.6, 0.6) : ref * 0.72;
+            col = mix(joint, col, face);
+            // Far away the pattern turns into its own average.
+            float near = 1.0 - smoothstep(brick ? 0.025 : 0.06, brick ? 0.07 : 0.2, px);
+            col = mix(ref * (brick ? 0.93 : 0.97), col, near);
+            // Wear and grime.
+            col *= mix(0.9, 1.05, vnoise(wp * 0.45)) * mix(0.96, 1.03, vnoise(wp * 2.2));
+            material.diffuse = col * shade;
+            material.roughness = 0.9;
           }
           if (u_night > 0.0) {
             float L = texture(u_lights, vec2(fsInput.attributes.texCoord_0.x, 1.0 - fsInput.attributes.texCoord_0.y)).r;
@@ -657,6 +691,62 @@
             material.diffuse = base;
             material.specular = vec3(0.32, 0.24, 0.14);
             material.roughness = 0.42;
+          } else if (st > 8.5 && st < 10.5) {
+            // Kerb stones (uv: metres along, 0 road edge .. 1 back of the
+            // top): pale granite in 1 m stones; style 10 painted in red
+            // and white blocks, as round Monaco's corners.
+            vec2 aa = max(fwidth(uv) * 1.2, vec2(0.002));
+            float stone = fract(uv.x / 1.0);
+            float jt = 1.0 - smoothstep(0.0, aa.x + 0.004, min(stone, 1.0 - stone) - 0.004);
+            float h = hash12(vec2(floor(uv.x), 3.0));
+            vec3 col = base * mix(0.92, 1.05, h) * mix(0.94, 1.04, hash12(floor(uv * vec2(40.0, 8.0))));
+            if (st > 9.5) {
+              float red = step(0.5, fract(uv.x / 2.0));
+              col = mix(vec3(0.86, 0.85, 0.82), vec3(0.62, 0.06, 0.06), red) * mix(0.93, 1.03, h);
+              col *= mix(0.9, 1.0, vnoise(uv * vec2(3.0, 9.0)));      // worn paint
+            }
+            material.diffuse = col * (1.0 - 0.3 * jt);
+            material.roughness = 0.75;
+          } else if (st > 10.5 && st < 11.5) {
+            // Rubble stone retaining wall (uv: metres along, metres up):
+            // irregular coursed limestone with recessed mortar.
+            vec2 q = uv / vec2(0.62, 0.36);
+            float row = floor(q.y);
+            q.x += hash12(vec2(row, 1.7)) * 0.9;
+            vec2 cell = floor(q), f = fract(q);
+            vec2 j = vec2(hash12(cell + 0.5), hash12(cell + 2.1));
+            f = (f - 0.5) * (1.0 + 0.18 * (j - 0.5)) + 0.5;
+            vec2 aa = max(fwidth(q) * 1.2, vec2(0.002));
+            float face = box(f, vec2(0.06, 0.09), vec2(0.94, 0.91), aa);
+            float near = 1.0 - smoothstep(0.08, 0.3, max(aa.x, aa.y));
+            float h = hash12(cell);
+            vec3 col = base * mix(0.8, 1.12, h) * mix(0.9, 1.06, vnoise(uv * 4.0));
+            col = mix(col, col * vec3(1.05, 0.98, 0.88), step(0.7, hash12(cell + 9.0)) * 0.5);
+            col = mix(base * 0.62, col, mix(1.0, face, near));
+            // Damp and dirt towards the foot.
+            col *= mix(0.82, 1.0, smoothstep(0.0, 1.4, uv.y));
+            material.diffuse = mix(base * 0.95, col, max(near, 0.35));
+            material.roughness = 0.95;
+          } else if (st > 11.5 && st < 12.5) {
+            // Railing (uv: metres along, 0 foot .. 1 top): top and bottom rails,
+            // bars every 13 cm, a post every 2 m; the gaps are see-through.
+            // Far away, where the bars shrink under a pixel, a dither keeps
+            // about the right amount of metal.
+            vec2 aa = max(fwidth(uv) * 1.2, vec2(0.0015));
+            float bars = 1.0 - smoothstep(0.012, 0.012 + aa.x, abs(fract(uv.x / 0.13) - 0.5) * 0.13);
+            float post = 1.0 - smoothstep(0.03, 0.03 + aa.x, abs(fract(uv.x / 2.0 + 0.5) - 0.5) * 2.0);
+            float rails = (1.0 - smoothstep(0.035, 0.035 + aa.y, abs(uv.y - 0.955)))
+                        + (1.0 - smoothstep(0.02, 0.02 + aa.y, abs(uv.y - 0.1)));
+            float m = clamp(bars + post + rails, 0.0, 1.0);
+            if (aa.x > 0.05) {
+              float cov = 0.025 / 0.13 + 0.06;
+              m = max(m * step(aa.x, 0.13), step(fract(dot(gl_FragCoord.xy, vec2(0.5, 0.25))), cov));
+              m = max(m, rails);
+            }
+            if (m < 0.5) discard;
+            material.diffuse = base;
+            material.roughness = 0.5;
+            material.specular = vec3(0.06);
           } else {
             material.diffuse = base;
           }
