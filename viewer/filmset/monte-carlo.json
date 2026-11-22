@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3392016,
+ "triangles": 3461393,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -77,11 +77,13 @@
  ],
  "balconies": 1193,
  "shop_buildings": 163,
+ "houses": 406,
+ "split_blocks": 98,
  "landmarks": 1,
  "mareterra_slabs": 139,
  "photo_facade_colours": 27,
  "photo_facade_types": 29,
- "photo_roofs": 1321,
+ "photo_roofs": 1727,
  "photo_lean": [
   0.04000000000000037,
   -0.009999999999999676
@@ -121,8 +123,8 @@
  "quai_steps": 2,
  "quai_pines": 36,
  "track_clear": false,
- "roof_kit": 3221,
- "roof_texels_per_m": 4.57,
+ "roof_kit": 2847,
+ "roof_texels_per_m": 4.35,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",

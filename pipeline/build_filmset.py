@@ -1498,11 +1498,11 @@ def skeleton_roof(poly, z, slope, t_max, dt=0.35):
     return v, vz, t["triangles"]
 
 
-def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
+def add_roof(m, poly, z, col, tiled, cap=None, photo=None, slope=None):
     """photo: a dict {"mesh", "polys"}; the roof goes into that textured
     mesh, mapped onto the aerial photo painted into the ground map."""
     if tiled:
-        slope = math.tan(math.radians(28))
+        slope = slope or math.tan(math.radians(28))
         t = skeleton_roof(poly, z, slope, (cap if cap else 99) / slope, dt=0.4)
         if t is None:
             return
@@ -1517,7 +1517,11 @@ def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
     if photo is not None:
         # UVs hold the plan position (metres east of X0, south of Y1) for
         # now; roof_atlas() turns them into this roof's place in its texture.
-        uv = np.column_stack([v[:, 0] - X0, Y1 - v[:, 1]])
+        # The photo leans: a ridge dz above the eaves shows up dz x lean
+        # further over, so each vertex looks there.
+        lx, ly = photo["lean"]
+        dz = zz - z
+        uv = np.column_stack([v[:, 0] - X0 + dz * lx, Y1 - v[:, 1] - dz * ly])
         photo["mesh"].tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], [255, 255, 255], ROOF_FLAT,
                           uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
         photo["uvmap"].append((len(photo["mesh"].uv) - 1, len(photo["polys"])))
@@ -1531,6 +1535,123 @@ _MNS_S = {}
 # Big tiled blocks with their roofs shaped from the LiDAR: off until the
 # blocks are split into their houses (the 50 cm scan alone gives lumps).
 LIDAR_ROOFS = False
+# Big tiled blocks split into their houses, each with its own hipped roof.
+HOUSE_ROOFS = True
+
+
+def house_split(part, mns, min_area=40.0):
+    """One footprint that covers a row of houses (BD TOPO often traces a
+    whole block): split it into the houses the LiDAR sees, one per roof.
+    A hipped or gabled roof is a hill on the surface model, so each house
+    is a watershed basin of the inverted surface grown from its ridge;
+    low cells (courtyards, light wells) are kept apart. Returns a list of
+    (polygon, heights of its cells) or None when the block is one roof."""
+    x0, y0, x1, y1 = part.bounds
+    c0, r0 = max(int((x0 - X0) / RES), 0), max(int((Y1 - y1) / RES), 0)
+    c1, r1 = min(int(math.ceil((x1 - X0) / RES)), mns.shape[1]), min(int(math.ceil((Y1 - y0) / RES)), mns.shape[0])
+    z = mns[r0:r1, c0:c1].astype(np.float64)
+    if z.size < 100 or not np.isfinite(z).any():
+        return None
+    z = np.where(np.isfinite(z), z, np.nanmin(z))
+    xs = X0 + (c0 + np.arange(z.shape[1]) + 0.5) * RES
+    ys = Y1 - (r0 + np.arange(z.shape[0]) + 0.5) * RES
+    XX, YY = np.meshgrid(xs, ys)
+    ins = contains_xy(part, XX, YY)
+    if ins.sum() < 100:
+        return None
+    zs = ndimage.gaussian_filter(ndimage.median_filter(z, 5), 1.0)
+    zin = zs[ins]
+    low = np.percentile(zin, 8)
+    # Courtyards and wells: well below the roofs around them.
+    yard = ins & (zs < low + 0.25 * (np.percentile(zin, 90) - low) - 1.0)
+    roof = ins & ~yard
+    # Markers: ridge cells, the top of each hill (within 0.4 m of the
+    # highest point 3 m around).
+    mx = ndimage.maximum_filter(np.where(roof, zs, -1e9), size=7)
+    ridge = roof & (zs > mx - 0.4)
+    mk, n = ndimage.label(ridge)
+    if n < 2:
+        return None
+    # Ridges of one house that the filter broke up rejoin when they are at
+    # about the same height and nearly touch.
+    top = (zs.max() - zs)
+    top = np.clip(top / max(top[ins].max(), 1e-6) * 60000, 0, 65000).astype(np.uint16)
+    markers = mk.astype(np.int32)
+    markers[~ins] = -1
+    lab = ndimage.watershed_ift(top, markers)
+    lab[~roof] = 0
+    out = []
+    for j in range(1, n + 1):
+        cells = lab == j
+        if cells.sum() * RES * RES < min_area:
+            continue
+        g = cells_to_poly(cells, X0 + c0 * RES, Y1 - r0 * RES, RES)
+        g = g.intersection(part)
+        for q in to_polys(g):
+            if q.area >= min_area:
+                q = tidy_outline(orient(q, 1.0), 0.8)
+                out.append((q, zs[cells]))
+    if len(out) < 2:
+        return None
+    return out
+
+
+def house_roofs(m, part, zb, base, fh, col, kind, style, rcol, ph, z_ref, mns, stats):
+    """A block over a row of tiled houses: each house the LiDAR sees
+    (house_split) gets its own walls up to its own eaves and a clean
+    hipped roof with its real ridge height, over a low flat roof that
+    fills the yards between them. Returns True if the block was split."""
+    res = house_split(part, mns)
+    if res is None:
+        return False
+    eaves = [float(np.percentile(zc, 15)) for _, zc in res]
+    z_low = max(min(eaves), zb + 2.5)
+    add_walls(m, part, zb, z_low, base, fh, col, kind, style=style)
+    add_roof(m, part, z_low, rcol, False, photo=ph)
+    if ph is not None:
+        ph["tiled"][-1] = True                     # no roof kit under the houses
+    lx, ly = ph["lean"] if ph is not None else (0.0, 0.0)
+    taken = Polygon()
+    for (q, zc), ze in sorted(zip(res, eaves), key=lambda t: -t[0][0].area):
+        q = q.difference(taken).buffer(0)
+        parts = [g for g in to_polys(q) if g.area > 30]
+        if not parts:
+            continue
+        q = max(parts, key=lambda g: g.area)
+        # Houses are mostly rectangles: a near-rectangular one is its
+        # rectangle (a clean hip), the rest lose their small jogs.
+        rr = q.minimum_rotated_rectangle
+        if q.area > 0.8 * rr.area:
+            q2 = rr.intersection(part).difference(taken).buffer(0)
+            q = max(to_polys(q2), key=lambda g: g.area) if not q2.is_empty else q
+        q = q.simplify(0.5)
+        if not isinstance(q, Polygon) or not q.is_valid or q.area < 30:
+            continue
+        q = orient(Polygon(q.exterior), 1.0)
+        taken = taken.union(q)
+        ze = max(ze, z_low + 0.3)
+        ridge = float(np.percentile(zc, 95))
+        if ze - z_low > 0.3:
+            add_walls(m, q, z_low - 0.05, ze, base, fh, col, kind, style=style)
+        php = None if ph is None else dict(ph, shift=(ph["shift"][0] + (ze - z_ref) * lx,
+                                                      ph["shift"][1] + (ze - z_ref) * ly))
+        rise = ridge - ze
+        ov = q.buffer(0.3, join_style=2)
+        ov = orient(ov, 1.0) if isinstance(ov, Polygon) else q
+        if rise < 0.8:
+            add_roof(m, q, ze, rcol, False, photo=php)          # a terrace
+        else:
+            # Slope from the rise over the house's half-width.
+            half = max(1.0, 1.5 * q.area / max(q.length, 1e-3))
+            sl = min(max(rise / half, math.tan(math.radians(15))), math.tan(math.radians(40)))
+            add_roof(m, ov, ze, rcol, True, rise + 0.2, photo=php, slope=sl)
+            fas = np.array(hexrgb("#6b4a3a"), np.float32)          # dark painted fascia board
+            add_walls(m, ov, ze - 0.16, ze, ze, 10, fas, PLAIN)
+            for sp in to_polys(ov.difference(q)):
+                add_roof(m, orient(sp, -1.0), ze - 0.16, fas * 0.8, False)
+        stats["houses"] = stats.get("houses", 0) + 1
+    stats["split_blocks"] = stats.get("split_blocks", 0) + 1
+    return True
 
 
 def planar_roof(S, part):
@@ -2497,6 +2618,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                             add_walls(m, cor, ztop - 0.6, ztop, ztop, 10, cc_, PLAIN)
                             for rp in to_polys(cor.difference(part)):
                                 add_roof(m, orient(rp, 1.0), ztop, cc_, False)
+                    if tiled and HOUSE_ROOFS and ph is not None and part.area > 300 and house_roofs(
+                            m, part, zb, base, fh, col, kind, style, rcol, ph, zt, mns, stats):
+                        continue
                     if tiled:
                         eave = base + max(2.5, float(np.percentile(hrel, 40)))
                         add_walls(m, part, zb, eave, base, fh, col, kind, style=style)
@@ -2527,7 +2651,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         # A block over many tiled roofs (the photo shows
                         # them red): walls to the eaves, then the roofs'
                         # real shape from the LiDAR.
-                        rs_ = red_share(part, ortho, ph["shift"]) if LIDAR_ROOFS and ph is not None and part.area > 60 else 0.0
+                        rs_ = red_share(part, ortho, ph["shift"]) if ph is not None and part.area > 300 and last else 0.0
+                        if HOUSE_ROOFS and rs_ > 0.3 and house_roofs(
+                                m, part, zb, base, fh, col, kind, style, rcol, ph, zt, mns, stats):
+                            continue
                         if LIDAR_ROOFS and ph is not None and last and part.area > 60 and rs_ > 0.3:
                             ring_ = part.exterior
                             ss_ = shapely.line_interpolate_point(part.buffer(-0.8, join_style=2).exterior if isinstance(
