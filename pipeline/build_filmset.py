@@ -59,6 +59,7 @@ from pathlib import Path
 import numpy as np
 import pyproj
 import shapely
+import shapely.affinity
 import shapely.prepared
 import triangle
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
@@ -1713,16 +1714,199 @@ def kmeans1d(v, k):
 
 # Hand-picked looks for landmark buildings (IGN BD TOPO ids).
 HEROES = {
-    # Casino de Monte-Carlo and the Salle Garnier: cream stone, verdigris roofs.
-    "BATIMENT0000000074070294": {"wall": "#f3e4c4", "roof": "#6fa596"},
-    "BATIMENT0000000074070299": {"wall": "#f3e4c4", "roof": "#6fa596"},
+    # Casino de Monte-Carlo and the Salle Garnier: sandy ochre stone, verdigris roofs.
+    "BATIMENT0000000074070294": {"wall": "#d9c6a5", "roof": "#6fa596"},
+    "BATIMENT0000000074070299": {"wall": "#d9c6a5", "roof": "#6fa596"},
 }
 
 
-# The Casino's front on the square: two corner towers with tall copper caps
-# and a raised centre with its clock, as on Garnier's façade.
+# Casino de Monte-Carlo, as it stands (2026 street photos, IGN LiDAR 2021,
+# IGN aerial photo). The front on the square: two towers with an oculus on
+# each face and a square copper dome with a lantern, the clock between two
+# bronze groups, dormers in the roof, Garnier's glass-and-iron marquise over
+# the three arched doors and a low flight of steps. Wall colour: the sandy
+# ochre of the stone in the photos (not the cream of the Hôtel de Paris).
 CASINO_FRONT = "BATIMENT0000000074070299"
 CASINO_SQUARE = (1056553.0, 6303373.0)      # the Casino fountain on the square, L93
+CASINO_TOWER_IN = 12.5                       # m from each end of the front to a tower's axis
+CASINO_TOWER_W = 7.2
+# The raised roofs of the gaming halls (Salle Europe, the Salles des
+# Amériques and Blanche, the private rooms) and the Salle Garnier's: seeds
+# in metres east / north of the fountain where the LiDAR has each roof's
+# top. Each hall's outline and height come from the LiDAR itself.
+CASINO_HALLS = [(116, 59), (97, 38), (106, 30), (82, 20), (72, 2), (72, -48)]
+COPPER = "#6fa596"
+LIT_GLASS, ROOF_GLASS = 7, 15        # PLAIN styles (viewer: lit shop glass, glazed roof)
+
+
+def _vpanel(m, o, u, n, sz, col, depth=0.3, style=None, kind=None):
+    """An upright slab in the plane through o along u (n its normal): sz is
+    its outline as (along, up) points, convex, anticlockwise seen from -n.
+    The face looks towards -n, `depth` deep behind it."""
+    kind = PLAIN if kind is None else kind
+    sz = np.asarray(sz, float)
+    u, n = np.asarray(u, float), np.asarray(n, float)
+    o = np.asarray(o, float)
+    # Wind the outline so the face's normal is -n (right-handed in ENU):
+    # anticlockwise in (u, up) gives cross(u, up) = (u1, -u0).
+    area = np.sum(sz[:, 0] * np.roll(sz[:, 1], -1) - np.roll(sz[:, 0], -1) * sz[:, 1])
+    if (area > 0) != (u[1] * -n[0] + -u[0] * -n[1] > 0):
+        sz = sz[::-1]
+    col = np.asarray(col, float)
+    k = len(sz)
+    def ring(off):
+        xy = o[None] + u[None] * sz[:, :1] + n[None] * off
+        return enu_fast(xy[:, 0], xy[:, 1], sz[:, 1])
+    F, B = ring(0.0), ring(depth)
+    cf = F.mean(0)[None].repeat(k, 0)
+    cb = B.mean(0)[None].repeat(k, 0)
+    j = np.arange(k); jn = (j + 1) % k
+    m.tri(cf, F[j], F[jn], col, kind, style=style)
+    m.tri(cb, B[jn], B[j], col * 0.85, kind, style=style)
+    # Sides, both ways round (thin pieces; cheaper than working out which).
+    for a_, b_, c_ in ((F[j], F[jn], B[jn]), (F[j], B[jn], B[j])):
+        m.tri(a_, b_, c_, col * 0.9, kind, style=style)
+        m.tri(a_, c_, b_, col * 0.9, kind, style=style)
+
+
+def dome_cap(m, c, u, n, half, z0, h, col, gold):
+    """Square copper dome with rounded corners and an ogee profile, a small
+    lantern on top and a gilded finial, as on the Casino's towers."""
+    u, n = np.asarray(u, float), np.asarray(n, float)
+    if u[0] * n[1] - u[1] * n[0] < 0:
+        n = -n                                   # anticlockwise rings: normals face out
+    prof = [(1.0, 0.0), (0.98, 0.12), (0.9, 0.35), (0.72, 0.6), (0.48, 0.8), (0.26, 0.93), (0.16, 1.0)]
+    th = np.linspace(0, 2 * math.pi, 25)[:-1]
+    ex = 0.35                                    # squareness
+    sx = np.sign(np.cos(th)) * np.abs(np.cos(th)) ** ex
+    sy = np.sign(np.sin(th)) * np.abs(np.sin(th)) ** ex
+    rings = []
+    for r, t in prof:
+        xy = c[None] + (u[None] * sx[:, None] + n[None] * sy[:, None]) * half * r
+        rings.append(enu_fast(xy[:, 0], xy[:, 1], np.full(len(th), z0 + h * t)))
+    k = len(th)
+    j = np.arange(k); jn = (j + 1) % k
+    col = np.asarray(col, float)
+    for i in range(len(rings) - 1):
+        A, B = rings[i], rings[i + 1]
+        cc = col * (0.92 + 0.05 * i)
+        m.tri(A[j], A[jn], B[jn], cc, ROOF_TILE)
+        m.tri(A[j], B[jn], B[j], cc, ROOF_TILE)
+    # Lantern: a little drum with arched openings, then a cap and a finial.
+    lw = half * 0.32
+    zl = z0 + h
+    lp = orient(Polygon([c + u * lw + n * lw, c - u * lw + n * lw, c - u * lw - n * lw, c + u * lw - n * lw]), 1.0)
+    add_walls(m, lp, zl, zl + h * 0.32, zl, 10, np.array(hexrgb("#e8dcc2")), PLAIN)
+    add_cap(m, lp.buffer(0.12, join_style=2), zl + h * 0.32, h * 0.22, col, ROOF_TILE)
+    _ball(m, c[0], c[1], zl + h * 0.6, 0.16, gold, None, 8, 5)
+    add_cap(m, orient(Polygon([c + u * 0.06, c + n * 0.06, c - u * 0.06, c - n * 0.06]), 1.0),
+            zl + h * 0.62, h * 0.3, gold, PLAIN)
+
+
+def casino_halls(m, poly, base, H, fh, col, kind, style, rcol, mns, stats):
+    """The halls' roofs rising out of the copper terrace, each where and as
+    high as the LiDAR sees it: a hipped roof with a copper skirt and a
+    glazed top (the skylights of the gaming rooms), on an attic wall with
+    windows. Also the two towers of the Salle Garnier on the sea side,
+    with their domes. Returns the number of halls built."""
+    zt = base + H
+    x0, y0, x1, y1 = poly.bounds
+    c0, c1 = max(int((x0 - X0) / RES), 0), int(math.ceil((x1 - X0) / RES))
+    r0, r1 = max(int((Y1 - y1) / RES), 0), int(math.ceil((Y1 - y0) / RES))
+    sub = ndimage.median_filter(np.nan_to_num(mns[r0:r1, c0:c1], nan=0.0), 3)
+    copper = np.array(hexrgb(COPPER))
+    glass = np.array(hexrgb("#7f9aa0"))
+    done, n_ = [], 0
+    for e, nn in CASINO_HALLS:
+        sx, sy = CASINO_SQUARE[0] + e, CASINO_SQUARE[1] + nn
+        if not poly.contains(Point(sx, sy)):
+            continue
+        r, c = int((Y1 - sy) / RES) - r0, int((sx - X0) / RES) - c0
+        top = float(sub[max(r - 2, 0):r + 3, max(c - 2, 0):c + 3].max())
+        # Lower the threshold until the hall's roof merges with the
+        # terrace around it: the last outline before the jump is the hall.
+        best, prev_a = None, 0.0
+        for th_ in np.arange(top - 0.5, top - 12, -0.25):
+            lab_, _ = ndimage.label(sub > th_)
+            L_ = lab_[r, c]
+            if not L_:
+                continue
+            cells = lab_ == L_
+            a = cells.sum() * RES * RES
+            if a > 1300 or (prev_a > 40 and a > 2.0 * prev_a):
+                break
+            best, prev_a = (cells, th_), a
+        if best is None or prev_a < 25:
+            continue
+        cells, zb = best
+        hp = cells_to_poly(cells, X0 + c0 * RES, Y1 - r0 * RES, RES)
+        hp = max(to_polys(hp), key=lambda q: q.area, default=None)
+        if hp is None or hp.area < 25:
+            continue
+        # A clean rectangle of the same area and axes (the halls are
+        # rectangular; the thresholded LiDAR outline is ragged).
+        rect = hp.minimum_rotated_rectangle
+        k_ = math.sqrt(min(1.0, hp.area / rect.area))
+        hp = shapely.affinity.scale(rect, k_, k_, origin=rect.centroid)
+        hp = orient(hp.intersection(poly.buffer(-0.5)).buffer(0), 1.0) if hp.intersects(poly) else hp
+        if not isinstance(hp, Polygon) or hp.area < 25 or any(hp.intersection(q).area > 0.5 * hp.area for q in done):
+            continue
+        done.append(hp)
+        zb = max(zb, zt + 0.6)
+        rise = top - zb
+        if rise < 1.2:
+            continue
+        # Attic wall with windows from the terrace up to the eaves.
+        add_walls(m, hp, zt - 0.5, zb, zt - 0.5, max(2.6, zb - zt + 0.5), col, kind, style=style)
+        cor = hp.buffer(0.3, join_style=2)
+        add_walls(m, cor, zb - 0.35, zb, zb, 10, np.minimum(np.asarray(col) * 1.08 + 8, 250), PLAIN)
+        # Hipped roof (or pyramid) to the LiDAR's top: copper skirt, glass above.
+        rr = np.asarray(hp.minimum_rotated_rectangle.exterior.coords)
+        half = min(np.linalg.norm(rr[1] - rr[0]), np.linalg.norm(rr[2] - rr[1])) / 2
+        tmax = max(1.0, half * 0.95)
+        t_ = skeleton_roof(orient(cor, 1.0), zb, rise / tmax, tmax, dt=tmax / 4)
+        if t_ is None:
+            continue
+        v, zz, tri = t_
+        P = enu_fast(v[:, 0], v[:, 1], zz)
+        zc_ = zz[tri].mean(1)
+        up = zc_ > zb + rise * 0.3
+        if (~up).any():
+            m.tri(P[tri[~up, 0]], P[tri[~up, 1]], P[tri[~up, 2]], copper, ROOF_TILE)
+        if up.any():
+            m.tri(P[tri[up, 0]], P[tri[up, 1]], P[tri[up, 2]], glass, PLAIN, style=ROOF_GLASS)
+        n_ += 1
+    # The sea-side towers: tall LiDAR blobs well clear of the halls.
+    hall_pts = [Point(CASINO_SQUARE[0] + e, CASINO_SQUARE[1] + nn) for e, nn in CASINO_HALLS]
+    rel = sub - base
+    ref = float(np.percentile(rel[rel > 3], 70)) if (rel > 3).any() else H
+    grid = (rel > max(ref, H) + 5)
+    lab_, k_ = ndimage.label(ndimage.binary_opening(grid, iterations=1))
+    gold = np.array(hexrgb("#d9b75e"))
+    for j in range(1, k_ + 1):
+        cells = lab_ == j
+        a = cells.sum() * RES * RES
+        if a < 10 or a > 90:
+            continue
+        tp = cells_to_poly(cells, X0 + c0 * RES, Y1 - r0 * RES, RES)
+        if tp.is_empty or not poly.buffer(1.0).contains(tp.centroid) or min(q.distance(tp.centroid) for q in hall_pts) < 9:
+            continue
+        cc = np.array([tp.centroid.x, tp.centroid.y])
+        peak = float(rel[cells].max())
+        # A square tower on the blob, its dome taking the top 45 %.
+        w = min(7.0, max(4.5, math.sqrt(a)))
+        u_ = np.array([1.0, 0.0])
+        rect = np.asarray(poly.minimum_rotated_rectangle.exterior.coords)
+        u_ = (rect[1] - rect[0]) / np.linalg.norm(rect[1] - rect[0])
+        n_v = np.array([-u_[1], u_[0]])
+        body = base + max(H + 2.0, peak - max(4.0, w * 0.9))
+        tw = orient(Polygon([cc + u_ * w / 2 + n_v * w / 2, cc - u_ * w / 2 + n_v * w / 2,
+                             cc - u_ * w / 2 - n_v * w / 2, cc + u_ * w / 2 - n_v * w / 2]), 1.0)
+        add_walls(m, tw, zt - 1.0, body, base, fh, col, kind, style=style)
+        add_walls(m, tw.buffer(0.3, join_style=2), body - 0.5, body, body, 10, np.minimum(np.asarray(col) * 1.08 + 8, 250), PLAIN)
+        dome_cap(m, cc, u_, n_v, w / 2 * 0.92, body, max(2.5, base + peak - body - 1.2), copper, gold)
+        stats["towers"] += 1
+    return n_
 
 
 def casino_front(m, poly, base, H, fh, col, kind, style, rcol, mntR=None):
@@ -1738,78 +1922,158 @@ def casino_front(m, poly, base, H, fh, col, kind, style, rcol, mntR=None):
         n = -n                                  # n points into the building
     L = float(np.linalg.norm(b - a))
     zt = base + H
-    copper = np.asarray(rcol)
-
-    def block(c, w, d, z0, z1):
-        pts = [c + u * w / 2 + n * d / 2, c - u * w / 2 + n * d / 2, c - u * w / 2 - n * d / 2, c + u * w / 2 - n * d / 2]
-        return orient(Polygon(pts), 1.0)
-    for t_ in (0.12, 0.88):
-        c = a + u * L * t_ + n * 3.6           # flush with the façade
-        tp = block(c, 7.5, 7.5, zt - 2, zt + 7)
-        add_walls(m, tp, zt - 2, zt + 7, base, fh, col, kind, style=style)
-        add_walls(m, tp.buffer(0.35, join_style=2), zt + 6.6, zt + 7.3, zt, 10, np.asarray(col) * 1.05, PLAIN)
-        add_cap(m, tp, zt + 7.3, 7.5, copper, ROOF_TILE)
-        add_cap(m, block(c, 1.2, 1.2, 0, 0), zt + 14.4, 2.2, hexrgb("#d9b75e"), PLAIN)   # gilded finial
-    c = mid + n * 2.9
-    cp = block(c, 14, 6, zt - 2, zt + 5)
-    add_walls(m, cp, zt - 2, zt + 5, base, fh, col, kind, style=style)
-    add_cap(m, cp, zt + 5, 3.5, copper, ROOF_TILE)
-    clock = block(mid - n * 0.05, 2.6, 0.3, 0, 0)
-    add_walls(m, clock, zt + 1.2, zt + 3.8, zt, 10, hexrgb("#f4efe2"), PLAIN)
-
-    # The entrance on the square, as built: a flight of broad steps, three
-    # tall arched doors, the glass-and-iron marquise over them, and a
-    # bronze candelabrum either side.
+    sk = min(3.4, H * 0.25)
+    zc = zt - sk                                # main cornice; mansard above
+    copper = np.array(hexrgb(COPPER))
+    gold = np.array(hexrgb("#d9b75e"))
+    bronze = np.array(hexrgb("#5d4a30"))
+    stone = np.array(hexrgb("#e6dcc8"))
+    trim = np.minimum(np.asarray(col) * 1.07 + 8, 250)
     q = poly.exterior.interpolate(poly.exterior.project(shapely.Point(*mid)))
-    f0 = np.array([q.x, q.y])                    # on the façade line
-    stone = np.array(hexrgb("#e9e0cc"))
+    f0 = np.array([q.x, q.y])                    # on the façade line, mid-front
     # The square is well above the building's lowest corner (it falls away
     # to the sea behind): the entrance stands at the square's level.
+    zs = base
     if mntR is not None:
-        zs = mntR.sample(np.array([f0[0] - n[0] * 8]), np.array([f0[1] - n[1] * 8]))
-        if np.isfinite(zs[0]):
-            base = float(zs[0]) - 0.6
-    for k in range(4):
-        d0 = 0.45 * (4 - k)
-        c = f0 - n * (d0 / 2 + 0.02)
-        add_walls(m, block(c, 22 - k * 0.8, d0, 0, 0), base - 0.3, base + 0.17 * (k + 1), base, 10, stone * (0.94 + 0.02 * k), PLAIN)
-        add_roof(m, block(c, 22 - k * 0.8, d0, 0, 0), base + 0.17 * (k + 1), stone, False)
-    zf = base + 0.68
-    door = np.array(hexrgb("#2a2622"))
-    trim = np.minimum(np.asarray(col) * 1.06 + 6, 250)
-    for j in (-1, 0, 1):
-        c = f0 + u * j * 4.0 - n * 0.06
-        w, h = 2.6, 5.2
-        # Rectangle below the springing line, then a half-round fan.
-        A = [c + u * w / 2, c - u * w / 2]
-        P = enu_fast(np.array([A[0][0], A[1][0], A[1][0], A[0][0]]), np.array([A[0][1], A[1][1], A[1][1], A[0][1]]),
-                     np.array([zf, zf, zf + h - w / 2, zf + h - w / 2]))
-        m.tri(P[[0, 0]], P[[1, 2]], P[[2, 3]], door, PLAIN)
-        m.tri(P[[0, 0]], P[[2, 1]], P[[3, 2]], door, PLAIN)
-        ang = np.linspace(0, math.pi, 9)
-        ring = [c + u * (w / 2) * math.cos(a_) for a_ in ang]
-        zz = zf + h - w / 2 + (w / 2) * np.sin(ang)
-        R_ = enu_fast(np.array([r[0] for r in ring]), np.array([r[1] for r in ring]), zz)
-        C_ = enu_fast(np.array([c[0]]), np.array([c[1]]), np.array([zf + h - w / 2]))
-        for i in range(8):
-            m.tri(C_, R_[[i]], R_[[i + 1]], door, PLAIN)
-            m.tri(C_, R_[[i + 1]], R_[[i]], door, PLAIN)
-        # Pilasters between the doors.
-        for s_ in (-1, 1):
-            add_walls(m, block(c + u * s_ * 2.0 - n * 0.15, 0.6, 0.4, 0, 0), base, zf + h + 0.6, base, 10, trim, PLAIN)
-    # Marquise: a thin glazed canopy on an iron frame, cantilevered.
-    mq = block(f0 - n * 2.4, 15.0, 4.8, 0, 0)
-    zm = zf + 5.9
-    add_walls(m, mq, zm, zm + 0.35, base, 10, hexrgb("#2e3936"), PLAIN)
-    add_roof(m, mq, zm + 0.35, np.array(hexrgb("#a9bcbc")), False)
-    add_roof(m, orient(mq, -1.0), zm, np.array(hexrgb("#3a4643")), False)
+        z_ = mntR.sample(np.array([f0[0] - n[0] * 8]), np.array([f0[1] - n[1] * 8]))
+        if np.isfinite(z_[0]):
+            zs = float(z_[0])
+
+    def block(c, w, d):
+        pts = [c + u * w / 2 + n * d / 2, c - u * w / 2 + n * d / 2, c - u * w / 2 - n * d / 2, c + u * w / 2 - n * d / 2]
+        return orient(Polygon(pts), 1.0)
+
+    def at(t, d=0.0):                            # t metres along the front from its middle
+        return f0 + u * t + n * d
+
+    # Towers: proud of the façade by 60 cm, an oculus in a stone frame on
+    # each face under a cornice, then the dome.
+    tw = CASINO_TOWER_W
+    zte = zc + 5.6
     for s_ in (-1, 1):
-        lp = f0 - n * 5.6 + u * s_ * 11.5
-        _box(m, lp[0], lp[1], u, 0.7, 0.7, base, base + 1.2, stone)
-        _box(m, lp[0], lp[1], u, 0.22, 0.22, base + 1.2, base + 4.6, hexrgb("#4a3f2c"), style=BRONZE)
+        t_ = s_ * (L / 2 - CASINO_TOWER_IN)
+        c = at(t_, tw / 2 - 0.6)
+        tp = block(c, tw, tw)
+        add_walls(m, tp, zs - 0.5, zte, zs, fh, col, kind, style=style)
+        for z_, h_ in ((zc - 0.6, 0.6), (zte - 0.1, 0.55)):
+            add_walls(m, tp.buffer(0.35, join_style=2), z_, z_ + h_, z_, 10, trim, PLAIN)
+            for rp in to_polys(tp.buffer(0.35, join_style=2).difference(tp)):
+                add_roof(m, orient(rp, 1.0), z_ + h_, trim, False)
+        add_roof(m, tp, zte + 0.45, trim, False)
+        # Oculi on the three faces seen from the square.
+        ang = np.linspace(0, 2 * math.pi, 17)
+        for fn, fu in ((-n, u), (u, n), (-u, -n)):
+            fc = c + fn * (tw / 2 + 0.03)
+            zo = zc + 2.6
+            for rad, cl, off in ((1.25, trim, 0.06), (0.85, np.array([40.0, 44.0, 46.0]), 0.12)):
+                ring = np.array([[math.cos(t) * rad, zo + math.sin(t) * rad] for t in ang[:-1]])
+                _vpanel(m, fc + fn * off, fu, -fn, ring, cl, depth=0.05)
+        # Balustraded parapet round the tower top, then the dome.
+        dome_cap(m, c, u, n, tw / 2 * 0.86, zte + 0.45, 5.2, copper, gold)
+    # The clock: a curved gable over the middle with the clock face and a
+    # bronze group either side (Music and Dance, in the photos).
+    gab = [(-4.6, zc - 0.2), (4.6, zc - 0.2), (4.6, zc + 2.4), (3.2, zc + 3.6), (1.4, zc + 4.3),
+           (0.0, zc + 4.45), (-1.4, zc + 4.3), (-3.2, zc + 3.6), (-4.6, zc + 2.4)]
+    _vpanel(m, at(0, -0.45), -u, n, [(-x, z) for x, z in gab], np.asarray(col, float), depth=1.2)
+    ang = np.linspace(0, 2 * math.pi, 21)[:-1]
+    for rad, cl, off in ((1.15, gold, 0.0), (0.95, np.array([244.0, 240.0, 228.0]), -0.02)):
+        _vpanel(m, at(0, -0.47 + off), -u, n, [(math.cos(t) * rad, zc + 2.0 + math.sin(t) * rad) for t in ang], cl, depth=0.05)
+    for s_ in (-1, 1):
+        g = at(s_ * 3.4, 0.2)
+        _box(m, g[0], g[1], u, 1.6, 1.0, zc, zc + 0.5, stone)
+        _box(m, g[0], g[1], u, 1.0, 0.7, zc + 0.5, zc + 1.6, bronze, style=BRONZE)
+        _ball(m, g[0] + u[0] * 0.25 * s_, g[1] + u[1] * 0.25 * s_, zc + 2.0, 0.42, bronze, BRONZE, 8, 5)
+        _box(m, g[0] - u[0] * 0.4 * s_, g[1] - u[1] * 0.4 * s_, u, 0.4, 0.4, zc + 1.5, zc + 2.6, bronze, style=BRONZE)
+    # Dormers on the mansard: round-headed, in stone, on the outer bays
+    # and either side of the clock, as in the photos.
+    tin = L / 2 - CASINO_TOWER_IN
+    dpos = [s_ * (tin + tw / 2 + 2.4) for s_ in (-1, 1)] + [s_ * (tin + tw / 2 + 6.2) for s_ in (-1, 1)] \
+        + [s_ * 6.4 for s_ in (-1, 1)]
+    for t_ in dpos:
+        if abs(t_) > L / 2 - 1.2:
+            continue
+        o = at(t_, 0.9)
+        out = [(-0.95, zc - 0.1), (0.95, zc - 0.1), (0.95, zc + 2.0), (0.6, zc + 2.55), (0.0, zc + 2.8),
+               (-0.6, zc + 2.55), (-0.95, zc + 2.0)]
+        _vpanel(m, o, -u, n, [(-x, z) for x, z in out], np.asarray(col, float) * 1.03, depth=1.8)
+        win = [(-0.5, zc + 0.35), (0.5, zc + 0.35), (0.5, zc + 1.75), (0.0, zc + 2.15), (-0.5, zc + 1.75)]
+        _vpanel(m, o - n * 0.03, -u, n, [(-x, z) for x, z in win], np.array([38.0, 44.0, 48.0]), depth=0.02)
+        # Its little copper roof back into the mansard.
+        rp = block(o + n * 1.1, 2.1, 2.0)
+        add_cap(m, rp, zc + 2.0, 0.9, copper, ROOF_TILE)
+    # The entrance: three tall arched doors, glazed and lit, between
+    # stone pilasters.
+    zf = zs + 0.5
+    for j in (-1, 0, 1):
+        c = at(j * 3.9, -0.06)
+        w, h = 2.7, 5.4
+        out = [(-w / 2, zf), (w / 2, zf), (w / 2, zf + h - w / 2)] + \
+              [(math.cos(t) * w / 2, zf + h - w / 2 + math.sin(t) * w / 2) for t in np.linspace(0, math.pi, 9)[1:-1]] + \
+              [(-w / 2, zf + h - w / 2)]
+        _vpanel(m, c, -u, n, [(-x, z) for x, z in out], np.array(hexrgb("#8c6a3c")), depth=0.05, style=LIT_GLASS)
+        _vpanel(m, c - n * 0.02, -u, n, [(-0.06, zf), (0.06, zf), (0.06, zf + h - 0.2), (-0.06, zf + h - 0.2)],
+                np.array(hexrgb("#2a2620")), depth=0.02)
+        for s_ in (-1, 1):
+            p_ = c + u * s_ * 1.95 - n * 0.2
+            _box(m, p_[0], p_[1], u, 0.7, 0.45, zs, zf + h + 0.8, trim)
+    # Steps: a broad flight of four the width of the entrance bay.
+    for k in range(4):
+        d0 = 0.42 * (4 - k)
+        c = at(0, -(d0 / 2 + 0.02))
+        bk = block(c, 21.5 - k * 0.7, d0)
+        add_walls(m, bk, zs - 0.4, zs + 0.13 * (k + 1), zs, 10, stone * (0.93 + 0.025 * k), PLAIN)
+        add_roof(m, bk, zs + 0.13 * (k + 1), stone * (0.98 + 0.01 * k), False)
+    # Garnier's marquise: a glass canopy on an iron frame, its front edge
+    # bowed out over the steps, with a scalloped iron valance.
+    zm = zs + 5.7
+    W = 2 * (L / 2 - CASINO_TOWER_IN) - 1.0
+    ss = np.linspace(-W / 2, W / 2, 25)
+    dep = 2.2 + 3.6 * np.sqrt(np.clip(1 - (ss / (W / 2)) ** 2, 0, 1))
+    front = np.array([at(s_, -d_) for s_, d_ in zip(ss, dep)])
+    back = np.array([at(s_, -0.05) for s_ in ss])
+    iron = np.array(hexrgb("#2b3533"))
+    Fz = enu_fast(front[:, 0], front[:, 1], np.full(len(ss), zm))
+    Bz = enu_fast(back[:, 0], back[:, 1], np.full(len(ss), zm + 1.6))
+    Fl = enu_fast(front[:, 0], front[:, 1], np.full(len(ss), zm - 0.7))
+    Fu = enu_fast(front[:, 0], front[:, 1], np.full(len(ss), zm + 0.12))
+    j = np.arange(len(ss) - 1)
+    gl = np.array(hexrgb("#9fb4b4"))
+    up_ = np.cross(Bz[1] - Fz[0], Bz[0] - Fz[0])
+    if up_[2] > 0:                    # this winding faces the sky
+        T1, T2 = (Fz[j], Bz[j + 1], Bz[j]), (Fz[j], Fz[j + 1], Bz[j + 1])
+    else:
+        T1, T2 = (Fz[j], Bz[j], Bz[j + 1]), (Fz[j], Bz[j + 1], Fz[j + 1])
+    m.tri(*T1, gl, PLAIN, style=ROOF_GLASS)
+    m.tri(*T2, gl, PLAIN, style=ROOF_GLASS)
+    soffit = np.array(hexrgb("#b9a47e"))          # lit from below by the doors
+    m.tri(T1[0], T1[2], T1[1], soffit, PLAIN)          # underside
+    m.tri(T2[0], T2[2], T2[1], soffit, PLAIN)
+    m.tri(Fl[j], Fl[j + 1], Fu[j + 1], iron, PLAIN)            # edge band, both faces
+    m.tri(Fl[j], Fu[j + 1], Fu[j], iron, PLAIN)
+    m.tri(Fl[j], Fu[j + 1], Fl[j + 1], iron, PLAIN)
+    m.tri(Fl[j], Fu[j], Fu[j + 1], iron, PLAIN)
+    # Valance: a small pointed lambrequin under each panel.
+    mids = (front[j] + front[j + 1]) / 2
+    Tm = enu_fast(mids[:, 0], mids[:, 1], np.full(len(j), zm - 1.15))
+    m.tri(Fl[j], Fl[j + 1], Tm, iron, PLAIN)
+    m.tri(Fl[j], Tm, Fl[j + 1], iron, PLAIN)
+    # Slender iron columns under the ends of the bow.
+    for i in (1, len(ss) - 2):
+        cp = front[i] + (back[i] - front[i]) * 0.12
+        _box(m, cp[0], cp[1], u, 0.18, 0.18, zs + 0.5, zm, iron)
+        _box(m, cp[0], cp[1], u, 0.4, 0.4, zs + 0.5, zs + 0.9, iron)
+    # Iron ribs from the façade to the edge, every other panel.
+    for i in range(0, len(ss), 3):
+        _box(m, *((front[i] + back[i]) / 2), front[i] - back[i], float(np.linalg.norm(front[i] - back[i])),
+             0.12, zm + 0.0, zm + 0.25, iron)
+    # A bronze candelabrum either side of the steps.
+    for s_ in (-1, 1):
+        lp = at(s_ * 11.6, -5.4)
+        _box(m, lp[0], lp[1], u, 0.8, 0.8, zs, zs + 1.3, stone)
+        _box(m, lp[0], lp[1], u, 0.22, 0.22, zs + 1.3, zs + 4.8, hexrgb("#3d3322"), style=BRONZE)
         for t_ in (-1, 0, 1):
-            pp = lp + u * t_ * 0.55
-            _ball(m, pp[0], pp[1], base + 4.9 + (0.25 if t_ == 0 else 0), 0.24, np.array(hexrgb("#f4ecd6")), 3, 8, 5)
+            pp = lp + u * t_ * 0.6
+            _ball(m, pp[0], pp[1], zs + 5.1 + (0.3 if t_ == 0 else 0), 0.26, np.array(hexrgb("#f6eedb")), 3, 8, 5)
 
 
 # Façade styles, read by the viewer's shader from the low bits of the colour
@@ -2603,11 +2867,15 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         if levels[i][1] < levels[i - 1][1] + 3:
                             levels = levels[:i]
                             break
-            H = levels[-1][1]
             hero = HEROES.get(props.get("cleabs"))
             if hero:
                 rk, tiled = "copper", False
                 rcol = np.array(hexrgb(hero["roof"]))
+                # The Casino's roof is a terrace of copper mansards with the
+                # gaming halls' glazed roofs rising out of it (casino_halls):
+                # walls to the terrace, the halls added from the LiDAR.
+                levels = [(poly, float(np.percentile(hrel, 45)))]
+            H = levels[-1][1]
             grand = not post_scan and (rk == "copper" or (not tiled and H < 30 and poly.area > 500
                                                           and rnd.random() < 0.35))
             info = facades.get(poly, props)
@@ -2801,7 +3069,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         add_roof(m, q, zt2, mc * 0.9, False)
                         stats["rooftop"] += 1
             # Towers and domes: small blobs that rise well above the roof.
-            if grand and poly.area > 300:
+            if hero:
+                stats["casino_halls"] = stats.get("casino_halls", 0) + casino_halls(
+                    m, poly, base, H, fh, col, kind, style, rcol, mns, stats)
+            elif grand and poly.area > 300:
                 ref = np.percentile(hrel, 70)
                 grid = np.zeros(sub.shape, bool)
                 grid[ins] = hrel > ref + 5
@@ -4564,6 +4835,135 @@ def sidewalk_ground(X, Y, Zm, Zs):
     return wall_ground(X, Y, Zm), Zs
 
 
+# ------------------------------------------------- Allée François Blanc ----
+# The pedestrian street between the Casino and the Café de Paris, running
+# down from Casino square towards the Spélugues gardens: pale stone paving
+# wall to wall, no kerbs, no asphalt, and the luxury boutiques (watchmakers
+# and jewellers: Jaeger-LeCoultre, Hublot, Richard Mille, Vacheron
+# Constantin, Chaumet, Tiffany, Messika...) in tall glazed bays framed in
+# stone, each where OpenStreetMap maps the shop.
+ALLEE_NAME = "Allée François Blanc"
+ALLEE_HALF = 9.0                     # m either side of the mapped line to pave
+BOUTIQUE_REACH = 5.5                 # m of frontage either side of a shop's point
+BOUTIQUE_BAY = 4.2
+
+
+def allee_francois_blanc(gm, m, ways, pts, mnt, fps, stats):
+    line = None
+    for t, p_, closed in ways:
+        if t.get("name") == ALLEE_NAME and t.get("highway") and len(p_) >= 2:
+            g = LineString(p_)
+            line = g if line is None or g.length > line.length else line
+    if line is None:
+        return 0
+    mntR = Raster(mnt)
+    near = [p for p in fps if p.distance(line) < ALLEE_HALF + 4]
+    blds = unary_union(near) if near else Polygon()
+    # Paving: the street between the walls, from the square to the gardens.
+    area = line.buffer(ALLEE_HALF, cap_style=2).difference(blds.buffer(0.05))
+    n_ = 0
+    for q in to_polys(area):
+        q = shapely.set_precision(q.simplify(0.05), 0.01)
+        if q.is_empty or q.geom_type != "Polygon" or q.area < 2 or not q.is_valid:
+            continue
+        tr = triangulate(orient(q, 1.0), area=4)
+        if tr is None:
+            continue
+        v, tri = tr
+        z = mntR.sample(v[:, 0], v[:, 1])
+        ok = np.isfinite(z)
+        if not ok.all():
+            z = np.where(ok, z, np.nanmedian(z))
+        zt = z[tri]
+        tri = tri[(zt.max(1) - zt.min(1)) < 1.5]
+        P = enu_fast(v[:, 0], v[:, 1], z + 0.06)
+        uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=SLAB)
+        n_ += 1
+    # Boutiques: the real shops along the street.
+    shops = [(x, y, t) for (x, y), t in pts if (t.get("shop") or t.get("brand")) and
+             LineString(line.coords).distance(Point(x, y)) < ALLEE_HALF + 6]
+    walls = []                       # (a, b, building) edges facing the street
+    for p in near:
+        p = orient(p, 1.0)
+        r = np.asarray(p.exterior.coords)[:, :2]
+        for a, b in zip(r[:-1], r[1:]):
+            L = float(np.linalg.norm(b - a))
+            if L < 2.0:
+                continue
+            mid = (a + b) / 2
+            out = np.array([b[1] - a[1], a[0] - b[0]]) / L
+            pl = line.interpolate(line.project(Point(*mid)))
+            to = np.array([pl.x, pl.y]) - mid
+            d = float(np.linalg.norm(to))
+            if d > ALLEE_HALF + 1.5 or d < 1.0 or np.dot(out, to / d) < 0.55:
+                continue
+            walls.append((a, b, out))
+    spans = {}
+    for x, y, t in shops:
+        best = None
+        for i, (a, b, out) in enumerate(walls):
+            ab = b - a
+            tt = float(np.clip(np.dot(np.array([x, y]) - a, ab) / np.dot(ab, ab), 0, 1))
+            d = float(np.linalg.norm(a + ab * tt - np.array([x, y])))
+            if best is None or d < best[0]:
+                best = (d, i, tt * float(np.linalg.norm(ab)))
+        if best is None or best[0] > 14:
+            continue
+        spans.setdefault(best[1], []).append((best[2] - BOUTIQUE_REACH, best[2] + BOUTIQUE_REACH))
+    stone = np.array(hexrgb("#e9e1d0"))
+    sign = np.array(hexrgb("#24211d"))
+    gold = np.array(hexrgb("#c8a45c"))
+    shopglass = np.array(hexrgb("#e2b878"))
+    nb_ = 0
+    for i, sp in spans.items():
+        a, b, out = walls[i]
+        L = float(np.linalg.norm(b - a))
+        u = (b - a) / L
+        sp = sorted((max(0.3, s0), min(L - 0.3, s1)) for s0, s1 in sp)
+        merged = []
+        for s0, s1 in sp:
+            if s1 - s0 < 1.5:
+                continue
+            if merged and s0 <= merged[-1][1] + 0.6:
+                merged[-1][1] = max(merged[-1][1], s1)
+            else:
+                merged.append([s0, s1])
+        for s0, s1 in merged:
+            nb = max(1, int(round((s1 - s0) / BOUTIQUE_BAY)))
+            bw = (s1 - s0) / nb
+            for k in range(nb):
+                c = a + u * (s0 + bw * (k + 0.5))
+                zg = mntR.sample(np.array([c[0] + out[0] * 1.2]), np.array([c[1] + out[1] * 1.2]))
+                if not np.isfinite(zg[0]):
+                    continue
+                z0 = float(zg[0]) + 0.02
+                o = c + out * 0.02
+                # Stone frame, the bay's full width, 5 m high.
+                _vpanel(m, o + out * 0.25, u, -out, [(-bw / 2, z0), (bw / 2, z0), (bw / 2, z0 + 5.0), (-bw / 2, z0 + 5.0)],
+                        stone, depth=0.27)
+                # The window, recessed in the frame: lit glass.
+                _vpanel(m, o + out * 0.29, u, -out, [(-bw / 2 + 0.45, z0 + 0.3), (bw / 2 - 0.45, z0 + 0.3),
+                                                      (bw / 2 - 0.45, z0 + 3.9), (-bw / 2 + 0.45, z0 + 3.9)],
+                        shopglass, depth=0.02, style=LIT_GLASS)
+                _vpanel(m, o + out * 0.3, u, -out, [(-0.05, z0 + 0.3), (0.05, z0 + 0.3), (0.05, z0 + 3.9), (-0.05, z0 + 3.9)],
+                        sign, depth=0.02, style=BRONZE)
+                # A thin bronze transom and the sign band with its gilt line.
+                _vpanel(m, o + out * 0.3, u, -out, [(-bw / 2 + 0.45, z0 + 2.95), (bw / 2 - 0.45, z0 + 2.95),
+                                                     (bw / 2 - 0.45, z0 + 3.05), (-bw / 2 + 0.45, z0 + 3.05)],
+                        sign, depth=0.02, style=BRONZE)
+                _vpanel(m, o + out * 0.3, u, -out, [(-bw / 2 + 0.3, z0 + 4.15), (bw / 2 - 0.3, z0 + 4.15),
+                                                     (bw / 2 - 0.3, z0 + 4.7), (-bw / 2 + 0.3, z0 + 4.7)],
+                        sign, depth=0.03)
+                _vpanel(m, o + out * 0.34, u, -out, [(-bw * 0.22, z0 + 4.38), (bw * 0.22, z0 + 4.38),
+                                                     (bw * 0.22, z0 + 4.47), (-bw * 0.22, z0 + 4.47)],
+                        gold, depth=0.01, style=BRONZE)
+                nb_ += 1
+    stats["boutique_bays"] = nb_
+    stats["allee_shops"] = len(shops)
+    return n_
+
+
 def sidewalks(gm, m, stats):
     """The pavement slab, laid by the shader (red brick pavers, pale stone
     round the Casino) and shaded from the ground map, with kerb stones
@@ -5498,7 +5898,19 @@ def no_tree_zones(ways):
     return unary_union(out) if out else None
 
 
+# Casino square (Place du Casino) is a paved plaza with a few tall palms and
+# no other trees: the palms stand where OpenStreetMap maps them (round the
+# fountain and on the Café de Paris terrace, as in the 2026 street photos).
+# Corners in metres east / north of the Casino fountain.
+CASINO_PALM_ZONE = [(-27, -24), (-30, 8), (-22, 30), (8, 38), (30, 30), (44, 2), (46, -8), (24, -44), (2, -42)]
+
+
+def casino_palm_zone():
+    return Polygon([(CASINO_SQUARE[0] + e, CASINO_SQUARE[1] + n) for e, n in CASINO_PALM_ZONE])
+
+
 def trees(m, mns, mnt, ortho, bmask, osm_pts, stats, no_tree=None):
+    palm_zone = casino_palm_zone()
     chm = np.nan_to_num(mns - mnt, nan=0)
     chm[bmask > 0] = 0
     if no_tree is not None:
@@ -5536,6 +5948,8 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats, no_tree=None):
         rad *= 0.85                     # leave the streets some air
         if not off_track(x, y, 0.5 * rad):
             continue
+        if palm_zone.contains(Point(x, y)):
+            continue                    # the square's palms come from the map below
         if h > 14 and rad > 4.5 and rnd.random() < 0.6:
             kind = "pine"
         elif h > 8 and rad < 2.0:
@@ -5551,6 +5965,14 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats, no_tree=None):
     mntR = Raster(mnt)
     for (x, y), t in osm_pts:
         if t.get("natural") != "tree" or not (X0 < x < X1 and Y0 < y < Y1):
+            continue
+        if palm_zone.contains(Point(x, y)):
+            # A slim palm, 8-12 m, its crown clear of the crowd below.
+            z = float(mntR.sample(np.array([x]), np.array([y]))[0])
+            if np.isfinite(z):
+                add_tree(m, x, y, z, rnd.uniform(8.5, 12.0), rnd.uniform(2.6, 3.2), "palm", rnd)
+                stats["trees"] += 1
+                stats["casino_palms"] = stats.get("casino_palms", 0) + 1
             continue
         if len(placed) and np.min(np.hypot(placed[:, 0] - x, placed[:, 1] - y)) < 4:
             continue
@@ -7317,6 +7739,8 @@ def main():
     if SW is None:
         pavements(bm, sea, bmask, stats)
     print("sidewalks…", sidewalks(gm, bm, stats))
+    print("Allée François Blanc…", allee_francois_blanc(gm, bm, ways, pts, mnt_f, fps, stats), "paved pieces,",
+          stats.get("boutique_bays"), "boutique bays")
     print("street walls…", street_walls(gm, bm, stats))
     print("car park doors…", garage_doors(bm, entrances, fps, stats))
     print("starting grid…", start_grid(bm, stats), "slots")

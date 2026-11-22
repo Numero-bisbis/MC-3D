@@ -855,6 +855,33 @@
             material.diffuse = col;
             material.specular = vec3(0.12);
             material.roughness = 0.45;
+          } else if (st > 6.5 && st < 7.5) {
+            // Lit shop glass (the Casino's doors, the boutiques of the Allée
+            // François Blanc): dark reflective panes with the warm light of
+            // the shop inside, glowing more at night.
+            vec3 p = fsInput.attributes.positionMC * length(czm_model[0].xyz);
+            float glow = 0.8 + 0.2 * vnoise(p.xz * 0.35);
+            // Display lights: brighter spots on a dim interior.
+            float spot = smoothstep(0.5, 1.0, vnoise(p.xz * 0.9 + p.y * 0.4)) * 0.5;
+            material.diffuse = vec3(0.03, 0.035, 0.04);
+            material.specular = vec3(0.4);
+            material.roughness = 0.1;
+            material.emissive = base * (0.25 * glow + 0.35 * spot) * mix(0.75, 2.0, u_night);
+          } else if (st > 14.5) {
+            // Glazed roofs (the Casino's halls, the marquise): panes between
+            // thin iron glazing bars in world metres, the sky in them.
+            vec3 p = fsInput.attributes.positionMC * length(czm_model[0].xyz);
+            vec2 q = p.xz / vec2(1.2, 0.75);
+            vec2 aa = max(fwidth(q) * 1.2, vec2(0.002));
+            float bx = 1.0 - smoothstep(0.04, 0.04 + aa.x, abs(fract(q.x + 0.5) - 0.5));
+            float by = 1.0 - smoothstep(0.03, 0.03 + aa.y, abs(fract(q.y + 0.5) - 0.5));
+            float bar = clamp(bx + by, 0.0, 1.0) * (1.0 - smoothstep(0.1, 0.35, max(aa.x, aa.y)));
+            float pane = hash12(floor(q));
+            vec3 g = base * mix(0.82, 1.08, pane) * mix(0.9, 1.05, vnoise(p.xz * 0.15));
+            material.diffuse = mix(g * 0.7, vec3(0.16, 0.19, 0.18), bar);
+            material.specular = vec3(mix(0.45, 0.06, bar));
+            material.roughness = mix(0.08, 0.6, bar);
+            material.emissive = vec3(1.0, 0.85, 0.6) * 0.35 * u_night * (1.0 - bar);
           } else {
             material.diffuse = base;
           }
