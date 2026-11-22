@@ -139,8 +139,12 @@
    "seen": "white Belle Epoque"
   },
   "BATIMENT0000002244941449": {
-   "style": "modern",
-   "seen": "white, curved glass balconies"
+   "style": "ribbon",
+   "seen": "grey-white veined marble walls, white curved slab balconies with glass",
+   "colour": "#dfddd6",
+   "levels": 9,
+   "balconies": "continuous",
+   "depth": 1.5
   },
   "BATIMENT0000002244941764": {
    "style": "modern",
@@ -164,6 +168,43 @@
    "depth": 1.3,
    "seen": "45 m tower, balcony bands",
    "style": "ribbon"
+  },
+  "BATIMENT0000000074074354": {
+   "style": "deco",
+   "seen": "Quai Antoine 1er: long salmon-pink block built against the Rocher, white-framed punched windows, no shutters, glazed restaurant verandas and arcades on the quay",
+   "colour": "#f4c8ae",
+   "levels": 9,
+   "balconies": "none",
+   "bay": 3.2
+  },
+  "BATIMENT0000000074074434": {
+   "style": "shutter",
+   "seen": "orange-ochre house at the Rascasse, arched ground floor, white window frames",
+   "colour": "#d98b5f",
+   "levels": 4,
+   "balconies": "none"
+  },
+  "BATIMENT0000000074074362": {
+   "style": "ribbon",
+   "seen": "Le Castellara (2005): cream walls, giant columns on the street, curved white slab balconies with glass rails",
+   "colour": "#ebe1cc",
+   "levels": 8,
+   "balconies": "continuous",
+   "depth": 1.6
+  },
+  "BATIMENT0000002244941699": {
+   "style": "ribbon",
+   "seen": "Yacht Club de Monaco (Foster, 2014): white decks stacked like a yacht's, glass behind deep balconies, rounded bow at the west end",
+   "levels": 6,
+   "balconies": "continuous",
+   "depth": 2.0
+  },
+  "BATIMENT0000000074074372": {
+   "style": "glass",
+   "seen": "La Rascasse bar: black steel frame, glass walls, flat canopy roof",
+   "colour": "#55595b",
+   "levels": 2,
+   "balconies": "none"
   }
  }
 }
