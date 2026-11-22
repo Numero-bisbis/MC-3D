@@ -4848,7 +4848,7 @@ BOUTIQUE_REACH = 5.5                 # m of frontage either side of a shop's poi
 BOUTIQUE_BAY = 4.2
 
 
-def allee_francois_blanc(gm, m, ways, pts, mnt, fps, stats):
+def allee_francois_blanc(gm, m, ways, pts, mnt, fps, stats, gz=None):
     line = None
     for t, p_, closed in ways:
         if t.get("name") == ALLEE_NAME and t.get("highway") and len(p_) >= 2:
@@ -4874,9 +4874,14 @@ def allee_francois_blanc(gm, m, ways, pts, mnt, fps, stats):
         ok = np.isfinite(z)
         if not ok.all():
             z = np.where(ok, z, np.nanmedian(z))
+        if gz is not None:
+            # Above the 3 m ground mesh too (its triangles bulge over the
+            # 50 cm terrain in places and showed through as dark patches).
+            fi, fj = (v[:, 0] - X0) / GRID, (Y1 - v[:, 1]) / GRID
+            z = np.maximum(z, ndimage.map_coordinates(gz, [fj, fi], order=1, mode="nearest"))
         zt = z[tri]
         tri = tri[(zt.max(1) - zt.min(1)) < 1.5]
-        P = enu_fast(v[:, 0], v[:, 1], z + 0.06)
+        P = enu_fast(v[:, 0], v[:, 1], z + 0.1)
         uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
         gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=SLAB)
         n_ += 1
@@ -4937,7 +4942,11 @@ def allee_francois_blanc(gm, m, ways, pts, mnt, fps, stats):
                 zg = mntR.sample(np.array([c[0] + out[0] * 1.2]), np.array([c[1] + out[1] * 1.2]))
                 if not np.isfinite(zg[0]):
                     continue
-                z0 = float(zg[0]) + 0.02
+                z0 = float(zg[0]) + 0.1
+                if gz is not None:
+                    gx_, gy_ = c[0] + out[0] * 1.2, c[1] + out[1] * 1.2
+                    z0 = max(z0, float(ndimage.map_coordinates(gz, [[(Y1 - gy_) / GRID], [(gx_ - X0) / GRID]],
+                                                               order=1, mode="nearest")[0]) + 0.1)
                 o = c + out * 0.02
                 # Stone frame, the bay's full width, 5 m high.
                 _vpanel(m, o + out * 0.25, u, -out, [(-bw / 2, z0), (bw / 2, z0), (bw / 2, z0 + 5.0), (-bw / 2, z0 + 5.0)],
@@ -7739,7 +7748,7 @@ def main():
     if SW is None:
         pavements(bm, sea, bmask, stats)
     print("sidewalks…", sidewalks(gm, bm, stats))
-    print("Allée François Blanc…", allee_francois_blanc(gm, bm, ways, pts, mnt_f, fps, stats), "paved pieces,",
+    print("Allée François Blanc…", allee_francois_blanc(gm, bm, ways, pts, mnt_f, fps, stats, gz), "paved pieces,",
           stats.get("boutique_bays"), "boutique bays")
     print("street walls…", street_walls(gm, bm, stats))
     print("car park doors…", garage_doors(bm, entrances, fps, stats))
