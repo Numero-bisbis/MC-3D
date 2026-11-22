@@ -422,18 +422,38 @@ def ground_mesh(mnt, sea):
             # Flat under the road and one grid step past the barriers (a
             # ground triangle from there cannot poke up through the road).
             inner_k = ok & (dk < TRACK_HALF + 3.2)
-            cap_k = np.where(ok, zk + 0.6 + 1.5 * np.maximum(0, dk - (TRACK_HALF + 6.5)), np.inf)
-            flat = np.where(inner_k, zk - 0.15, np.inf).min(1)
+            # 30 cm under the road: the road's edges sit 14 cm under the
+            # lap's height, and ground 15 cm under it z-fought with them.
+            # Past the flat band the ground rises gently for two metres
+            # (a ground triangle reaching back over the road's edge stays
+            # under it), then at most 1.5 m per metre.
+            cap_k = np.where(ok, zk - GROUND_UNDER + 0.35 * np.clip(dk - (TRACK_HALF + 3.2), 0, 2.3)
+                             + 1.5 * np.maximum(0, dk - (TRACK_HALF + 5.5)), np.inf)
+            # Points of the nearest point's own stretch (within 24 m along
+            # the lap) count at the nearest point's height: on a climb
+            # (Avenue d'Ostende, 7 %) the lowest of them is the road 16 m
+            # further down, and the ground sank a metre under the road
+            # (the pavements stood up as steps). Another leg of the lap
+            # within reach counts at its own height when lower (below the
+            # Fairmont hairpin the legs run 14 m apart and up to 8 m apart
+            # in height).
+            nlap = len(TRACK["x"])
+            gap = np.abs(jk - jk[:, :1])
+            same = ok & (np.minimum(gap, nlap - gap) <= 12)
+            near = np.where(inner_k[:, 0], zk[:, 0] - GROUND_UNDER, np.inf)
+            other = np.where(inner_k & ~same, zk - GROUND_UNDER, np.inf).min(1)
+            flat = np.minimum(np.where(inner_k & same, near[:, None], np.inf).min(1), other)
             inner = np.isfinite(flat)
-            # The lowest of the neighbours is right where another leg of
-            # the lap passes below, but on a climb (Avenue d'Ostende, 7 %)
-            # it is the road 16 m further down: the ground sank a metre
-            # under the road and the pavements stood up as steps. Take
-            # the nearest point's height unless another leg is far lower.
-            near = np.where(inner_k[:, 0], zk[:, 0] - 0.15, np.inf)
-            flat = np.where(np.isfinite(near) & (near - flat < 2.0), near, flat)
             cap = cap_k.min(1)
-            Z[band] = np.where(inner, np.minimum(flat, cap), np.minimum(zb, cap))
+            # Under a road the cap only comes from its own leg and legs
+            # about level with it: at the Fairmont hairpin the way out runs
+            # 15 m away and up to 8 m lower, and its cap pulled the ground
+            # under the way in 2 m down; the road followed it in 3 m
+            # steps and the ground's slopes showed through as shards.
+            near_z = np.where(inner_k[:, 0], zk[:, 0], np.inf)
+            near_z = np.where(np.isfinite(near_z), near_z, np.where(inner_k, zk, -np.inf).max(1))
+            cap_in = np.where(ok & (zk > near_z[:, None] - 2.0), cap_k, np.inf).min(1)
+            Z[band] = np.where(inner, np.minimum(flat, cap_in), np.minimum(zb, cap))
             if PROM is not None:
                 # Avenue d'Ostende: the ground stays under the pavements,
                 # out to the parapet on the sea side and 7 m past the edge
@@ -2487,6 +2507,7 @@ TUBE_HALF, TUBE_H = 6.7, 6.5
 # models it 5 m either side of the centre line, barriers at 5.35 m). Nothing
 # of the set may stand on it, and the ground may not rise over its edges.
 TRACK_HALF = 5.0
+GROUND_UNDER = 0.3                    # m, the ground under the circuit's road
 TRACK = None
 
 
@@ -6014,6 +6035,12 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
             zt = np.where(dk < TRACK_HALF + 4.0, TRACK["z"][jk] - 0.06 - 0.08 * np.clip(dk - 3.0, 0, 1),
                           np.inf).reshape(Z.shape)
             Z = np.minimum(Z, zt)
+            # On the circuit itself the road is the lap's own surface, not
+            # the 3 m ground grid's: where the ground dips (another leg of
+            # the lap passing below) the road kept its level and the
+            # ground's slopes no longer show through it.
+            onl = (dk < TRACK_HALF + 0.5).reshape(Z.shape)   # (4 cm lower: under the track audit)
+            Z = np.where(onl, zt - 0.04, Z)
         jd = jkd.query(P)[0] if jkd is not None else np.full(len(P), 99.0)
         jf = np.clip((jd - (half + 2.5)) / 3.0, 0, 1)
         if hw == "raceway":
