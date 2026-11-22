@@ -1420,7 +1420,6 @@ def roof_atlas(hi, photo, kit=None, stats=None):
     atlas.save(b, "JPEG", quality=90)
     atlas.save(RAW / "roof-atlas-preview.jpg", quality=80)
     (RAW / "roof-debug.json").write_text(json.dumps(debug))
-    (RAW / "red-log.json").write_text(json.dumps(RED_LOG))
     return b.getvalue(), round(T, 2)
 
 
@@ -1527,7 +1526,9 @@ def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
 
 
 _MNS_S = {}
-RED_LOG = []
+# Big tiled blocks with their roofs shaped from the LiDAR: off until the
+# blocks are split into their houses (the 50 cm scan alone gives lumps).
+LIDAR_ROOFS = False
 
 
 def planar_roof(S, part):
@@ -2503,7 +2504,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         if not isinstance(ov, Polygon):
                             ov = part
                         ov = orient(ov, 1.0)
-                        if ph is not None and part.area > 300 and lidar_roof(
+                        if LIDAR_ROOFS and ph is not None and part.area > 300 and lidar_roof(
                                 m, ov, eave, min(base + top + 1.0, eave + 7.0), mns, ph, np.asarray(col) * 0.95):
                             # A big tiled block is many roofs: their real
                             # shape from the LiDAR, not one hipped lid.
@@ -2524,11 +2525,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         # A block over many tiled roofs (the photo shows
                         # them red): walls to the eaves, then the roofs'
                         # real shape from the LiDAR.
-                        rs_ = red_share(part, ortho, ph["shift"]) if ph is not None and part.area > 60 else 0.0
-                        if part.area > 400 and ph is not None:
-                            c__ = part.centroid
-                            RED_LOG.append((round(c__.x), round(c__.y), round(part.area), round(rs_, 2), bool(last)))
-                        if ph is not None and last and part.area > 60 and rs_ > 0.3:
+                        rs_ = red_share(part, ortho, ph["shift"]) if LIDAR_ROOFS and ph is not None and part.area > 60 else 0.0
+                        if LIDAR_ROOFS and ph is not None and last and part.area > 60 and rs_ > 0.3:
                             ring_ = part.exterior
                             ss_ = shapely.line_interpolate_point(part.buffer(-0.8, join_style=2).exterior if isinstance(
                                 part.buffer(-0.8, join_style=2), Polygon) else ring_, np.linspace(0, 1, 60), normalized=True)
