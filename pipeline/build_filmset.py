@@ -2505,6 +2505,7 @@ def load_track():
     line = LineString(np.column_stack([np.append(x, x[0]), np.append(y, y[0])]))
     from scipy.spatial import cKDTree
     return {"x": x, "y": y, "z": z, "line": line, "kd": cKDTree(np.column_stack([x, y])),
+            "step": float(d.get("step", 2.0)),
             "keep_out": line.buffer(TRACK_HALF + 0.8)}
 
 
@@ -3105,6 +3106,79 @@ SW_PAVING = "#a5715f"                 # red brick pavers, as along Monaco's stre
 SW_PALE = "#d3cbbd"                    # pale stone round the Casino (Mapillary 2025)
 SW_PALE_S = (650, 1080)                # lap metres: Massenet, Casino square, Spélugues
 SW_SKIP_ROAD = ("footway", "path", "steps", "cycleway", "pedestrian", "track", "bridleway", "corridor")
+# From the top of Avenue d'Ostende past Casino square, Mirabeau, the Fairmont
+# hairpin and Portier to the tunnel (lap metres): the street furniture as in
+# the 2025 street photos (Mapillary): red-and-white painted kerbs round the
+# corners, rubble-stone retaining walls, rendered garden walls with iron
+# railings, low parapets with railings over the drops.
+UPPER = (640, 1530)
+KERB_W = 0.25                          # m, the kerb stone's top
+KERB_GRANITE = "#cfccc4"
+GARDEN_WALL = "#e2c690"                # ochre render (Parc Spélugues at Mirabeau)
+GARDEN_RAIL = "#1d2220"                # black iron railings on the garden walls
+STREET_RAIL = "#e9e9e4"                # white railings over the drops
+WALL_RUBBLE = "#c6bfb0"                # pale grey limestone rubble walls
+PAVER, SLAB = 9, 10                    # GROUND styles: red brick pavers, pale stone slabs
+KERB, KERB_RW, RUBBLE, RAIL = 9, 10, 11, 12   # PLAIN styles (viewer/filmset.js)
+
+
+def lap_s(x, y):
+    """Lap metres of the nearest centre-line point."""
+    _, j = TRACK["kd"].query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
+    return j * TRACK["step"]
+
+
+def in_upper(x, y):
+    s_ = lap_s(x, y)
+    return (s_ >= UPPER[0]) & (s_ <= UPPER[1])
+
+
+def lap_corners():
+    """Lap points on a corner: the heading turns more than 18 degrees
+    within 12 m either side (the red-and-white kerbs run round them)."""
+    t = TRACK
+    h = np.arctan2(np.gradient(t["y"]), np.gradient(t["x"]))
+    k = max(1, int(round(12.0 / t["step"])))
+    turn = np.abs(np.angle(np.exp(1j * (np.roll(h, -k) - np.roll(h, k)))))
+    return ndimage.binary_dilation(turn > np.radians(18), iterations=k)
+
+
+def _quad_uv(m, p0, p1, p2, p3, col, want, uv, kind=None, style=None):
+    """_quad with texture coordinates (uv: four (k, 2) arrays, one per
+    corner) and a style."""
+    kind = PLAIN if kind is None else kind
+    u0, u1, u2, u3 = uv
+    for (a, b, c), (ua, ub, uc) in (((p0, p1, p2), (u0, u1, u2)), ((p0, p2, p3), (u0, u2, u3))):
+        n = np.cross(b - a, c - a)
+        flip = (n * want).sum(1) < 0
+        b2 = np.where(flip[:, None], c, b)
+        c2 = np.where(flip[:, None], b, c)
+        ub2 = np.where(flip[:, None], uc, ub)
+        uc2 = np.where(flip[:, None], ub, uc)
+        col_ = np.asarray(col, np.float32)
+        if col_.ndim == 1:
+            col_ = np.tile(col_, (len(a), 1))
+        m.tri(a, b2, c2, col_, kind, uv=np.stack([ua, ub2, uc2], 1), style=style)
+
+
+def railing(m, A, B, z, col, h=1.1):
+    """See-through railings from A to B (k x 2) standing on z (k,): both
+    faces, the bars drawn by the shader (PLAIN style RAIL)."""
+    if not len(A):
+        return 0.0
+    L = np.linalg.norm(B - A, axis=1)
+    s0 = np.r_[0.0, np.cumsum(L)[:-1]]
+    s1 = s0 + L
+    u = (B - A) / np.maximum(L, 1e-6)[:, None]
+    nrm = np.column_stack([u[:, 1], -u[:, 0], np.zeros(len(A))])
+    z = np.asarray(z, float)
+    zb = z if z.ndim else np.full(len(A), float(z))
+    E = lambda p, zz: enu_fast(p[:, 0], p[:, 1], zz)
+    uv = [np.column_stack([s0, np.zeros(len(A))]), np.column_stack([s1, np.zeros(len(A))]),
+          np.column_stack([s1, np.ones(len(A))]), np.column_stack([s0, np.ones(len(A))])]
+    for sg in (1.0, -1.0):
+        _quad_uv(m, E(A, zb), E(B, zb), E(B, zb + h), E(A, zb + h), np.array(hexrgb(col)), nrm * sg, uv, style=RAIL)
+    return float(L.sum())
 
 
 CP_KEYS = set()                         # car park entrances (first and last point of their OSM way)
@@ -3342,6 +3416,13 @@ def sidewalks_setup(ways, mnt, sea, feats):
     walk = unary_union([walk, strip] + drives)
     # (Level with the lap a few metres either side too, to the facade.)
     drives_u = unary_union([LineString(q_).buffer(CP_HALF + 7.0) for q_ in CP_LINES]) if drives else None
+    # The Fairmont hairpin's island, between the way in and the way out
+    # (2.5 m lower by the time they part): paved at the way in's level, a
+    # wall down to the way out.
+    hp = hairpin_island(blds)
+    if hp is not None:
+        walk = unary_union([walk.difference(hp["poly"].buffer(1.0)), hp["poly"]])
+        hp_zone = hp["poly"].buffer(0.5)       # (its edge points too)
     walk = unary_union([q for q in to_polys(walk) if q.area > 6])
     if walk.is_empty:
         return None
@@ -3356,7 +3437,10 @@ def sidewalks_setup(ways, mnt, sea, feats):
             # (A driveway stays at the lap's level to its door: the street
             # on the terrace above the car park had tilted it into a wedge.)
             lap |= contains_xy(drives_u, x, y)
-        return np.where(lap, t["z"][jk_], zroad(x, y)) + SW_KERB
+        z_ = np.where(lap, t["z"][jk_], zroad(x, y))
+        if hp is not None:
+            z_ = np.where(contains_xy(hp_zone, x, y), hp["z"](x, y), z_)
+        return z_ + SW_KERB
     skip = [blds.buffer(0.5), sea_poly.buffer(1.0)]
     if QA is not None:
         skip.append(QA["poly"].buffer(1.0))
@@ -3370,8 +3454,12 @@ def sidewalks_setup(ways, mnt, sea, feats):
              if tg.get("highway") == "steps" and len(p_) > 1 and LineString(p_).intersects(corridor)]
     others = unary_union([q for q in rp if q.intersects(corridor)]).difference(track_poly.buffer(0.5))
     kerbs = side_street_steps(walk, others, mnt, zfn)
+    gardens = unary_union([Polygon(p_).buffer(0) for tg, p_, cl in ways if cl and len(p_) > 3
+                           and (tg.get("leisure") or tg.get("landuse") or tg.get("natural")) in
+                           ("park", "garden", "grass", "flowerbed", "village_green")
+                           and Polygon(p_).buffer(0).intersects(corridor)])
     walls = edge_walls(unary_union([walk, roads.intersection(corridor)]), mnt, zfn,
-                       unary_union(skip + steps))
+                       unary_union(skip + steps), gardens)
     mk = raster_mask(walk)
     rr, cc = np.nonzero(mk)
     xs, ys = cell_xy(rr, cc)
@@ -3403,7 +3491,7 @@ def sidewalks_setup(ways, mnt, sea, feats):
         islands = unary_union([q for q in to_polys(islands) if q.area > 4 and q.buffer(0.3).intersects(walk)])
         print(f"side street corners paved: {islands.area:.0f} m2")
     return {"poly": walk, "pale": walk.intersection(pale_zone), "zw": zfn, "walls": walls, "steps": kerbs,
-            "islands": islands}
+            "islands": islands, "roads": roads.buffer(0.3)}
 
 
 def side_street_steps(walk, others, mnt, zfn):
@@ -3458,7 +3546,7 @@ SW_WALL_REACH = 25.0                   # m from the circuit's centre line
 SW_CAP = 4.5                           # m of level ground drawn on top of a wall
 
 
-def edge_walls(U, mnt, zfn, skip):
+def edge_walls(U, mnt, zfn, skip, gardens=None):
     """Round the edge of the street (circuit, roads and pavements), metre by
     metre: where the ground beside it is more than a metre higher, a
     retaining wall up to it; where it drops more than 1.2 m, a wall down
@@ -3469,7 +3557,7 @@ def edge_walls(U, mnt, zfn, skip):
     # kerbs: no walls round them.
     U = unary_union([Polygon(pg.exterior, [h for h in pg.interiors if Polygon(h).area > 300])
                      for pg in to_polys(U)])
-    A, B, OUT, KIND, TOP, LOW, ZW = [], [], [], [], [], [], []
+    A, B, OUT, KIND, TOP, LOW, ZW, GARD = [], [], [], [], [], [], [], []
     for pg in to_polys(U):
         for ring in [pg.exterior] + list(pg.interiors):
             L = ring.length
@@ -3512,13 +3600,23 @@ def edge_walls(U, mnt, zfn, skip):
             down = ndimage.binary_opening(ndimage.binary_closing(down, iterations=1), iterations=1) & ~up
             top = ndimage.median_filter(np.minimum(top, zw + 12.0), 5, mode="nearest")
             low = ndimage.minimum_filter1d(np.maximum(low, zw - 10.0), 3, mode="nearest")
+            # Gardens beside the circuit from Ostende to the tunnel: a
+            # rendered wall with an iron railing all along, low (60 cm)
+            # where the garden is level with the pavement.
+            gard = np.zeros(len(mid), bool)
+            if gardens is not None and not gardens.is_empty:
+                gard = near & contains_xy(gardens, o1[:, 0], o1[:, 1]) & in_upper(mid[:, 0], mid[:, 1])
+                gard = ndimage.binary_opening(ndimage.binary_closing(gard, iterations=1), iterations=1) & ~down
+                low_g = gard & ~up
+                top = np.where(low_g, zw + 0.6, top)
+                up = up | gard
             k = up | down
-            A.append(a[k]); B.append(b[k]); OUT.append(out[k]); KIND.append(up[k])
+            A.append(a[k]); B.append(b[k]); OUT.append(out[k]); KIND.append(up[k]); GARD.append(gard[k])
             TOP.append(np.maximum(top[k], zw[k] + 0.6)); LOW.append(low[k]); ZW.append(zw[k])
     if not A:
         return {"up_m": 0.0, "down_m": 0.0, "a": np.zeros((0, 2))}
     w = {k_: np.concatenate(v) for k_, v in (("a", A), ("b", B), ("out", OUT), ("up", KIND), ("top", TOP),
-                                             ("low", LOW), ("zw", ZW))}
+                                             ("low", LOW), ("zw", ZW), ("garden", GARD))}
     seg = np.linalg.norm(w["b"] - w["a"], axis=1)
     w["up_m"], w["down_m"] = float(seg[w["up"]].sum()), float(seg[~w["up"]].sum())
     return w
@@ -3563,9 +3661,35 @@ def street_walls(gm, m, stats):
     def E(p, z):
         return enu_fast(p[:, 0], p[:, 1], z)
     up = w["up"]
+    gard = w.get("garden", np.zeros(n, bool))
+    upper = in_upper((a[:, 0] + b[:, 0]) / 2, (a[:, 1] + b[:, 1]) / 2)
+    seg = np.linalg.norm(b - a, axis=1)
+    s0 = np.r_[0.0, np.cumsum(seg)[:-1]]
+    s1 = s0 + seg
+    rails = 0.0
     if up.any():
         A, B, O, Z0, Z1 = a[up], b[up], o3[up], zw[up] - 0.4, top[up]
-        _quad(m, E(A, Z0), E(B, Z0), E(B, Z1), E(A, Z1), stone[up], -O)
+        # Faces: rendered garden walls, rubble stone from Ostende to the
+        # tunnel (as along Mirabeau), the old dressed stone elsewhere.
+        g_, r_ = gard[up], upper[up] & ~gard[up]
+        p_ = ~(g_ | r_)
+        if p_.any():
+            _quad(m, E(A[p_], Z0[p_]), E(B[p_], Z0[p_]), E(B[p_], Z1[p_]), E(A[p_], Z1[p_]), stone[up][p_], -O[p_])
+        if g_.any():
+            gc = np.array(hexrgb(GARDEN_WALL))[None] * tint[up][g_]
+            _quad(m, E(A[g_], Z0[g_]), E(B[g_], Z0[g_]), E(B[g_], Z1[g_]), E(A[g_], Z1[g_]), gc, -O[g_])
+            rails += railing(m, A[g_] + O[g_, :2] * 0.15, B[g_] + O[g_, :2] * 0.15, Z1[g_] + 0.06, GARDEN_RAIL, 1.2)
+        if r_.any():
+            S0, S1 = s0[up][r_], s1[up][r_]
+            rc = np.array(hexrgb(WALL_RUBBLE))[None] * tint[up][r_]
+            _quad_uv(m, E(A[r_], Z0[r_]), E(B[r_], Z0[r_]), E(B[r_], Z1[r_]), E(A[r_], Z1[r_]), rc, -O[r_],
+                     [np.column_stack([S0, np.zeros(r_.sum())]), np.column_stack([S1, np.zeros(r_.sum())]),
+                      np.column_stack([S1, Z1[r_] - Z0[r_]]), np.column_stack([S0, Z1[r_] - Z0[r_]])], style=RUBBLE)
+            # (A railing along the top of the taller ones.)
+            hi_ = (Z1[r_] - Z0[r_]) > 2.4
+            if hi_.any():
+                rails += railing(m, (A[r_] + O[r_, :2] * 0.15)[hi_], (B[r_] + O[r_, :2] * 0.15)[hi_],
+                                 Z1[r_][hi_] + 0.06, GARDEN_RAIL, 1.0)
         # Coping along the top, and the ground on top of the wall.
         c0a, c0b = A - O[:, :2] * 0.05, B - O[:, :2] * 0.05
         c1a, c1b = A + O[:, :2] * 0.35, B + O[:, :2] * 0.35
@@ -3588,9 +3712,15 @@ def street_walls(gm, m, stats):
     dn = ~up
     if dn.any():
         A, B, O = a[dn], b[dn], o3[dn]
-        Z0, Zt = low[dn] - 0.3, zw[dn] + 0.9
+        # Over the drops a parapet: from Ostende to the tunnel a low one
+        # (45 cm) with a white railing on it, as in the street photos.
+        ud = upper[dn]
+        Z0, Zt = low[dn] - 0.3, zw[dn] + np.where(ud, 0.45, 0.9)
         tall = (zw[dn] - low[dn]) > 1.5
         Zt = np.where(tall, Zt, zw[dn])
+        rr = tall & ud
+        if rr.any():
+            rails += railing(m, (A + O[:, :2] * 0.15)[rr], (B + O[:, :2] * 0.15)[rr], Zt[rr] + 0.06, STREET_RAIL, 0.75)
         Ao, Bo = A + O[:, :2] * 0.3, B + O[:, :2] * 0.3
         _quad(m, E(Ao, Z0), E(Bo, Z0), E(Bo, Zt), E(Ao, Zt), stone[dn] * 0.95, O)
         if tall.any():
@@ -3614,6 +3744,9 @@ def street_walls(gm, m, stats):
         _quad(m, E(ca, k_["top"] + 0.04), E(cb, k_["top"] + 0.04), E(c1b, k_["top"] + 0.04), E(c1a, k_["top"] + 0.04),
               cope, upz)
         stats["side_street_steps_m"] = int(k_["m"])
+    stats["street_railing_m"] = int(rails)
+    stats["garden_wall_m"] = int(seg[gard].sum())
+    print(f"railings: {rails:.0f} m, garden walls {seg[gard].sum():.0f} m")
     stats["street_wall_up_m"] = int(w["up_m"])
     stats["street_wall_down_m"] = int(w["down_m"])
     return n
@@ -3674,6 +3807,40 @@ def track_strip(blds, stop, mnt):
     return unary_union([q for q in to_polys(strip) if q.area > 4])
 
 
+HAIRPIN = (1190.0, 1265.0, 1345.0)     # lap metres: the Fairmont hairpin's way in, apex, way out
+
+
+def hairpin_island(blds):
+    """The paved island inside the Fairmont hairpin, between its two legs,
+    up to 45 m back from the apex (buildings cut out), with its level: the
+    way in's (the higher leg)."""
+    if TRACK is None:
+        return None
+    t = TRACK
+    st = t["step"]
+    idx = np.arange(int(HAIRPIN[0] / st), int(HAIRPIN[2] / st))
+    loop = Polygon(np.column_stack([t["x"][idx], t["y"][idx]])).buffer(0)
+    ia = int(HAIRPIN[1] / st)
+    apex = Point(t["x"][ia], t["y"][ia])
+    isl = loop.difference(t["line"].buffer(SW_START)).intersection(apex.buffer(45.0))
+    if not blds.is_empty:
+        isl = isl.difference(blds)
+    parts = [q for q in to_polys(isl) if q.area > 8]
+    if not parts:
+        return None
+    isl = max(parts, key=lambda q: q.area)
+    from scipy.spatial import cKDTree
+    i_in = np.arange(int(HAIRPIN[0] / st), ia + 1)
+    kd_in = cKDTree(np.column_stack([t["x"][i_in], t["y"][i_in]]))
+    z_in = t["z"][i_in]
+
+    def z(x, y):
+        _, j = kd_in.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))
+        return z_in[j]
+    print(f"Fairmont hairpin island: {isl.area:.0f} m2")
+    return {"poly": isl, "z": z}
+
+
 def sidewalk_ground(X, Y, Zm, Zs):
     """Ground nodes under the pavement slab: just below it."""
     if SW is None:
@@ -3690,40 +3857,140 @@ def sidewalk_ground(X, Y, Zm, Zs):
 
 
 def sidewalks(gm, m, stats):
-    """The pavement slab (painted from the ground map) with a kerb face
-    round its edge."""
+    """The pavement slab, laid by the shader (red brick pavers, pale stone
+    round the Casino) and shaded from the ground map, with kerb stones
+    along the roads: pale granite, painted red and white round the corners
+    of the circuit from Ostende to the tunnel. Elsewhere (gardens, walls)
+    a plain edge."""
     if SW is None:
         return 0
-    kerb = np.array(hexrgb("#bdb5a6"))
+    edge = np.array(hexrgb("#bdb5a6"))
+    granite = np.array(hexrgb(KERB_GRANITE))
+    corner = lap_corners()
+    roads = SW["roads"]
+    pale = SW["pale"]
     n_ = 0
+    kerb_m = rw_m = 0.0
+    steep = []
     for pg in to_polys(SW["poly"]):
         pg = orient(pg, 1.0)
-        tr = triangulate(pg, area=8)
-        if tr is None:
-            continue
-        v, tri = tr
-        z = SW["zw"](v[:, 0], v[:, 1])
-        P = enu_fast(v[:, 0], v[:, 1], z)
-        uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
-        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri)
+        for part, sty in ((pg.difference(pale), PAVER), (pg.intersection(pale), SLAB)):
+            for q in to_polys(part.buffer(0)):
+                q = shapely.set_precision(q.simplify(0.03), 0.01)
+                if q.is_empty or q.geom_type != "Polygon" or q.area < 0.5 or not q.is_valid:
+                    continue
+                tr = triangulate(orient(q, 1.0), area=8)
+                if tr is None:
+                    continue
+                v, tri = tr
+                z = SW["zw"](v[:, 0], v[:, 1])
+                # No steep triangles: where two streets at different levels
+                # meet inside one piece, a triangle spanning both stood up
+                # as a brick wedge.
+                zt = z[tri]
+                st_ = (zt.max(1) - zt.min(1)) > 1.2
+                if st_.any():
+                    c_ = v[tri[st_]].mean(1)
+                    steep.extend(c_.tolist())
+                    tri = tri[~st_]
+                    if not len(tri):
+                        continue
+                P = enu_fast(v[:, 0], v[:, 1], z)
+                uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+                gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=sty)
         for ring in [pg.exterior] + list(pg.interiors):
             r = np.asarray(ring.coords)[:, :2]
+            # About 1 m pieces, so the kerb follows the curve and changes
+            # colour where the corner starts.
+            L = LineString(r).length
+            if L < 0.2:
+                continue
+            ss = np.linspace(0, L, max(2, int(np.ceil(L / 1.0))) + 1)
+            qq = shapely.line_interpolate_point(LineString(r), ss)
+            r = np.column_stack([shapely.get_x(qq), shapely.get_y(qq)])
             a, b = r[:-1], r[1:]
-            L = np.linalg.norm(b - a, axis=1)
-            keep = L > 0.05
+            Lk = np.linalg.norm(b - a, axis=1)
+            keep = Lk > 0.05
             a, b = a[keep], b[keep]
             if not len(a):
                 continue
             u = (b - a) / np.linalg.norm(b - a, axis=1)[:, None]
             out = np.column_stack([u[:, 1], -u[:, 0]])
-            if ring is not pg.exterior:
-                out = -out
+            mid = (a + b) / 2
+            t_ = mid + out * 0.15
+            out[contains_xy(SW["poly"], t_[:, 0], t_[:, 1])] *= -1
             za, zb = SW["zw"](a[:, 0], a[:, 1]), SW["zw"](b[:, 0], b[:, 1])
             o3 = np.column_stack([out, np.zeros(len(a))])
-            _quad(m, enu_fast(a[:, 0], a[:, 1], za - 0.4), enu_fast(b[:, 0], b[:, 1], zb - 0.4),
-                  enu_fast(b[:, 0], b[:, 1], zb), enu_fast(a[:, 0], a[:, 1], za), kerb, o3)
+            o1 = mid + out * 0.5
+            road = contains_xy(roads, o1[:, 0], o1[:, 1])
+            # Plain edge where no road is in front (gardens, walls, quays).
+            k = ~road
+            if k.any():
+                _quad(m, enu_fast(a[k, 0], a[k, 1], za[k] - 0.4), enu_fast(b[k, 0], b[k, 1], zb[k] - 0.4),
+                      enu_fast(b[k, 0], b[k, 1], zb[k]), enu_fast(a[k, 0], a[k, 1], za[k]), edge, o3[k])
+            if not road.any():
+                continue
+            a, b, out, za, zb, o3, mid = a[road], b[road], out[road], za[road], zb[road], o3[road], mid[road]
+            # Kerb stones: the face down to the road and a 25 cm top.
+            _, jl = TRACK["kd"].query(mid)
+            sl = jl * TRACK["step"]
+            rw = corner[jl] & (sl >= UPPER[0]) & (sl <= UPPER[1]) & (track_dist(mid[:, 0], mid[:, 1]) < SW_START + 1.5)
+            lens = np.linalg.norm(b - a, axis=1)
+            s0 = np.r_[0.0, np.cumsum(lens)[:-1]]
+            s1 = s0 + lens
+            ai, bi = a - out * KERB_W, b - out * KERB_W
+            zk_a, zk_b = za + 0.012, zb + 0.012
+            zero, one = np.zeros(len(a)), np.ones(len(a))
+            # The road in front: where it is the lap's other leg, lower down
+            # (the hairpin's island), the face is a wall down to it.
+            oa, ob = a + out * 0.6, b + out * 0.6
+            zra = np.where(track_dist(oa[:, 0], oa[:, 1]) < TRACK_HALF + 0.6,
+                           TRACK["z"][TRACK["kd"].query(oa)[1]], za - SW_KERB)
+            zrb = np.where(track_dist(ob[:, 0], ob[:, 1]) < TRACK_HALF + 0.6,
+                           TRACK["z"][TRACK["kd"].query(ob)[1]], zb - SW_KERB)
+            tall = np.minimum(za - zra, zb - zrb) > 0.45
+            if tall.any():
+                # Stone wall from the road up to under the kerb's top, a
+                # railing above where it is over a metre.
+                tk = tall
+                Ea = enu_fast(a[tk, 0], a[tk, 1], zra[tk] - 0.3)
+                Eb = enu_fast(b[tk, 0], b[tk, 1], zrb[tk] - 0.3)
+                hh_a, hh_b = za[tk] - zra[tk] + 0.3, zb[tk] - zrb[tk] + 0.3
+                c1 = np.cumsum(np.linalg.norm(b[tk] - a[tk], axis=1))
+                c0 = np.r_[0.0, c1[:-1]]
+                _quad_uv(m, Ea, Eb, enu_fast(b[tk, 0], b[tk, 1], zb[tk] - 0.02),
+                         enu_fast(a[tk, 0], a[tk, 1], za[tk] - 0.02),
+                         np.array(hexrgb(WALL_RUBBLE)), o3[tk],
+                         [np.column_stack([c0, np.zeros(tk.sum())]), np.column_stack([c1, np.zeros(tk.sum())]),
+                          np.column_stack([c1, hh_b]), np.column_stack([c0, hh_a])], style=RUBBLE)
+                rt = tk & (np.minimum(za - zra, zb - zrb) > 1.0)
+                if rt.any():
+                    railing(m, (a - out * 0.12)[rt], (b - out * 0.12)[rt], np.minimum(za, zb)[rt] + 0.01, STREET_RAIL, 0.9)
+            # (On top of a wall the kerb is a plain granite coping.)
+            for sel, sty in ((~rw | tall, KERB), (rw & ~tall, KERB_RW)):
+                if not sel.any():
+                    continue
+                E = lambda p, z: enu_fast(p[sel, 0], p[sel, 1], z[sel])
+                up3 = np.tile([0.0, 0.0, 1.0], (sel.sum(), 1))
+                _quad_uv(m, E(a, zk_a), E(b, zk_b), E(bi, zk_b), E(ai, zk_a), granite, up3,
+                         [np.column_stack([s0, zero])[sel], np.column_stack([s1, zero])[sel],
+                          np.column_stack([s1, one])[sel], np.column_stack([s0, one])[sel]], style=sty)
+                sel = sel & ~tall
+                if not sel.any():
+                    continue
+                _quad_uv(m, E(a, za - 0.4), E(b, zb - 0.4), E(b, zk_b), E(a, zk_a), granite * 0.92, o3[sel],
+                         [np.column_stack([s0, zero])[sel], np.column_stack([s1, zero])[sel],
+                          np.column_stack([s1, zero])[sel], np.column_stack([s0, zero])[sel]], style=sty)
+            kerb_m += float(lens.sum())
+            rw_m += float(lens[rw].sum())
         n_ += 1
     stats["sidewalk_m2"] = int(SW["poly"].area)
+    stats["kerb_stone_m"] = int(kerb_m)
+    stats["kerb_red_white_m"] = int(rw_m)
+    print(f"kerbs: {kerb_m:.0f} m, {rw_m:.0f} m red and white; {len(steep)} steep pavement triangles dropped")
+    if steep:
+        st_s = lap_s(np.array(steep)[:, 0], np.array(steep)[:, 1])
+        print("  at lap m:", sorted(set((st_s // 20 * 20).astype(int).tolist()))[:40])
     return n_
 
 
