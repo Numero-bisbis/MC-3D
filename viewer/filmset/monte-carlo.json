@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3345284,
+ "triangles": 3392016,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -62,7 +62,7 @@
  "levels": 1371,
  "towers": 10,
  "trees": 1430,
- "yachts": 575,
+ "yachts": 593,
  "real_floors": 731,
  "styles": [
   265,
@@ -88,13 +88,13 @@
  ],
  "mareterra_trees": 120,
  "boats_by_berth": {
-  "alongside": 6,
-  "stern-to": 531,
-  "photo outline": 22,
+  "alongside": 4,
+  "stern-to": 552,
+  "photo outline": 21,
   "marina": 16
  },
- "day_boats": 265,
- "sailing_yachts": 28,
+ "sailing_yachts": 25,
+ "day_boats": 258,
  "quay_wall_m": 2471,
  "bridges": 18,
  "diving_towers": 1,
@@ -121,6 +121,7 @@
  "quai_steps": 2,
  "quai_pines": 36,
  "track_clear": false,
+ "roof_kit": 3221,
  "roof_texels_per_m": 4.57,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",

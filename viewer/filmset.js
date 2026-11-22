@@ -72,6 +72,23 @@
         float top = (1.0 - smoothstep(rr - aa.x, rr + aa.x, d)) * step(ys, f.y);
         return max(rect, top);
       }
+      // Roman (canal) tiles: a: across the slope, s: down it, in metres;
+      // aa: their screen footprints. Rounded caps in rows across the slope
+      // with dark channels between them, each course overlapping the next
+      // with a shadowed lip, every tile a slightly different fired colour.
+      vec3 romanTiles(float a, float s, float aaA, float aaS) {
+        float fa = fract(a / 0.42), fs = fract(s / 0.40);
+        float capW = 1.0 - smoothstep(0.3, 0.6, aaA / 0.42);       // fades once a row is under ~3 px
+        float lipW = 1.0 - smoothstep(0.3, 0.6, aaS / 0.40);
+        float cap = sin(fa * 3.1416);                         // 0 in the channel, 1 on the crown
+        float shade = mix(1.0, 0.72 + 0.4 * pow(cap, 0.7), capW);
+        float lip = smoothstep(0.78, 0.97, fs) * 0.4 * lipW;            // shadow under the next course
+        float lit = (1.0 - smoothstep(0.0, 0.12, fs)) * 0.12 * lipW;      // the course's sunlit front edge
+        float w = capW * lipW;
+        float h = hash12(floor(vec2(a / 0.42, s / 0.40)) + 11.0) - 0.5;
+        vec3 tone = mix(vec3(1.0), vec3(1.0 + 0.16 * h, 1.0 + 0.05 * h, 1.0 - 0.10 * h) * (0.93 + 0.14 * hash12(floor(vec2(a / 0.42, s / 0.40)))), w);
+        return tone * shade * (1.0 - lip + lit);
+      }
       void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
         vec4 c = fsInput.attributes.color_0;
         float a255 = floor(c.a * 255.0 + 0.5);
@@ -579,8 +596,54 @@
             // photo reads as a surface rather than a blur.
             vec3 pr = fsInput.attributes.positionMC * length(czm_model[0].xyz);
             float pxr = length(fwidth(pr.xz));
+            float near = 1.0 - smoothstep(0.05, 0.3, pxr);
+            vec3 d = material.diffuse;
             float grain = vnoise(pr.xz * 5.0) * 0.55 + vnoise(pr.xz * 19.0) * 0.45;
-            material.diffuse *= mix(1.0, 0.9 + 0.18 * grain, 1.0 - smoothstep(0.04, 0.25, pxr));
+            // Which way the face slopes (flat-shaded triangles).
+            vec3 nM = normalize(cross(dFdx(pr), dFdy(pr)));
+            nM *= sign(nM.y + 1e-4);
+            float pitched = 1.0 - smoothstep(0.94, 0.985, nM.y);
+            float lum = dot(d, vec3(0.3, 0.59, 0.11));
+            float terra = smoothstep(0.03, 0.10, d.r - d.b) * smoothstep(1.03, 1.15, d.r / (d.g + 0.02));
+            vec3 det = vec3(0.9 + 0.18 * grain);
+            vec3 tileF = vec3(1.0);
+            // Tiles read from further away than gravel does.
+            float nearT = 1.0 - smoothstep(0.1, 0.55, pxr);
+            if (pitched > 0.0) {
+              // Tiles: courses down the slope, each with a shadowed lower
+              // lip; on terracotta, round Roman tiles across it; on slate
+              // or zinc, standing seams running down the slope.
+              vec2 dn = normalize(nM.xz + 1e-5);
+              float sDown = dot(pr.xz, dn) / max(nM.y, 0.5);
+              float sAlong = dot(pr.xz, vec2(-dn.y, dn.x));
+              float aaS = fwidth(sDown) * 1.5, aaA = fwidth(sAlong) * 1.5;
+              vec3 roman = romanTiles(sAlong, sDown, aaA, aaS);
+              float dm = (0.5 - abs(fract(sAlong / 0.55) - 0.5)) * 0.55;    // metres to the nearest seam
+              float seam = mix(0.72, 1.0, smoothstep(0.0, 0.025 + aaA, dm));
+              vec3 metal = vec3(seam * (0.95 + 0.08 * grain));
+              tileF = mix(vec3(1.0), mix(metal, roman, terra), nearT);
+            }
+            if (pitched < 1.0) {
+              // Flat roofs, lined up with the building (TEXCOORD_1, metres):
+              // pale warm terraces get square stone pavers with grout
+              // lines; the rest waterproof membrane in rolled strips.
+              vec2 f2 = fsInput.attributes.texCoord_1;
+              vec2 aa = fwidth(f2) * 1.5;
+              vec2 g = abs(fract(f2 / 0.6) - 0.5) * 0.6;
+              float grout = (1.0 - smoothstep(0.012, 0.012 + aa.x, g.x)) + (1.0 - smoothstep(0.012, 0.012 + aa.y, g.y));
+              float slab = 0.95 + 0.08 * hash12(floor(f2 / 0.6) + 7.0);
+              vec3 paver = vec3(slab * (1.0 - 0.22 * clamp(grout, 0.0, 1.0)) * (0.96 + 0.06 * grain));
+              float sx = abs(fract(f2.x / 1.0) - 0.5);
+              float strip = 0.95 + 0.07 * hash12(vec2(floor(f2.x), 3.0));
+              float seamM = mix(0.86, 1.0, smoothstep(0.0, 0.02 + aa.x, 0.5 - sx));
+              vec3 membrane = vec3((0.88 + 0.22 * grain) * strip * seamM);
+              float pale = smoothstep(0.5, 0.62, lum) * smoothstep(0.0, 0.05, d.r - d.b);
+              det = mix(vec3(1.0), mix(membrane, paver, pale), near);
+              // Terracotta seen on a flat-modelled roof is a tiled roof the
+              // set keeps flat: tile courses lined up with the building.
+              det = mix(det, mix(vec3(1.0), romanTiles(f2.x, f2.y, aa.x, aa.y), nearT), terra);
+            }
+            material.diffuse = d * mix(det, tileF, pitched);
             material.roughness = 0.8;
             return;
           }

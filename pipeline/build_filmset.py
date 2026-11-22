@@ -1266,7 +1266,67 @@ def photo_uv(x, y):
 ATLAS = 4096                        # roof texture size, px (phones take 4096)
 
 
-def roof_atlas(hi, photo):
+KIT_COLS = ["#dfe1de", "#d3d6d4", "#e8e6df", "#c9ccca", "#b9bdbd"]
+
+
+def roof_kit(m, a, mask, T, U, V, u0, v0, z):
+    """Air-conditioning units, vents and water tanks on a flat roof, read
+    off its patch of the 20 cm photo (a, mask: texels along U, V; T texels
+    per metre): small bright compact blobs that stand out from the roof
+    around them. Each becomes a box of metal on the roof. Returns how many."""
+    if mask.sum() < 25 * T * T:                 # roofs under ~25 m2: none
+        return 0
+    L = a @ np.array([0.3, 0.59, 0.11], np.float32)
+    inner = ndimage.binary_erosion(mask, iterations=max(2, int(0.7 * T)))
+    w = inner.astype(np.float32)
+    r = 2.0 * T
+    local = ndimage.gaussian_filter(L * w, r) / (ndimage.gaussian_filter(w, r) + 1e-4)
+    spread = np.sqrt(np.maximum(ndimage.gaussian_filter((L - local) ** 2 * w, 3 * T) /
+                                (ndimage.gaussian_filter(w, 3 * T) + 1e-4), 1.0))
+    bright = inner & (L - local > np.maximum(26.0, 1.6 * spread)) & (L > 135)
+    bright = ndimage.binary_opening(bright)
+    lab, nb = ndimage.label(bright)
+    if nb == 0:
+        return 0
+    cap = 2 + int(mask.sum() / (T * T) / 14)
+    found = []
+    for j, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        cells = lab[sl] == j
+        n_ = cells.sum()
+        area = n_ / (T * T)
+        hgt, wid = (sl[0].stop - sl[0].start) / T, (sl[1].stop - sl[1].start) / T
+        if area < 0.35 or area > 9 or n_ < 0.55 * cells.size or max(hgt, wid) > 4.5 * max(min(hgt, wid), 0.3):
+            continue
+        found.append((float((L[sl][cells] - local[sl][cells]).mean()), sl, area))
+    found.sort(key=lambda t: -t[0])
+    rng = np.random.default_rng(int(abs(u0 * 7 + v0 * 13)) % (2 ** 31))
+    out = 0
+    for _, sl, area in found[:cap]:
+        i0, i1 = sl[1].start / T, sl[1].stop / T
+        j0, j1 = sl[0].start / T, sl[0].stop / T
+        # At least 60 cm a side, a little smaller than the blob (its edge
+        # is half shadow, half photo blur).
+        cu, cv = (i0 + i1) / 2, (j0 + j1) / 2
+        hu, hv = max(0.3, (i1 - i0) / 2 - 0.05), max(0.3, (j1 - j0) / 2 - 0.05)
+        corners = [(cu - hu, cv - hv), (cu + hu, cv - hv), (cu + hu, cv + hv), (cu - hu, cv + hv)]
+        q = orient(Polygon([((u0 + a_) * U[0] + (v0 + b_) * V[0], (u0 + a_) * U[1] + (v0 + b_) * V[1])
+                            for a_, b_ in corners]), 1.0)
+        h = 0.7 if area < 1.5 else (1.0 if area < 4 else 1.4)
+        col = np.array(hexrgb(KIT_COLS[int(rng.integers(len(KIT_COLS)))]), np.float32)
+        add_walls(m, q, z - 0.05, z + h, z, 10, col * 0.93, PLAIN)
+        add_roof(m, q, z + h, col, False)
+        if area > 1.0:
+            # A darker fan grille on top of the bigger units.
+            g = q.buffer(-min(hu, hv) * 0.35, join_style=2)
+            if isinstance(g, Polygon) and not g.is_empty:
+                add_roof(m, orient(g, 1.0), z + h + 0.02, col * 0.55, False)
+        out += 1
+    return out
+
+
+def roof_atlas(hi, photo, kit=None, stats=None):
     """The real roofs' own texture: each roof's patch of the 20 cm photo
     (shifted back by the photo's lean, tidied by clean_roof_patch), turned
     square to its outline's own rectangle (Monaco's blocks run on the
@@ -1274,6 +1334,9 @@ def roof_atlas(hi, photo):
     into one 4096 px image at as close to the photo's resolution as fits,
     instead of the 37 cm ground map the roofs used to sample. Rewrites the
     roof mesh's UVs (plan metres until now) to point into it.
+    TEXCOORD_1 gets each roof's own plan metres along its rectangle, so
+    the viewer lines paving and membrane seams up with the building.
+    kit: a Mesh for the roof kit read off the photo (roof_kit).
     Returns (jpeg bytes, texels per metre)."""
     n = hi.size[0]
     ppm = n / (X1 - X0)
@@ -1310,6 +1373,7 @@ def roof_atlas(hi, photo):
             break
         T *= 0.97
     atlas = Image.new("RGB", (ATLAS, ATLAS), (128, 128, 128))
+    debug = []
     grade = np.array([1.03, 1.0, 0.96], np.float32)
     for k, (q, U, V, u0, v0, _, _, sx, sy) in enumerate(rects):
         x, y, w, h = place[k]
@@ -1325,7 +1389,19 @@ def roof_atlas(hi, photo):
         dpm.polygon(to_px(q.exterior.coords), fill=255)
         for hole in q.interiors:
             dpm.polygon(to_px(hole.coords), fill=0)
+        nk = 0
+        if kit is not None and not photo["tiled"][k]:
+            nk = roof_kit(kit, np.asarray(patch).astype(np.float32), np.asarray(pm) > 0, T, U, V, u0, v0,
+                          photo["polys"][k][2])
+            if stats is not None:
+                stats["roof_kit"] = stats.get("roof_kit", 0) + nk
         ph = np.asarray(clean_roof_patch(patch, pm, T)).astype(np.float32)
+        if q.area > 150:
+            c_ = q.centroid
+            lo_, la_ = to_lonlat(np.array([c_.x]), np.array([c_.y]))
+            debug.append({"lon": round(float(lo_[0]), 6), "lat": round(float(la_[0]), 6), "z": round(photo["polys"][k][2], 1),
+                          "area": round(q.area), "tiled": photo["tiled"][k], "kit": nk,
+                          "rgb": [round(float(v)) for v in ph[np.asarray(pm) > 0].mean(0)]})
         # The same grade as the roofs in the ground map: a little crisper
         # and warmer than the raw photo.
         gray = ph.mean(2, keepdims=True)
@@ -1339,11 +1415,13 @@ def roof_atlas(hi, photo):
         x, y, _, _ = place[k]
         d = mesh.uv[mi].astype(np.float64)
         wx, wy = d[:, 0] + X0, Y1 - d[:, 1]
-        mesh.uv[mi] = np.column_stack([(x + (wx * U[0] + wy * U[1] - u0) * T) / ATLAS,
-                                       (y + (wx * V[0] + wy * V[1] - v0) * T) / ATLAS]).astype(np.float32)
+        lu, lv = wx * U[0] + wy * U[1] - u0, wx * V[0] + wy * V[1] - v0
+        mesh.uv[mi] = np.column_stack([(x + lu * T) / ATLAS, (y + lv * T) / ATLAS]).astype(np.float32)
+        mesh.uv2[mi] = np.column_stack([lu, lv]).astype(np.float32)
     b = io.BytesIO()
     atlas.save(b, "JPEG", quality=90)
     atlas.save(RAW / "roof-atlas-preview.jpg", quality=80)
+    (RAW / "roof-debug.json").write_text(json.dumps(debug))
     return b.getvalue(), round(T, 2)
 
 
@@ -1444,8 +1522,184 @@ def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
                           uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
         photo["uvmap"].append((len(photo["mesh"].uv) - 1, len(photo["polys"])))
         photo["polys"].append((poly, photo["shift"], z))
+        photo["tiled"].append(bool(tiled))
         return
     m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], col, ROOF_TILE if tiled else ROOF_FLAT)
+
+
+_MNS_S = {}
+# Big tiled blocks with their roofs shaped from the LiDAR: off until the
+# blocks are split into their houses (the 50 cm scan alone gives lumps).
+LIDAR_ROOFS = False
+
+
+def planar_roof(S, part):
+    """The LiDAR roof surface inside `part` made of flat planes, the way
+    real roofs are: cells sorted by which way they slope (four directions
+    square to the building, or flat), each connected patch fitted with one
+    plane, so slopes are true planes and ridges, hips and valleys straight
+    lines where two meet. Returns (heights on the 50 cm grid, row0, col0)."""
+    x0, y0, x1, y1 = part.bounds
+    c0, r0 = max(int((x0 - X0) / RES) - 2, 0), max(int((Y1 - y1) / RES) - 2, 0)
+    c1, r1 = min(int((x1 - X0) / RES) + 3, S.shape[1]), min(int((Y1 - y0) / RES) + 3, S.shape[0])
+    z = S[r0:r1, c0:c1].astype(np.float64)
+    if z.size < 20:
+        return None
+    xs = X0 + (c0 + np.arange(z.shape[1]) + 0.5) * RES
+    ys = Y1 - (r0 + np.arange(z.shape[0]) + 0.5) * RES
+    XX, YY = np.meshgrid(xs, ys)
+    inside = contains_xy(part.buffer(-0.3, join_style=2), XX, YY)
+    gy_, gx_ = np.gradient(ndimage.gaussian_filter(z, 2.0), RES)     # aspect from a calmer surface
+    gy_ = -gy_                                   # rows run south
+    c = np.asarray(part.minimum_rotated_rectangle.exterior.coords)[:3]
+    e = c[1] - c[0] if np.hypot(*(c[1] - c[0])) >= np.hypot(*(c[2] - c[1])) else c[2] - c[1]
+    th = math.atan2(e[1], e[0])
+    ang = (np.arctan2(gy_, gx_) - th) % (2 * math.pi)
+    cls = 1 + (np.round(ang / (math.pi / 2)).astype(int) % 4)
+    cls[np.hypot(gx_, gy_) < 0.12] = 0
+    cls[~inside] = -1
+    # Majority filter: one stray cell does not split a slope.
+    best, cnt = cls.copy(), np.zeros(cls.shape)
+    for k in range(0, 5):
+        n_ = ndimage.uniform_filter((cls == k).astype(float), 7)
+        better = n_ > cnt
+        best[better], cnt[better] = k, n_[better]
+    best[~inside] = -1
+    out = z.copy()
+    for k in range(0, 5):
+        lab, n_ = ndimage.label(best == k)
+        for j in range(1, n_ + 1):
+            mk = lab == j
+            if mk.sum() < 40:
+                continue
+            A = np.column_stack([XX[mk] - xs[0], YY[mk] - ys[0], np.ones(mk.sum())])
+            b = z[mk]
+            coef = np.linalg.lstsq(A, b, rcond=None)[0]
+            res = np.abs(A @ coef - b)
+            keep = res < max(0.4, np.percentile(res, 80))
+            if keep.sum() >= 8:
+                coef = np.linalg.lstsq(A[keep], b[keep], rcond=None)[0]
+            if k == 0:
+                coef[:2] = 0.0
+                coef[2] = float(np.median(b))
+            out[mk] = np.clip((XX[mk] - xs[0]) * coef[0] + (YY[mk] - ys[0]) * coef[1] + coef[2],
+                              np.percentile(b, 2), np.percentile(b, 98))
+    return out, r0, c0
+
+
+def lidar_roof(m, part, z_eave, z_cap, mns, photo, wall_col=None):
+    """A roof shaped like the real one: the LiDAR surface (50 cm, lightly
+    smoothed) draped inside the outline on a 1 m grid, from the eaves (the
+    outline, at z_eave) up to z_cap, painted with the roof photo. For
+    blocks the set builds as one footprint over many tiled roofs: their
+    ridges, hips and valleys get their real volume. Returns True if built."""
+    key = id(mns)
+    if key not in _MNS_S:
+        a = np.where(np.isfinite(mns), mns, np.nan)
+        # A 2.5 m median takes out chimneys, aerials and roof kit (and the
+        # scan's speckle); a light blur then keeps ridges straight.
+        fill = ndimage.median_filter(np.nan_to_num(a, nan=float(np.nanmedian(a))), size=5)
+        _MNS_S.clear()
+        _MNS_S[key] = ndimage.gaussian_filter(fill, 0.8)
+    S = _MNS_S[key]
+    inner = part.buffer(-0.6, join_style=2)
+    if inner.is_empty:
+        return False
+    x0, y0, x1, y1 = part.bounds
+    gx, gy = np.meshgrid(np.arange(math.floor(x0) + 0.5, x1, 1.0), np.arange(math.floor(y0) + 0.5, y1, 1.0))
+    gx, gy = gx.ravel(), gy.ravel()
+    ok = contains_xy(inner, gx, gy)
+    gx, gy = gx[ok], gy[ok]
+    if len(gx) < 12:
+        return False
+    Z = planar_roof(S, part)
+    if Z is None:
+        return False
+    zz_, r0_, c0_ = Z
+    zin = ndimage.map_coordinates(zz_, [(Y1 - gy) / RES - 0.5 - r0_, (gx - X0) / RES - 0.5 - c0_], order=1, mode="nearest")
+    zin = np.clip(zin, z_eave, z_cap)
+    from scipy.spatial import cKDTree
+    kd = cKDTree(np.column_stack([gx, gy]))
+    verts, segs, vz, holes = [], [], [], []
+    part = orient(part, 1.0)
+    for ring in [part.exterior] + list(part.interiors):
+        ln = ring.length
+        pts = shapely.line_interpolate_point(ring, np.linspace(0, ln, max(4, int(ln / 1.0)), endpoint=False))
+        b = len(verts)
+        n_ = len(pts)
+        bx_, by_ = shapely.get_x(pts), shapely.get_y(pts)
+        # The roof meets the outline at the height of the roof just
+        # inside it (the scan's own eaves); a strip of wall closes the gap
+        # down to the walls' top.
+        _, nn = kd.query(np.column_stack([bx_, by_]))
+        ze = zin[nn]
+        verts.extend(zip(bx_, by_))
+        vz.extend(ze.tolist())
+        segs.extend([[b + i, b + (i + 1) % n_] for i in range(n_)])
+        if wall_col is not None:
+            j = (np.arange(n_) + 1) % n_
+            for i in range(n_):
+                hi_a, hi_b = ze[i], ze[j[i]]
+                if max(hi_a, hi_b) - z_eave < 0.05:
+                    continue
+                Pq = enu_fast(np.array([bx_[i], bx_[j[i]], bx_[j[i]], bx_[i]]),
+                              np.array([by_[i], by_[j[i]], by_[j[i]], by_[i]]),
+                              np.array([z_eave, z_eave, hi_b, hi_a]))
+                nrm = np.cross(Pq[1] - Pq[0], Pq[3] - Pq[0])
+                nrm /= max(np.linalg.norm(nrm), 1e-9)
+                m.add(Pq, nrm, wall_col, PLAIN, idx=np.array([0, 1, 2, 0, 2, 3]))
+    for hole in part.interiors:
+        hp = Polygon(hole).representative_point()
+        holes.append([hp.x, hp.y])
+    verts.extend(zip(gx, gy))
+    vz.extend(zin.tolist())
+    data = {"vertices": np.array(verts), "segments": np.array(segs)}
+    if holes:
+        data["holes"] = np.array(holes)
+    try:
+        t = triangle.triangulate(data, "p")
+    except Exception:
+        return False
+    if "triangles" not in t or not len(t["triangles"]):
+        return False
+    v = t["vertices"]
+    zz = np.asarray(vz, float)
+    if len(v) > len(zz):
+        zz = np.concatenate([zz, np.full(len(v) - len(zz), z_eave)])
+    tri = t["triangles"]
+    P = enu_fast(v[:, 0], v[:, 1], zz)
+    # The photo leans: a ridge 4 m above the eaves shows up 4 m x lean
+    # further over than the eaves do, so each vertex looks there.
+    lx, ly = photo["lean"]
+    dz = zz - z_eave
+    uv = np.column_stack([v[:, 0] - X0 + dz * lx, Y1 - v[:, 1] - dz * ly])
+    # Smooth normals (area-weighted), so the light rolls over the slopes
+    # instead of picking out every LiDAR facet.
+    fn_ = np.cross(P[tri[:, 1]] - P[tri[:, 0]], P[tri[:, 2]] - P[tri[:, 0]])
+    fn_ *= np.sign(fn_[:, 2:3] + 1e-9)
+    N = np.zeros_like(P)
+    for k_ in range(3):
+        np.add.at(N, tri[:, k_], fn_)
+    N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-9)
+    photo["mesh"].add(P, N, [255, 255, 255], ROOF_FLAT, uv=uv, idx=tri, style=PHOTO_ROOF)
+    photo["uvmap"].append((len(photo["mesh"].uv) - 1, len(photo["polys"])))
+    photo["polys"].append((part, photo["shift"], z_eave))
+    photo["tiled"].append(True)          # no roof kit on a pitched roof
+    return True
+
+
+def red_share(part, ortho, shift):
+    """Share of the roof the IGN photo shows as terracotta tiles."""
+    x0, y0, x1, y1 = part.bounds
+    gx, gy = np.meshgrid(np.arange(x0, x1, 1.0), np.arange(y0, y1, 1.0))
+    gx, gy = gx.ravel(), gy.ravel()
+    ok = contains_xy(part, gx, gy)
+    if ok.sum() < 10:
+        return 0.0
+    cx = np.clip(((gx[ok] + shift[0] - X0) / RES).astype(int), 0, ortho.shape[1] - 1)
+    cy = np.clip(((Y1 - gy[ok] - shift[1]) / RES).astype(int), 0, ortho.shape[0] - 1)
+    c = ortho[cy, cx].astype(float)
+    return float(np.mean((c[:, 0] - c[:, 2] > 28) & (c[:, 0] > c[:, 1] * 1.12)))
 
 
 def kmeans1d(v, k):
@@ -2252,7 +2506,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         if not isinstance(ov, Polygon):
                             ov = part
                         ov = orient(ov, 1.0)
-                        add_roof(m, ov, eave, rcol, True, max(1.0, base + top - eave), photo=ph)
+                        if LIDAR_ROOFS and ph is not None and part.area > 300 and lidar_roof(
+                                m, ov, eave, min(base + top + 1.0, eave + 7.0), mns, ph, np.asarray(col) * 0.95):
+                            # A big tiled block is many roofs: their real
+                            # shape from the LiDAR, not one hipped lid.
+                            stats["lidar_roofs"] = stats.get("lidar_roofs", 0) + 1
+                        else:
+                            add_roof(m, ov, eave, rcol, True, max(1.0, base + top - eave), photo=ph)
                         if ov is not part:
                             fas = np.asarray(col) * 0.92
                             add_walls(m, ov, eave - 0.16, eave, eave, 10, fas, PLAIN)
@@ -2264,7 +2524,24 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         add_mansard(m, part, zt - sk, rcol if rk == "copper" else hexrgb("#7d8a8f"),
                                     ROOF_TILE, sk, 2.2)
                     else:
-                        add_walls(m, part, zb, zt, base, fh, col, kind, style=style)
+                        # A block over many tiled roofs (the photo shows
+                        # them red): walls to the eaves, then the roofs'
+                        # real shape from the LiDAR.
+                        rs_ = red_share(part, ortho, ph["shift"]) if LIDAR_ROOFS and ph is not None and part.area > 60 else 0.0
+                        if LIDAR_ROOFS and ph is not None and last and part.area > 60 and rs_ > 0.3:
+                            ring_ = part.exterior
+                            ss_ = shapely.line_interpolate_point(part.buffer(-0.8, join_style=2).exterior if isinstance(
+                                part.buffer(-0.8, join_style=2), Polygon) else ring_, np.linspace(0, 1, 60), normalized=True)
+                            ze_ = Raster(mns).sample(shapely.get_x(ss_), shapely.get_y(ss_))
+                            eave_ = float(np.nanpercentile(ze_, 35)) if np.isfinite(ze_).any() else zt
+                            eave_ = min(max(eave_, zb + 2.5), zt)
+                            add_walls(m, part, zb, eave_, base, fh, col, kind, style=style)
+                            if lidar_roof(m, part, eave_, min(zt + 3.0, eave_ + 7.0), mns, ph, np.asarray(col) * 0.95):
+                                stats["lidar_roofs"] = stats.get("lidar_roofs", 0) + 1
+                                continue
+                            add_walls(m, part, eave_, zt, base, fh, col, kind, style=style)
+                        else:
+                            add_walls(m, part, zb, zt, base, fh, col, kind, style=style)
                         add_roof(m, part, zt, rcol, False, photo=ph)
                         if part.area > 40:
                             # Parapet: a low wall round the roof edge, so
@@ -6660,7 +6937,7 @@ def main():
         edges = photo_edges(ortho_hi)
         lean = estimate_lean(edges, feats, mns, mnt)
         print("photo lean per metre of height (east, north):", lean)
-        photo = {"mesh": Mesh(), "polys": [], "uvmap": [], "lean": lean, "edges": edges}
+        photo = {"mesh": Mesh(), "polys": [], "uvmap": [], "tiled": [], "lean": lean, "edges": edges}
     facades = FacadeData(ways)
     feats = mareterra_feats(feats, ways)
     global SW
@@ -6755,7 +7032,7 @@ def main():
     prims = [(gm, True), (rm, True), (bm, False), (tm, False), (hm, False), (sm, False)]
     roof_jpg = None
     if photo and photo["mesh"].p:
-        roof_jpg, stats["roof_texels_per_m"] = roof_atlas(ortho_hi, photo)
+        roof_jpg, stats["roof_texels_per_m"] = roof_atlas(ortho_hi, photo, bm, stats)
         print("roof atlas:", stats["roof_texels_per_m"], "texels per metre")
         prims.append((photo["mesh"], "roof"))
     write_glb(raw, prims, jpg, roof_jpg)
