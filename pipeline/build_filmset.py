@@ -6943,6 +6943,27 @@ METROPOLE_PAVILIONS = ((-17.5, -46.0), (6.0, -4.0))   # lower terrace, south and
 METROPOLE_STONE = "#eee2c8"
 
 
+def _balustrade(m, a, b, z, stone, top_col, plinth=0.6, height=1.45):
+    """A stone balustrade from a to b standing on the ground at z: a plinth,
+    a row of balusters and a coping rail."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    d = b - a
+    L = float(np.linalg.norm(d))
+    if L < 0.3:
+        return
+    u = d / L
+    base = orient(LineString([a, b]).buffer(0.22, cap_style=2, join_style=2), 1.0)
+    add_walls(m, base, z - 0.4, z + plinth, z, 100, stone, PLAIN)
+    add_roof(m, base, z + plinth, stone, False)
+    nb = max(1, int(L / 0.32))
+    for k in range(nb):
+        p = a + d * (k + 0.5) / nb
+        _box(m, *p, u, 0.13, 0.13, z + plinth, z + height - 0.16, stone * 1.03)
+    cap = orient(LineString([a, b]).buffer(0.2, cap_style=2, join_style=2), 1.0)
+    add_walls(m, cap, z + height - 0.16, z + height, z, 100, top_col, PLAIN)
+    add_roof(m, cap, z + height, top_col, False)
+
+
 def metropole(m, ways, mntR, mns, stats):
     """The hotel's garden and its corner cupola (the walls themselves come
     from buildings(), with the landmark colour and the survey's balconies)."""
@@ -6981,6 +7002,27 @@ def metropole(m, ways, mntR, mns, stats):
     rail = orient(LineString([b0 - v * 0.15, b1 - v * 0.15]).buffer(0.16, cap_style=2, join_style=2), 1.0)
     add_walls(m, rail, zd + 0.85, zd + 1.0, zd, 100, white, PLAIN)
     add_roof(m, rail, zd + 1.0, white, False)
+    # The garden is closed off from the Avenue de la Madone (2018 street
+    # photos): a cream stone balustrade on a plinth along the pavement and,
+    # right behind it, a clipped hedge taller than a person (with the trees
+    # the LiDAR sees over it), so from the street the pool is out of sight.
+    # Same hedge across the deck's south-west end.
+    leaf = np.array(hexrgb("#3d5a2c"))
+    m0, m1 = c - v * W / 2 - u * L / 2, c - v * W / 2 + u * L / 2
+    s0 = c + v * W / 2 - u * L / 2
+    nseg = max(1, int(L / 4.0))
+    for k in range(nseg):
+        a_, b_ = m0 + (m1 - m0) * k / nseg, m0 + (m1 - m0) * (k + 1) / nseg
+        mid = (a_ + b_) / 2 - v * 2.0
+        zz = mntR.sample(np.array([mid[0]]), np.array([mid[1]]))
+        zst = float(zz[0]) if np.isfinite(zz).all() else zd
+        _balustrade(m, a_ - v * 0.35, b_ - v * 0.35, min(zst, zd), stone, white)
+        hg = orient(LineString([a_ + v * 0.7, b_ + v * 0.7]).buffer(0.75, cap_style=2, join_style=2), 1.0)
+        add_walls(m, hg, zd - 0.2, zst + 4.6, zd, 100, leaf, LEAF)
+        add_roof(m, hg, zst + 4.6, leaf * 1.08, False)
+    hg = orient(LineString([m0 + u * 0.7 + v * 1.5, s0 + u * 0.7 - v * 0.6]).buffer(0.75, cap_style=2, join_style=2), 1.0)
+    add_walls(m, hg, zd - 0.2, zd + 3.2, zd, 100, leaf, LEAF)
+    add_roof(m, hg, zd + 3.2, leaf * 1.08, False)
     for p in pools:
         # The Odyssey pool: water a little below a white stone coping.
         cop = orient(p.buffer(0.6, join_style=2), 1.0)
