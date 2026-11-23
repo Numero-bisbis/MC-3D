@@ -1009,11 +1009,32 @@ def shops_for(poly, shops, others):
     return {"pts": out, "areas": areas}
 
 
+ALLEE_FRONT = None   # the Allée François Blanc's line below the square (set in main)
+
+
+def allee_facing(a, b):
+    """Is the wall a-b (CCW, outside on the right) on the Allée François
+    Blanc, facing it? Its whole length is a row of boutiques."""
+    if ALLEE_FRONT is None:
+        return False
+    L = float(np.linalg.norm(b - a))
+    if L < 1.5:
+        return False
+    mid = (a + b) / 2
+    pl = ALLEE_FRONT.interpolate(ALLEE_FRONT.project(Point(*mid)))
+    to = np.array([pl.x, pl.y]) - mid
+    d = float(np.linalg.norm(to))
+    out_ = np.array([b[1] - a[1], a[0] - b[0]]) / L
+    return 1.0 < d < ALLEE_HALF + 2.0 and float(np.dot(out_, to / d)) > 0.6
+
+
 def shop_spans(a, b):
     """Stretches (fractions 0-1, snapped to whole bays later) of the wall
     a-b with a real shop behind them, from SHOP_NOW."""
     if SHOP_NOW is None:
         return []
+    if allee_facing(a, b):
+        return [(0.0, 1.0)]
     if SHOP_NOW["areas"]:
         return [(0.0, 1.0)]
     L = float(np.linalg.norm(b - a))
@@ -1081,7 +1102,9 @@ def street_rise(a, b, base, z0, z1, fh):
         g = GROUND_R.sample(q[:, 0], q[:, 1]) - base
         g = np.where(np.isfinite(g), g, 0.0)
         # A wall against a cliff or a retaining wall is not a street.
-        g = np.where(g > 6.0, 0.0, np.clip(g, 0.0, None))
+        # (The Allée François Blanc climbs 11 m along the Casino: its
+        # boutiques follow it all the way up.)
+        g = np.where(g > (14.0 if allee_facing(a[i], b[i]) else 6.0), 0.0, np.clip(g, 0.0, None))
         g = np.minimum(g, z1 - base - fh - 0.5)
         if g.max() < 0.4:
             res.append((a[i], b[i], 0.0, 0.0, 0.0, 1.0, i))
@@ -2208,6 +2231,10 @@ CDP_TERRACE_DEPTH = 9.0
 
 
 def cafe_terrace(m, mntR, ways, pts, stats):
+    """The Café de Paris terrace as in the 2026 street photos: two rows of
+    big square white parasols, edge to edge, hugging the veranda (one low
+    white canopy seen from the square), tables and chairs under them, and
+    a low black railing with planters along the square side."""
     a, b = _rel(*CDP_TERRACE_EDGE[0]), _rel(*CDP_TERRACE_EDGE[1])
     L = float(np.linalg.norm(b - a))
     u = (b - a) / L
@@ -2216,26 +2243,58 @@ def cafe_terrace(m, mntR, ways, pts, stats):
         out = -out
     palms = np.array([xy for xy, t in pts if t.get("natural") == "tree"
                       and casino_palm_zone().contains(Point(*xy))] or [[1e9, 1e9]])
-    white = np.array(hexrgb("#f3efe6"))
-    pole = np.array(hexrgb("#c9c2b4"))
+    white = np.array(hexrgb("#f4f1ea"))
+    pole = np.array(hexrgb("#b9b2a4"))
+    cloth = np.array(hexrgb("#ece6da"))
+    chair = np.array(hexrgb("#7a5a3a"))
+    iron = np.array(hexrgb("#1d2220"))
+    green = np.array(hexrgb("#4f6b3a"))
+    P_, H_ = 3.4, 1.62                    # parasol pitch and half-width
+    rows = (2.0, 2.0 + P_)
+    depth = rows[-1] + H_ + 0.4
+    z_edge = mntR.sample(np.array([a[0], b[0]]), np.array([a[1], b[1]]))
     n_ = 0
-    for i in np.arange(1.8, L - 1.0, 3.3):
-        for d in np.arange(2.2, CDP_TERRACE_DEPTH, 3.1):
+    for i in np.arange(H_ + 0.3, L - H_, P_):
+        for d in rows:
             c = a + u * i + out * d
-            if np.min(np.hypot(*(palms - c).T)) < 1.6 or not off_track(c[0], c[1], 3.0):
+            if np.min(np.hypot(*(palms - c).T)) < 1.0 or not off_track(c[0], c[1], 2.5):
                 continue
             z = float(mntR.sample(np.array([c[0]]), np.array([c[1]]))[0])
             if not np.isfinite(z):
                 continue
-            _box(m, c[0], c[1], u, 0.07, 0.07, z, z + 2.5, pole)
-            sq = orient(Polygon([c + u * 1.4 + out * 1.4, c - u * 1.4 + out * 1.4, c - u * 1.4 - out * 1.4,
-                                 c + u * 1.4 - out * 1.4]), 1.0)
-            add_cap(m, sq, z + 2.3, 0.55, white, PLAIN)
-            add_roof(m, orient(sq, -1.0), z + 2.3, white * 0.8, False)
-            # A round table under it.
-            _box(m, c[0], c[1], u, 0.75, 0.75, z + 0.7, z + 0.75, white * 0.95)
-            _box(m, c[0], c[1], u, 0.08, 0.08, z, z + 0.7, pole * 0.6)
+            # The parasol: a shallow white pyramid on a pole, 2.7 m up.
+            _box(m, c[0], c[1], u, 0.08, 0.08, z, z + 2.75, pole)
+            sq = orient(Polygon([c + u * H_ + out * H_, c - u * H_ + out * H_, c - u * H_ - out * H_,
+                                 c + u * H_ - out * H_]), 1.0)
+            add_cap(m, sq, z + 2.45, 0.45, white, PLAIN)
+            add_roof(m, orient(sq, -1.0), z + 2.45, white * 0.78, False)
+            # Two tables with their chairs under it.
+            for k in (-0.8, 0.8):
+                t = c + u * k
+                _box(m, t[0], t[1], u, 0.7, 0.7, z + 0.72, z + 0.76, cloth)
+                _box(m, t[0], t[1], u, 0.07, 0.07, z, z + 0.72, iron)
+                for sd in (-0.55, 0.55):
+                    q = t + out * sd
+                    _box(m, q[0], q[1], u, 0.42, 0.4, z + 0.42, z + 0.47, chair)
+                    r = t + out * (sd * 1.55)
+                    _box(m, r[0], r[1], u, 0.42, 0.06, z, z + 0.9, chair)
             n_ += 1
+    # The railing and planters along the square side of the terrace.
+    for i in np.arange(0.0, L, 2.0):
+        p0 = a + u * i + out * depth
+        p1 = a + u * min(L, i + 2.0) + out * depth
+        mid = (p0 + p1) / 2
+        if not off_track(mid[0], mid[1], 2.0) or np.min(np.hypot(*(palms - mid).T)) < 0.8:
+            continue
+        z = float(mntR.sample(np.array([mid[0]]), np.array([mid[1]]))[0])
+        if not np.isfinite(z):
+            continue
+        _box(m, mid[0], mid[1], u, 2.0, 0.05, z + 0.95, z + 1.0, iron)
+        _box(m, p0[0], p0[1], u, 0.06, 0.06, z, z + 1.0, iron)
+        if int(i / 2.0) % 2 == 0:
+            q = mid - out * 0.45
+            _box(m, q[0], q[1], u, 0.9, 0.5, z, z + 0.55, np.array(hexrgb("#d8d2c4")))
+            _box(m, q[0], q[1], u, 0.8, 0.4, z + 0.55, z + 1.0, green)
     stats["cafe_parasols"] = n_
     return n_
 
@@ -3121,6 +3180,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     iy_, ix_ = np.unravel_index(np.argmax(win), win.shape)
                     adj = ((ix_ - 2) * RES, -(iy_ - 2) * RES)
             SHOP_NOW = shops_for(poly, SHOPS, in_any)
+            if SHOP_NOW is None and ALLEE_FRONT is not None and poly.distance(ALLEE_FRONT) < ALLEE_HALF + 2.0:
+                SHOP_NOW = {"pts": [], "areas": []}       # the Allée's boutique row
             if SHOP_NOW is not None:
                 stats["shop_buildings"] = stats.get("shop_buildings", 0) + 1
             zb = base - 1.0
@@ -4690,6 +4751,39 @@ def wall_ground(X, Y, Zm):
     return Zm
 
 
+BALUSTRADE_R = 280.0                   # m from the Casino fountain: stone balustrades
+BALUSTER = "#ece6d8"
+
+
+def balustrade(m, A, B, Z):
+    """A stone balustrade along A-B on Z: a plinth, turned balusters
+    every 0.28 m (a square foot, a round belly, a square neck), a pier
+    every few metres and a moulded rail."""
+    col = np.array(hexrgb(BALUSTER))
+    tot = 0.0
+    for a, b, z in zip(A, B, Z):
+        L = float(np.linalg.norm(b - a))
+        if L < 0.3:
+            continue
+        u = (b - a) / L
+        c = (a + b) / 2
+        _box(m, c[0], c[1], u, L + 0.02, 0.36, z, z + 0.16, col * 0.95)                  # plinth
+        _box(m, c[0], c[1], u, L + 0.02, 0.38, z + 0.82, z + 0.95, col)                  # rail
+        for t in np.arange(0.14, L, 0.28):
+            p = a + u * t
+            _box(m, p[0], p[1], u, 0.11, 0.11, z + 0.16, z + 0.82, col * 0.97, top=False)
+            _box(m, p[0], p[1], u, 0.17, 0.17, z + 0.3, z + 0.52, col, top=False)        # the belly
+        tot += L
+    # A pier about every 3 m.
+    run = 3.0
+    for a, b, z in zip(A, B, Z):
+        run += float(np.linalg.norm(b - a))
+        if run >= 3.0:
+            run = 0.0
+            _box(m, a[0], a[1], b - a, 0.34, 0.4, z, z + 1.02, col * 0.98)
+    return tot
+
+
 def street_walls(gm, m, stats):
     """The walls edge_walls() found: stone faces, a coping, level ground on
     top of the retaining walls and a parapet along the drops."""
@@ -4724,7 +4818,16 @@ def street_walls(gm, m, stats):
         if g_.any():
             gc = np.array(hexrgb(GARDEN_WALL))[None] * tint[up][g_]
             _quad(m, E(A[g_], Z0[g_]), E(B[g_], Z0[g_]), E(B[g_], Z1[g_]), E(A[g_], Z1[g_]), gc, -O[g_])
-            rails += railing(m, A[g_] + O[g_, :2] * 0.15, B[g_] + O[g_, :2] * 0.15, Z1[g_] + 0.06, GARDEN_RAIL, 1.2)
+            # Round the Casino the gardens end in a white stone balustrade
+            # (small turned columns under a rail), elsewhere iron railings.
+            mid_ = (A[g_] + B[g_]) / 2
+            bal = np.hypot(mid_[:, 0] - CASINO_SQUARE[0], mid_[:, 1] - CASINO_SQUARE[1]) < BALUSTRADE_R
+            if (~bal).any():
+                rails += railing(m, (A[g_] + O[g_, :2] * 0.15)[~bal], (B[g_] + O[g_, :2] * 0.15)[~bal],
+                                 Z1[g_][~bal] + 0.06, GARDEN_RAIL, 1.2)
+            if bal.any():
+                n_b = balustrade(m, (A[g_] + O[g_, :2] * 0.2)[bal], (B[g_] + O[g_, :2] * 0.2)[bal], Z1[g_][bal] + 0.04)
+                stats["balustrade_m"] = stats.get("balustrade_m", 0) + int(n_b)
         if r_.any():
             S0, S1 = s0[up][r_], s1[up][r_]
             rc = np.array(hexrgb(WALL_RUBBLE))[None] * tint[up][r_]
@@ -8013,6 +8116,11 @@ def main():
     ways, pts = load_osm()
     global SHOPS
     SHOPS = shop_places(ways, pts)
+    global ALLEE_FRONT
+    al_ = allee_line(ways)
+    if al_ is not None and al_.length > 40:
+        # From the square down to where the gardens begin.
+        ALLEE_FRONT = shapely.ops.substring(al_, 24.0, al_.length)
     print("real shops:", len(SHOPS["pts"]), "points,", len(SHOPS["areas"]), "areas")
     # Yachts moored against a quay merge with it in the LiDAR terrain. The
     # OpenStreetMap coastline follows the quays, so anything outside it is sea.
