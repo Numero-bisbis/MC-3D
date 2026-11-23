@@ -3,7 +3,8 @@
  "buildings": {
   "BATIMENT0000000074070420": {
    "style": "loggia",
-   "seen": "1970s pink tiles, blue-striped balcony awnings"
+   "seen": "1970s salmon-pink tiles, blue-green glass balconies, blue-striped awnings, tan stone base; the island inside the Mirabeau Bas / Portier loop (Mapillary 2025 panoramas). Colour set by hand: the photo sampling gave near-white #e6d8d5",
+   "colour": "#eebfae"
   },
   "BATIMENT0000000074074336": {
    "style": "belle",
