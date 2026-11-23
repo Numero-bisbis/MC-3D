@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3397436,
+ "triangles": 3394344,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -57,7 +57,7 @@
  },
  "buildings": 1363,
  "dropped": 10,
- "rooftop": 69,
+ "rooftop": 67,
  "roof_plants": 55,
  "levels": 1365,
  "towers": 8,
@@ -65,17 +65,17 @@
  "yachts": 593,
  "real_floors": 734,
  "styles": [
-  262,
-  211,
-  6,
+  261,
+  213,
+  7,
   322,
-  221,
-  83,
+  220,
+  82,
   1,
   73,
   184
  ],
- "balconies": 1181,
+ "balconies": 1168,
  "shop_buildings": 162,
  "casino_halls": 6,
  "landmarks": 2,
@@ -85,9 +85,9 @@
   15.8,
   20.7
  ],
- "photo_facade_colours": 29,
- "photo_facade_types": 34,
- "photo_roofs": 1320,
+ "photo_facade_colours": 32,
+ "photo_facade_types": 37,
+ "photo_roofs": 1318,
  "photo_lean": [
   0.04000000000000037,
   -0.009999999999999676
@@ -105,6 +105,11 @@
  "quay_wall_m": 2471,
  "bridges": 18,
  "diving_towers": 1,
+ "metropole": {
+  "parasols": 7,
+  "loungers": 9,
+  "pavilions": 5
+ },
  "road_m": 47458,
  "kerb_m": 32849,
  "lamps": 1008,
@@ -131,8 +136,8 @@
  "quai_steps": 2,
  "quai_pines": 36,
  "track_clear": true,
- "roof_kit": 3457,
- "roof_texels_per_m": 4.64,
+ "roof_kit": 3267,
+ "roof_texels_per_m": 4.52,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
