@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3397661,
+ "triangles": 3397404,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -55,19 +55,19 @@
    ]
   ]
  },
- "buildings": 1363,
+ "buildings": 1360,
  "dropped": 10,
  "rooftop": 69,
  "roof_plants": 55,
- "levels": 1365,
+ "levels": 1362,
  "towers": 8,
  "trees": 1428,
  "yachts": 593,
- "real_floors": 734,
+ "real_floors": 732,
  "styles": [
-  262,
+  260,
   211,
-  6,
+  5,
   322,
   221,
   83,
@@ -75,8 +75,10 @@
   73,
   184
  ],
- "balconies": 1181,
- "shop_buildings": 162,
+ "balconies": 1179,
+ "shop_buildings": 161,
+ "verandas": 3,
+ "hdp": 1,
  "casino_halls": 6,
  "landmarks": 2,
  "mareterra_slabs": 139,
@@ -87,7 +89,7 @@
  ],
  "photo_facade_colours": 29,
  "photo_facade_types": 34,
- "photo_roofs": 1320,
+ "photo_roofs": 1317,
  "photo_lean": [
   0.04000000000000037,
   -0.009999999999999676
@@ -113,8 +115,9 @@
  "kerb_stone_m": 8264,
  "kerb_red_white_m": 903,
  "hairpin_wall_m": 86,
- "boutique_bays": 22,
  "allee_shops": 10,
+ "casino_apron_m2": 1902,
+ "cafe_parasols": 24,
  "side_street_steps_m": 322,
  "street_railing_m": 839,
  "garden_wall_m": 511,
@@ -131,8 +134,8 @@
  "quai_steps": 2,
  "quai_pines": 36,
  "track_clear": true,
- "roof_kit": 3457,
- "roof_texels_per_m": 4.64,
+ "roof_kit": 3254,
+ "roof_texels_per_m": 4.51,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
