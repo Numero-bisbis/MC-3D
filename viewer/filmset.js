@@ -290,6 +290,7 @@
           bool shopF = fsInput.attributes.texCoord_1.x > 0.5;
           bool gnd = lowF && shopF;        // a shopfront
           float shine = 0.0;               // how much of this pixel is glass
+          float shopGlow = 0.0;            // lit boutique window (Casino, Café de Paris)
           vec3 farCol = mix(base, glass, 0.18);
           if (uv.y < 0.0) {
             col = base * 0.7;              // plinth below street level
@@ -383,6 +384,25 @@
               }
               shine = win;
             }
+          } else if (style < 2.5 && gnd) {
+            // Casino / Café de Paris boutiques (a real shop behind the bay):
+            // the whole arch glazed in a bronze surround, a dark fascia with
+            // a gilt line at transom height, the shop lit inside.
+            float pil = 1.0 - box(f, vec2(0.07, -1.0), vec2(0.93, 2.0), aa);
+            float arch_ = archMask(f, 0.14, 0.86, 0.03, 0.62, aa);
+            float surround = archMask(f, 0.1, 0.9, 0.0, 0.62, aa) * (1.0 - arch_);
+            float fascia = box(f, vec2(0.14, 0.47), vec2(0.86, 0.54), aa);
+            float gilt = box(f, vec2(0.3, 0.498), vec2(0.7, 0.512), aa);
+            float mull = box(f, vec2(0.494, 0.03), vec2(0.506, 0.47), aa) + box(f, vec2(0.14, 0.03), vec2(0.86, 0.045), aa);
+            col = mix(base * 1.03, base * 1.13, pil);
+            col = mix(col, base * 0.85, pil * box(f, vec2(0.07, -1.0), vec2(0.09, 2.0), aa));
+            col = mix(col, vec3(0.2, 0.15, 0.09), surround);
+            col = mix(col, vec3(0.05, 0.055, 0.06), arch_);
+            col = mix(col, vec3(0.07, 0.065, 0.06), arch_ * clamp(fascia + mull, 0.0, 1.0));
+            col = mix(col, vec3(0.78, 0.6, 0.3), arch_ * gilt);
+            col = mix(col, base * 1.2, box(f, vec2(0.46, 0.86), vec2(0.54, 0.97), aa));     // keystone
+            shopGlow = arch_ * (1.0 - clamp(fascia + mull, 0.0, 1.0)) * mix(1.0, 0.45, step(0.54, f.y));
+            shine = arch_;
           } else if (style < 2.5) {
             // Casino / Café de Paris: round-arched windows between pilasters.
             float pil = 1.0 - box(f, vec2(0.08, -1.0), vec2(0.92, 2.0), aa);
@@ -588,6 +608,13 @@
             vec3 wc = mix(vec3(1.0, 0.72, 0.4), vec3(0.62, 0.78, 1.0), step(0.88, hash12(cell + 3.1)));
             wc *= 0.7 + 0.5 * hash12(cell * 2.7 + 1.3);
             material.emissive = wc * u_night * mix(0.16, shine * lit * 1.1, detail);
+          }
+          if (shopGlow > 0.0) {
+            // Boutique display lights, on by day too.
+            vec3 sp = fsInput.attributes.positionMC * length(czm_model[0].xyz);
+            float spot = 0.75 + 0.25 * vnoise(sp.xz * 1.3 + sp.y * 0.8);
+            material.emissive += vec3(1.0, 0.78, 0.48) * shopGlow * spot * mix(0.42, 1.3, u_night) * detail;
+            material.diffuse = mix(material.diffuse, vec3(0.04), shopGlow * 0.5);
           }
         } else if (kind < 3.5) {        // flat roofs
           if (a255 - kind * 16.0 < 1.5) {
