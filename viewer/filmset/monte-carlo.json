@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3395570,
+ "triangles": 3438338,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -122,9 +122,10 @@
  "hairpin_wall_m": 87,
  "allee_shops": 10,
  "casino_apron_m2": 1902,
- "cafe_parasols": 24,
+ "cafe_parasols": 16,
+ "balustrade_m": 497,
  "side_street_steps_m": 322,
- "street_railing_m": 839,
+ "street_railing_m": 342,
  "garden_wall_m": 511,
  "street_wall_up_m": 970,
  "street_wall_down_m": 506,
