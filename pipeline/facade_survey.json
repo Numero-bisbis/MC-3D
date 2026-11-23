@@ -205,6 +205,30 @@
    "colour": "#55595b",
    "levels": 2,
    "balconies": "none"
+  },
+  "BATIMENT0000000074070330": {
+   "style": "belle",
+   "colour": "#eee2c8",
+   "seen": "Hôtel Métropole (Mapillary 2025 panoramas from the circuit): cream Belle Epoque walls over the shopping gallery, long white balustraded balconies, curved corner",
+   "bay": 3.4,
+   "balconies": "continuous",
+   "depth": 1.2
+  },
+  "BATIMENT0000000074070415": {
+   "style": "belle",
+   "colour": "#eee2c8",
+   "seen": "Hôtel Métropole, inner wing: same cream walls and balconies",
+   "bay": 3.4,
+   "balconies": "continuous",
+   "depth": 1.2
+  },
+  "BATIMENT0000000074070307": {
+   "style": "arch",
+   "colour": "#e9dcc4",
+   "seen": "Métropole shopping gallery along the circuit: two storeys of shops in cream stone, glazed gallery of arched windows on top",
+   "levels": 3,
+   "bay": 5.0,
+   "balconies": "none"
   }
  }
 }

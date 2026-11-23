@@ -2094,7 +2094,11 @@ LANDMARKS = [
     ("Hôtel de Paris", (1056523, 6303375), S_BELLE, "#f5eedf"),
     ("Hôtel Hermitage", (1056432, 6303262), S_BELLE, "#f2d9bd"),
     ("Café de Paris", (1056577, 6303396), S_ARCH, "#f6f0e4"),
-    ("Hôtel Métropole", (1056574, 6303546), S_BELLE, "#f1dcc0"),
+    # (Not the OSM hotel point: it lies in the hotel's garden, outside every
+    # outline. See metropole().)
+    ("Hôtel Métropole", (1056600, 6303575), S_BELLE, "#eee2c8"),
+    ("Hôtel Métropole", (1056599, 6303588), S_BELLE, "#eee2c8"),
+    ("Hôtel Métropole", (1056558, 6303555), S_BELLE, "#eee2c8"),
     ("One Monte-Carlo", (1056448, 6303367), S_MODERN, "#eeede8"),
     ("One Monte-Carlo", (1056433, 6303407), S_MODERN, "#eeede8"),
     ("Fairmont", (1056743, 6303450), S_RIBBON, "#eee8dc"),
@@ -6612,6 +6616,142 @@ def pool_features(m, ways, mnt):
     return n_
 
 
+# Hôtel Métropole Monte-Carlo (4 avenue de la Madone), above Casino square
+# on the way down to Mirabeau. Neither BD TOPO nor OpenStreetMap has its
+# garden as a building, and the OSM hotel point (METROPOLE) lies in that
+# garden, outside every outline, so the hotel never got its landmark look:
+# it came out as two random orange blocks behind a glass box, with a bare
+# lawn and the pool in the gap ("a void with water"). What stands there
+# (Mapillary 2018 and 2025 street photos, IGN LiDAR 2021, IGN 20 cm photo):
+#   - along the circuit, the Métropole shopping gallery (BD TOPO 070307 and
+#     the front of 070330): two storeys of shops in cream stone, then the
+#     glazed gallery with its arched, dark green iron windows;
+#   - above it, set back, the hotel (070330, 070415): cream Belle Époque
+#     walls with white balustraded balconies, a curved south-east corner
+#     with a small lead-grey cupola, ~34 m above the circuit;
+#   - on the Avenue de la Madone side, the hotel's garden: the Odyssey pool
+#     on a pale stone deck at street level (44 m NGF) with loungers and
+#     white parasols, and a lower terrace (39.5 m) with a row of white
+#     pavilions with arched openings along the gallery's back.
+METROPOLE = (1056574.0, 6303546.0)
+METROPOLE_HOTEL = ("BATIMENT0000000074070330", "BATIMENT0000000074070415")
+METROPOLE_GALLERY = "BATIMENT0000000074070307"
+METROPOLE_CUPOLA = (50.0, 33.5)      # m from METROPOLE: inside the curved corner
+METROPOLE_DECK_AXIS = 33.0           # degrees east of north: Avenue de la Madone
+METROPOLE_DECK = ((-36.5, -18.0), 34.0, 19.0)    # centre, length along the avenue, width
+METROPOLE_PAVILIONS = ((-17.5, -46.0), (6.0, -4.0))   # lower terrace, south and north ends
+METROPOLE_STONE = "#eee2c8"
+
+
+def metropole(m, ways, mntR, mns, stats):
+    """The hotel's garden and its corner cupola (the walls themselves come
+    from buildings(), with the landmark colour and the survey's balconies)."""
+    ox, oy = METROPOLE
+    rel = lambda x, y: (ox + x, oy + y)
+    stone = np.array(hexrgb(METROPOLE_STONE))
+    deckc = np.array(hexrgb("#e4dccb"))
+    white = np.array(hexrgb("#f6f3ec"))
+    water = np.array(hexrgb("#4fb6c6"))
+    zinc = np.array(hexrgb("#8b9497"))
+    n = {"parasols": 0, "loungers": 0, "pavilions": 0}
+
+    # Pool deck: a stone terrace at street level, kerb walls round it.
+    a = math.radians(METROPOLE_DECK_AXIS)
+    u = np.array([math.sin(a), math.cos(a)])
+    v = np.array([u[1], -u[0]])                     # across, towards the gallery
+    (cx, cy), L, W = METROPOLE_DECK
+    c = np.array(rel(cx, cy))
+    deck = orient(Polygon([c - u * L / 2 - v * W / 2, c + u * L / 2 - v * W / 2,
+                           c + u * L / 2 + v * W / 2, c - u * L / 2 + v * W / 2]), 1.0)
+    zs = mntR.sample(np.array([c[0]]), np.array([c[1]]))
+    zd = float(zs[0]) + 0.15 if np.isfinite(zs).all() else 44.0
+    pools = [Polygon(p_).buffer(0) for tg, p_, cl in ways if cl and len(p_) > 3
+             and tg.get("leisure") == "swimming_pool"]
+    pools = [p for p in pools if deck.buffer(2).contains(p.centroid)]
+    holes = [orient(p.buffer(0.6, join_style=2), 1.0) for p in pools]
+    top = deck.difference(unary_union(holes)) if holes else deck
+    for p in to_polys(top):
+        add_roof(m, orient(p, 1.0), zd, deckc, False)
+    add_walls(m, deck, zd - 6.0, zd, zd, 100, stone * 0.94, PLAIN)
+    # A balustrade on the side over the lower terrace.
+    b0, b1 = c + v * W / 2 - u * L / 2, c + v * W / 2 + u * L / 2
+    for k in range(int(L / 0.45)):
+        p = b0 + (b1 - b0) * (k + 0.5) / int(L / 0.45)
+        _box(m, *(p - v * 0.15), u, 0.14, 0.14, zd, zd + 0.85, white)
+    rail = orient(LineString([b0 - v * 0.15, b1 - v * 0.15]).buffer(0.16, cap_style=2, join_style=2), 1.0)
+    add_walls(m, rail, zd + 0.85, zd + 1.0, zd, 100, white, PLAIN)
+    add_roof(m, rail, zd + 1.0, white, False)
+    for p in pools:
+        # The Odyssey pool: water a little below a white stone coping.
+        cop = orient(p.buffer(0.6, join_style=2), 1.0)
+        for q in to_polys(cop.difference(p)):
+            add_roof(m, orient(q, 1.0), zd + 0.08, white, False)
+        add_walls(m, orient(p, 1.0), zd - 0.25, zd + 0.08, zd, 100, water * 0.85, PLAIN, inward=True)
+        add_roof(m, orient(p, 1.0), zd - 0.25, water, False)
+        # Loungers and white parasols round it, on the deck.
+        pc = p.centroid
+        rr = p.exterior
+        for t in np.linspace(0, 1, 14, endpoint=False):
+            e = rr.interpolate(t, normalized=True)
+            d = np.array([e.x - pc.x, e.y - pc.y])
+            d /= np.linalg.norm(d) + 1e-9
+            q = np.array([e.x, e.y]) + d * 2.0
+            if not deck.buffer(-0.8).contains(shapely.Point(*q)):
+                continue
+            _box(m, *q, d, 1.9, 0.7, zd, zd + 0.35, white)
+            n["loungers"] += 1
+            if int(t * 14) % 2 == 0:
+                s = q + d * 1.6
+                _box(m, *s, d, 0.07, 0.07, zd, zd + 2.3, zinc)
+                ring = [s + np.array([math.cos(t_), math.sin(t_)]) * 1.4 for t_ in np.linspace(0, 2 * math.pi, 9)[:-1]]
+                P = enu_fast(np.array([r[0] for r in ring] + [s[0]]), np.array([r[1] for r in ring] + [s[1]]),
+                             np.array([zd + 2.05] * 8 + [zd + 2.6]))
+                for i in range(8):
+                    m.tri(P[[8]], P[[i]], P[[(i + 1) % 8]], white, PLAIN)
+                n["parasols"] += 1
+
+    # Lower terrace: white pavilions with arched openings along the back
+    # of the gallery, flat roofs at the deck's level.
+    p0, p1 = np.array(rel(*METROPOLE_PAVILIONS[0])), np.array(rel(*METROPOLE_PAVILIONS[1]))
+    dl = np.linalg.norm(p1 - p0)
+    du = (p1 - p0) / dl
+    dv = np.array([du[1], -du[0]])
+    k_ = 5
+    gap = 1.6
+    seg = (dl - gap * (k_ - 1)) / k_
+    for i in range(k_):
+        q0 = p0 + du * i * (seg + gap)
+        q1 = q0 + du * seg
+        pv = orient(Polygon([q0 - dv * 2.2, q1 - dv * 2.2, q1 + dv * 2.2, q0 + dv * 2.2]), 1.0)
+        zz = mntR.sample(np.array([(q0[0] + q1[0]) / 2]), np.array([(q0[1] + q1[1]) / 2]))
+        z0 = float(zz[0]) if np.isfinite(zz).all() else 39.5
+        h = min(max(zd - z0 + 0.3, 3.6), 6.0)
+        add_walls(m, pv, z0 - 0.5, z0 + h, z0, h, stone, WALL_OLD, style=S_ARCH)
+        add_roof(m, pv, z0 + h, np.array(hexrgb("#d8cfbe")), False)
+        cor = orient(pv.buffer(0.3, join_style=2), 1.0)
+        add_walls(m, cor, z0 + h - 0.35, z0 + h, z0 + h, 100, white, PLAIN)
+        for rp in to_polys(cor.difference(pv)):
+            add_roof(m, orient(rp, 1.0), z0 + h, white, False)
+        n["pavilions"] += 1
+
+    # The cupola on the curved corner: a drum ringed with oculi, a lead
+    # dome and a small lantern, on the hotel's roof.
+    qx, qy = rel(*METROPOLE_CUPOLA)
+    r_, c_ = int((Y1 - qy) / RES), int((qx - X0) / RES)
+    win = mns[max(r_ - 8, 0):r_ + 9, max(c_ - 8, 0):c_ + 9]
+    zr = float(np.nanpercentile(win, 50)) if np.isfinite(win).any() else 64.0
+    drum = orient(Point(qx, qy).buffer(2.6, 12), 1.0)
+    add_walls(m, drum, zr - 0.5, zr + 3.0, zr - 0.5, 3.5, stone, WALL_OLD, style=S_ARCH)
+    cor = orient(Point(qx, qy).buffer(2.95, 12), 1.0)
+    add_walls(m, cor, zr + 2.7, zr + 3.1, zr + 3.1, 100, white, PLAIN)
+    add_roof(m, cor, zr + 3.1, white, False)
+    _ball(m, qx, qy, zr + 3.1, 2.45, zinc, None, 14, 8)
+    _box(m, qx, qy, (1, 0), 0.9, 0.9, zr + 5.4, zr + 6.6, white)
+    _ball(m, qx, qy, zr + 6.7, 0.5, zinc, None, 8, 5)
+    stats["metropole"] = n
+    return n
+
+
 # PLAIN styles drawn by the viewer: 5 polished steel, 6 bronze.
 METAL, BRONZE = 5, 6
 
@@ -7732,6 +7872,7 @@ def main():
     print("quay walls…", quay_walls(hm, sea, mnt_f, stats))
     stats["bridges"] = bridges(bm, ways, mns, mnt)
     stats["diving_towers"] = pool_features(bm, ways, mnt_f)
+    print("Hôtel Métropole…", metropole(bm, ways, Raster(mnt_f), mns, stats))
     sm = Mesh()
     sea_plane(sm)
 
