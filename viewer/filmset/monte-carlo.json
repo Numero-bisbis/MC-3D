@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6428911,
+ "triangles": 6466349,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -111,6 +111,7 @@
   "windows": 76
  },
  "cathedral_windows": 71,
+ "hangar_doors": 12,
  "palace_gate": 13.5,
  "palace_flag_m": [
   5.0,
@@ -159,6 +160,9 @@
   "pavilions": 5
  },
  "podium_wall_m": 273,
+ "heliport_red_white_m": 228,
+ "heliport_tris": 33101,
+ "heliport_m2": 4036,
  "tunnel_portals": 3,
  "road_m": 82249,
  "kerb_m": 62953,

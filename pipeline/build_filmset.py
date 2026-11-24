@@ -3613,6 +3613,11 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 fh = hwall / max(2, round(hwall / 7.5))
             if mt is not None:
                 fh = max(2.8, (H - 1.0) / mt["levels"])
+            if key in HELI_PLAIN:
+                # The heliport's hangar and the white halls at the apron's
+                # ends: plain cladding, no rows of windows.
+                kind, style, grand = PLAIN, None, False
+                col = np.array(hexrgb(HELI_PLAIN[key]), float)
             # Fine-tune this building's photo shift by up to a metre.
             adj = (0.0, 0.0)
             if photo is not None and photo.get("edges") is not None and poly.area > 80:
@@ -3810,10 +3815,12 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             elif mt is not None:
                 stats["mareterra_slabs"] = stats.get("mareterra_slabs", 0) + mareterra_terraces(
                     m, poly, base, H, fh, mt)
-            elif not hero and not post_scan and (not tiled or info["balconies"]):
+            elif not hero and not post_scan and (not tiled or info["balconies"]) and key not in HELI_PLAIN:
                 stats["balconies"] = stats.get("balconies", 0) + facade_depth(
                     m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
                     info["balconies"], info["depth"])
+            if key == HELI_HANGAR:
+                stats["hangar_doors"] = heli_hangar_doors(m, poly, base, H)
             if key == FAIRMONT:
                 global FAIR
                 FAIR = {"base": base, "fh": fh, "levels": [(r_, base + h_) for r_, h_ in levels],
@@ -12578,6 +12585,491 @@ def podium_walls(gm, m, stats):
     return n_
 
 
+# ------------------------------------------------------- Monaco Heliport ----
+# The Héliport de Monaco (LNMC) on the sea front of Fontvieille: a concrete
+# apron 170 m long on the sea wall, six stands in a row (1 to 6, the second
+# one the white "H" of the landing area) and two square platforms, A and B,
+# out over the water at either end. Everything is placed from open data:
+# OpenStreetMap (the heliport, the eight helipads, the terminal, the hangar,
+# the control tower) and measured on the IGN 20 cm photo (each pad's rings
+# fitted to the paint: 7.45 m and 2.9 m, the arms at 55 degrees, the blue
+# taxi lines, the yellow and black hatching, the red and white edge) and in
+# the LiDAR (the apron at 5.8 m NGF sloping 30 cm to the sea, A and B at
+# 6.4 m, a quay at 1.4 m under the safety nets along the edge).
+# Frame: s along the apron from pad 1's centre (south-west to north-east),
+# t out to sea.
+HELI_O = (1055977.8, 6301799.3)
+HELI_AXIS = 48.4                       # degrees, east to north
+HELI_EDGE = 8.2                        # t of the apron's sea edge
+HELI_BACK = -16.0                      # t, behind the terminal and hangar fronts
+HELI_ENDS = (-30.0, 137.0)             # s, the hatched ends
+HELI_JUTS = (-17.6, 125.3)             # s of pads A and B, the platforms' centre lines
+HELI_JUT_HALF = 8.85
+HELI_JUT_END = 26.6                    # t of the platforms' sea side
+HELI_RAMP = 2.8                        # m from the apron's edge up to a platform
+HELI_NET = 4.4                         # m, the safety net frame out from the edge
+HELI_QUAY = 1.4                        # m NGF, the quay under the nets (LiDAR)
+# Pads: s, t, outer ring radius, inner ring radius, colour, arms. An arm is
+# (side along s, side across t, arrow): arms run at 55 degrees to the apron,
+# from the inner ring to the outer one; an arrow carries on past the ring to
+# a head pointing at the taxi line. "out": a short arrow from the ring only.
+HELI_ARM_DEG = 55.0
+_ALL4 = ((-1, -1, True), (1, -1, True), (-1, 1, False), (1, 1, False))
+HELI_PADS = [
+    ("1", 0.0, -0.30, 7.45, 2.9, "yellow", ((-1, -1, True), (1, 1, False))),
+    ("2", 20.2, -0.16, 7.45, 2.9, "white", _ALL4),
+    ("3", 40.41, -0.16, 7.45, 2.9, "yellow", _ALL4),
+    ("4", 60.7, -0.06, 7.45, 2.9, "yellow", _ALL4),
+    ("5", 84.69, -0.09, 7.45, 2.9, "yellow", _ALL4),
+    ("6", 108.95, 0.04, 7.45, 2.9, "yellow", ((1, -1, True), (-1, 1, False))),
+    ("A", -17.61, 19.78, 6.1, 3.0, "yellow", ((-1, -1, "out"), (1, -1, "out"))),
+    ("B", 125.34, 20.04, 6.1, 3.0, "yellow", ((-1, -1, "out"), (1, -1, "out"))),
+]
+HELI_TAXI_T = -10.75                   # the blue line along the back of the stands
+HELI_TAXI_S = (-8.0, 117.0)            # where it turns down to A and B
+HELI_PAINT = {"yellow": "#e3bd3c", "white": "#f1f0ea", "blue": "#7fb2d8", "concrete": "#9c9d9b",
+              "face": "#c4c0b6", "steel": "#d9dcdc", "net": "#5d6266"}
+HELI_HANGAR = "BATIMENT0000000074078998"
+HELI_TERMINAL = "BATIMENT0000000074079010"
+# Light buildings on the apron's ends: plain white, no windows.
+HELI_PLAIN = {HELI_HANGAR: "#e3e3df", "BATIMENT0000000074079066": "#f2f1ec",
+              "BATIMENT0000002009026616": "#f2f1ec"}
+HELI_TOWER = (28.1, -15.0)             # OSM aeroway=tower, on the terminal's corner
+HELI_TOWER_TOP = 15.1                  # m NGF (LiDAR)
+HELI_PARKED = [("5", 90.0)]            # a red helicopter on stand 5 (the photo), nose: degrees left of +s
+HELI = None
+
+
+def heliport_setup(ways, mnt, feats):
+    """The apron's outline (OpenStreetMap's heliport, cut at the sea edge,
+    less the buildings on it, plus the two platforms) and its levels."""
+    global HELI
+    F = Frame(Mesh(), HELI_O, (math.cos(math.radians(HELI_AXIS)), math.sin(math.radians(HELI_AXIS))))
+    osm = None
+    for t_, p_, closed in ways:
+        if closed and t_.get("aeroway") == "heliport" and len(p_) >= 4:
+            osm = Polygon(p_).buffer(0.5)
+    if osm is None or not box(X0, Y0, X1, Y1).contains(osm.centroid):
+        HELI = None
+        return 0
+    main = F.poly(HELI_ENDS[0], HELI_ENDS[1], HELI_BACK, HELI_EDGE).intersection(osm)
+    juts = []
+    for sc in HELI_JUTS:
+        a, b, c = HELI_JUT_HALF, HELI_JUT_END, 2.8
+        juts.append(orient(Polygon([F.xy(sc - a, HELI_EDGE - 0.01), F.xy(sc + a, HELI_EDGE - 0.01), F.xy(sc + a, b - c),
+                                    F.xy(sc + a - c, b), F.xy(sc - a + c, b), F.xy(sc - a, b - c)]), 1.0))
+    bl = []
+    for f in feats:
+        g = shapely.force_2d(shape(f["geometry"])).buffer(0)
+        if g.intersects(main):
+            bl.append(g.buffer(0.1, join_style=2))
+    deck = unary_union([main] + juts).difference(unary_union(bl)) if bl else unary_union([main] + juts)
+    deck = max(to_polys(deck), key=lambda q: q.area)
+    deck = orient(Polygon(deck.exterior.simplify(0.05)), 1.0)
+    # Levels: a plane through the apron's terrain, the platforms' own level.
+    R = Raster(mnt)
+    ss, tt = np.meshgrid(np.arange(-25.0, 131.0, 2.0), np.arange(-11.0, 6.5, 1.5))
+    P = F.O[None] + ss.ravel()[:, None] * F.u[None] + tt.ravel()[:, None] * F.v[None]
+    z = R.sample(P[:, 0], P[:, 1])
+    ok = np.isfinite(z)
+    A = np.column_stack([np.ones(ok.sum()), ss.ravel()[ok], tt.ravel()[ok]])
+    coef = np.linalg.lstsq(A, z[ok], rcond=None)[0]
+    for _ in range(2):                             # drop the odd parked van and re-fit
+        r_ = z[ok] - A @ coef
+        keep = np.abs(r_) < 0.15
+        coef = np.linalg.lstsq(A[keep], z[ok][keep], rcond=None)[0]
+    jz = []
+    for sc in HELI_JUTS:
+        sj, tj = np.meshgrid(np.linspace(sc - 5, sc + 5, 6), np.linspace(14, 24, 6))
+        Q = F.O[None] + sj.ravel()[:, None] * F.u[None] + tj.ravel()[:, None] * F.v[None]
+        jz.append(float(np.nanmedian(R.sample(Q[:, 0], Q[:, 1]))))
+    HELI = {"F": F, "deck": deck, "main": deck.difference(unary_union(juts).buffer(-0.02)), "juts": juts,
+            "coef": coef, "jut_z": jz, "osm": osm}
+    print(f"  heliport: apron {deck.area:.0f} m2, plane {coef[0]:.2f} {coef[1]:+.4f}/m s {coef[2]:+.4f}/m t,"
+          f" platforms at {jz[0]:.2f} and {jz[1]:.2f} m")
+    return deck.area
+
+
+def heli_st(x, y):
+    F = HELI["F"]
+    d = np.column_stack([np.asarray(x, float) - F.O[0], np.asarray(y, float) - F.O[1]])
+    return d @ F.u, d @ F.v
+
+
+def heli_z(s, t):
+    """The apron's level at (s, t): the plane, then up the short ramps
+    onto the platforms."""
+    s, t = np.broadcast_arrays(np.asarray(s, float), np.asarray(t, float))
+    c = HELI["coef"]
+    z = c[0] + c[1] * s + c[2] * np.minimum(t, HELI_EDGE)
+    for sc, jz in zip(HELI_JUTS, HELI["jut_z"]):
+        on = (np.abs(s - sc) <= HELI_JUT_HALF + 0.05) & (t > HELI_EDGE)
+        w = np.clip((t - HELI_EDGE) / HELI_RAMP, 0.0, 1.0)
+        z = np.where(on, z * (1 - w) + jz * w, z)
+    return z
+
+
+def heliport_ground(mnt):
+    """Terrain under the apron sunk out of sight, and the quay below the
+    sea edge level, so the 3 m ground grid does not run the drop out as a
+    slope."""
+    if HELI is None:
+        return mnt
+    out = mnt.copy()
+    zone = HELI["deck"].buffer(GRID + 2.0, join_style=2)
+    x0, y0, x1, y1 = zone.bounds
+    c0, c1 = max(int((x0 - X0) / RES), 0), min(int((x1 - X0) / RES) + 1, mnt.shape[1])
+    r0, r1 = max(int((Y1 - y1) / RES), 0), min(int((Y1 - y0) / RES) + 1, mnt.shape[0])
+    rr, cc = np.mgrid[r0:r1, c0:c1]
+    cx, cy = cell_xy(rr.ravel(), cc.ravel())
+    s, t = heli_st(cx, cy)
+    sub = out[r0:r1, c0:c1].ravel()
+    inside = contains_xy(HELI["deck"], cx, cy)
+    near_edge = (t > HELI_EDGE - GRID - 1.6) & (t < HELI_EDGE + HELI_NET + 3.0) & \
+        (s > HELI_JUTS[0] - HELI_JUT_HALF) & (s < HELI_JUTS[1] + HELI_JUT_HALF) & ((t >= HELI_EDGE) | inside)
+    on_jut = contains_xy(unary_union(HELI["juts"]).buffer(GRID + 1.0, join_style=2), cx, cy) & (t > HELI_EDGE - GRID - 1.6)
+    low = (near_edge | on_jut) & np.isfinite(sub)
+    sub[low] = np.minimum(sub[low], HELI_QUAY - 0.05)
+    deep = inside & ~low & np.isfinite(sub)
+    sub[deep] = sub[deep] - 0.5
+    out[r0:r1, c0:c1] = sub.reshape(rr.shape)
+    return out
+
+
+def _heli_flat(m, geom, col, lift, area=None):
+    """Paint or slab lying on the apron: triangulated, each vertex at the
+    apron's level plus lift."""
+    n_ = 0
+    for q in to_polys(geom):
+        if q.area < 0.02:
+            continue
+        tr = triangulate(orient(q, 1.0), area)
+        if tr is None:
+            continue
+        v, tri = tr
+        s, t = heli_st(v[:, 0], v[:, 1])
+        P = enu_fast(v[:, 0], v[:, 1], heli_z(s, t) + lift)
+        m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], np.asarray(col, float), PLAIN)
+        n_ += len(tri)
+    return n_
+
+
+def _st_poly(F, pts):
+    return Polygon([F.xy(s, t) for s, t in pts])
+
+
+def _heli_blue_from_photo(F, hi):
+    """The light blue taxi lines' junctions between the stands, read off the
+    20 cm photo (the straight runs are drawn exactly, below)."""
+    if hi is None:
+        return Polygon()
+    ppm = hi.size[0] / (X1 - X0)
+    T, s0, s1, t0, t1 = 10.0, -30.0, 137.0, -15.0, -1.0
+    w, h = int((s1 - s0) * T), int((t1 - t0) * T)
+    cx = (F.O[0] + s0 * F.u[0] + t0 * F.v[0] - X0) * ppm
+    cy = (Y1 - (F.O[1] + s0 * F.u[1] + t0 * F.v[1])) * ppm
+    coef = (F.u[0] * ppm / T, F.v[0] * ppm / T, cx, -F.u[1] * ppm / T, -F.v[1] * ppm / T, cy)
+    a = np.asarray(hi.transform((w, h), Image.AFFINE, coef, resample=Image.BICUBIC)).astype(np.float32)
+    a = ndimage.gaussian_filter(a, (1.0, 1.0, 0))
+    r_, g_, b_ = a[..., 0], a[..., 1], a[..., 2]
+    blue = (b_ - r_ > 14) & (b_ >= g_ - 2) & (g_ - r_ > 4)
+    blue = ndimage.binary_closing(ndimage.binary_opening(blue, iterations=2), iterations=2)
+    lab, n = ndimage.label(blue)
+    if not n:
+        return Polygon()
+    sz = ndimage.sum(blue, lab, range(1, n + 1))
+    blue = np.isin(lab, np.nonzero(sz > 4.0 * T * T)[0] + 1)     # pieces over 4 m2
+    jj, ii = np.nonzero(blue)
+    if not len(jj):
+        return Polygon()
+    cells = unary_union([box(s0 + i / T, t0 + j / T, s0 + (i + 1) / T, t0 + (j + 1) / T) for j, i in zip(jj, ii)])
+    cells = cells.buffer(0.25, join_style=1).buffer(-0.5, join_style=1).buffer(0.25, join_style=1).simplify(0.08)
+    return unary_union([_st_poly(F, q.exterior.coords) for q in to_polys(cells) if q.area > 2.0])
+
+
+def _arrow(sa, ta, d, r0, r1, half, head_len, head_half):
+    """A shaft from r0 to r1 along d from (sa, ta), with a head at r1."""
+    n = np.array([-d[1], d[0]])
+    c = np.array([sa, ta])
+    p0, p1 = c + d * r0, c + d * (r1 - head_len)
+    tip = c + d * r1
+    return unary_union([Polygon([p0 - n * half, p1 - n * half, p1 + n * half, p0 + n * half]),
+                        Polygon([p1 - n * head_half, tip, p1 + n * head_half])])
+
+
+def heli_markings(F, hi):
+    """The paint on the apron, in (s, t): {colour: geometry}."""
+    out = {k: [] for k in ("yellow", "white", "blue")}
+    ca, sa_ = math.cos(math.radians(HELI_ARM_DEG)), math.sin(math.radians(HELI_ARM_DEG))
+    for name, s, t, R, ri, col, arms in HELI_PADS:
+        c = Point(s, t)
+        out[col].append(c.buffer(R, 96).difference(c.buffer(R - 0.4, 96)))
+        out[col].append(c.buffer(ri, 64).difference(c.buffer(ri - 0.35, 64)))
+        for ds, dt, arrow in arms:
+            d = np.array([ds * ca, dt * sa_])
+            if arrow == "out":
+                out[col].append(_arrow(s, t, d, R - 0.2, R + 2.2, 0.35, 1.0, 0.75))
+            elif arrow:
+                out[col].append(_arrow(s, t, d, ri - 0.1, 10.6, 0.42, 1.9, 1.15))
+            else:
+                out[col].append(_arrow(s, t, d, ri - 0.1, R - 0.2, 0.42, 0.0, 0.42))
+        if name == "2":
+            # The H, upright to the north as painted.
+            nth = np.array([F.u[1], F.v[1]])          # north in (s, t)
+            nth = nth / np.linalg.norm(nth)
+            est = np.array([nth[1], -nth[0]])
+            def rect(a0, a1, b0, b1):
+                return Polygon([np.array([s, t]) + est * a + nth * b for a, b in ((a0, b0), (a1, b0), (a1, b1), (a0, b1))])
+            out[col] += [rect(-1.05, -0.55, -1.45, 1.45), rect(0.55, 1.05, -1.45, 1.45), rect(-0.55, 0.55, -0.22, 0.22)]
+    # Blue taxi lines: along the back of the stands, down to the platforms.
+    w = 0.45
+    s0, s1 = HELI_TAXI_S
+    for sc, se in ((HELI_JUTS[0], s0), (HELI_JUTS[1], s1)):
+        corner = HELI_TAXI_T + abs(se - sc)
+        line = LineString([(se, HELI_TAXI_T), (sc, corner), (sc, HELI_PADS[6 if sc < 0 else 7][2] - 6.1)])
+        out["blue"].append(line.buffer(w, cap_style=2, join_style=2))
+    out["blue"].append(LineString([(s0, HELI_TAXI_T), (s1, HELI_TAXI_T)]).buffer(w, cap_style=2))
+    # Hatched ends: yellow stripes on the grey, between the line and the
+    # buildings.
+    for sc, se in ((HELI_JUTS[0], s0), (HELI_JUTS[1], s1)):
+        lo, hi_ = (HELI_ENDS[0] + 2.0, se - 0.5) if sc < 0 else (se + 0.5, HELI_ENDS[1] - 1.0)
+        zone = box(lo, -12.0, hi_, 7.0)
+        inner = Polygon([(se, HELI_TAXI_T - 5), (se, HELI_TAXI_T), (sc, HELI_TAXI_T + abs(se - sc)), (sc, 9.0),
+                         (se + (40 if sc < 0 else -40), 9.0), (se + (40 if sc < 0 else -40), HELI_TAXI_T - 5)])
+        zone = zone.difference(inner.buffer(0.9, join_style=2))
+        zone = zone.difference(LineString([(sc, -20), (sc, 9)]).buffer(1.1, cap_style=2))
+        k = np.arange(-40, 40) * 1.6
+        stripes = unary_union([Polygon([(lo + a, 7.0), (lo + a + 0.75, 7.0), (lo + a + 0.75 + 19.0, -12.0),
+                                        (lo + a + 19.0, -12.0)]) for a in k])
+        out["yellow"].append(zone.intersection(stripes))
+    res = {}
+    for k, v in out.items():
+        g = unary_union([q for q in v if not q.is_empty])
+        res[k] = unary_union([_st_poly(F, q.exterior.coords).difference(
+            unary_union([_st_poly(F, h.coords) for h in q.interiors])) for q in to_polys(g)])
+    res["blue"] = unary_union([res["blue"], _heli_blue_from_photo(F, hi)]).difference(
+        unary_union([res["yellow"], res["white"]]).buffer(0.15))
+    return res
+
+
+def helicopter(m, x, y, z, heading, body="#c4232b", trim="#f2f1ec"):
+    """A small single-engine helicopter (an AS350 / EC130 shape): cabin,
+    tail boom with fin, three-blade rotor, skids. heading: radians, east = 0."""
+    d = np.array([math.cos(heading), math.sin(heading)])
+    n = np.array([-d[1], d[0]])
+    body_c, trim_c, glass = (np.array(hexrgb(c), float) for c in (body, trim, "#27323a"))
+    dark = np.array(hexrgb("#2b2d30"), float)
+
+    def at(a, b, c):
+        p = np.array([x, y]) + np.outer(np.atleast_1d(a), d) + np.outer(np.atleast_1d(b), n)
+        return enu_fast(p[:, 0], p[:, 1], z + np.atleast_1d(c))
+    # Cabin: a squashed egg, glazed at the front, white below.
+    v, tri = unit_sphere(14, 8)
+    L, W, H = 2.3, 0.85, 0.82
+    a, b, c = v[:, 0] * L, v[:, 1] * W, v[:, 2] * H
+    a = np.where(a > 0, a, a * 0.9)
+    c = np.where(c < 0, c * 0.8, c)
+    cols = np.where(((a > 0.9) & (c > -0.15))[:, None], glass, np.where((c < -0.35)[:, None], trim_c, body_c))
+    P = at(a, b, c + 1.35)
+    Q = at(a * 1.1, b * 1.1, c * 1.1 + 1.35)
+    nrm = Q - P
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+    m.add(P, nrm, cols, PLAIN, idx=tri)
+    F = Frame(m, (x, y), d)              # s forward, t to the right of the nose
+    # Engine cowling and mast.
+    F.box(-1.2, 0.4, -0.45, 0.45, z + 1.9, z + 2.35, body_c)
+    _cyl(m, x, y, z + 2.35, z + 2.75, 0.12, dark, 8)
+    # Tail boom, tapering, and the fin with its small tailplane.
+    for i in range(6):
+        s_a, s_b = -2.0 - i * 0.85, -2.0 - (i + 1) * 0.85
+        hw = 0.28 - 0.025 * i
+        F.box(s_b, s_a, -hw, hw, z + 1.45 - 0.02 * i, z + 1.45 + 2 * hw - 0.02 * i, body_c if i < 4 else trim_c)
+    F.box(-7.4, -6.9, -0.06, 0.06, z + 1.4, z + 2.85, body_c)
+    F.box(-6.6, -6.1, -1.1, 1.1, z + 1.5, z + 1.58, trim_c)
+    # Rotor: three blades, one along the boom as they park.
+    for k in range(3):
+        ang = heading + math.pi + k * 2 * math.pi / 3
+        e = np.array([math.cos(ang), math.sin(ang)])
+        Fb = Frame(m, (x, y), e)
+        Fb.box(0.15, 5.35, -0.17, 0.17, z + 2.74, z + 2.8, dark, bottom=True)
+    # Skids on struts.
+    for sd in (-1.05, 1.05):
+        F.box(-1.6, 1.9, sd - 0.06, sd + 0.06, z + 0.05, z + 0.17, dark)
+        for sa in (-0.9, 0.9):
+            F.box(sa - 0.07, sa + 0.07, sd * 0.55 - 0.05, sd * 0.55 + 0.05, z + 0.12, z + 0.75, dark)
+            F.box(sa - 0.07, sa + 0.07, min(sd, sd * 0.55) - 0.03, max(sd, sd * 0.55) + 0.03, z + 0.12, z + 0.2, dark)
+
+
+def heliport(gm, m, hi, stats):
+    """The apron, its paint, edges, nets and platforms; the control tower;
+    a parked helicopter."""
+    if HELI is None:
+        return 0
+    F = Frame(m, HELI["F"].O, HELI["F"].u)
+    deck = HELI["deck"]
+    conc = np.array(hexrgb(HELI_PAINT["concrete"]), float)
+    face = np.array(hexrgb(HELI_PAINT["face"]), float)
+    # The concrete, a shade darker on the platforms (newer slabs, photo).
+    n_ = _heli_flat(m, HELI["main"], conc, 0.0, 8.0)
+    for j in HELI["juts"]:
+        n_ += _heli_flat(m, j, conc * 0.94, 0.0, 4.0)
+    paint = heli_markings(F, hi)
+    for k, g in paint.items():
+        n_ += _heli_flat(m, g.intersection(deck.buffer(-0.05)), hexrgb(HELI_PAINT[k]), 0.03, 0.8)
+    # Red and white edge: along the sea edge between the platforms and
+    # round the platforms (the viewer's red and white kerb paint).
+    def kerb_band(A, B, inward, width):
+        A, B = np.asarray(A, float), np.asarray(B, float)
+        L = np.linalg.norm(B - A, axis=1)
+        s0 = np.r_[0.0, np.cumsum(L)[:-1]]
+        s1 = s0 + L
+        Ai, Bi = A + inward * width, B + inward * width
+        za = heli_z(*heli_st(A[:, 0], A[:, 1])) + 0.035
+        zb = heli_z(*heli_st(B[:, 0], B[:, 1])) + 0.035
+        zero, one = np.zeros(len(A)), np.ones(len(A))
+        up3 = np.tile([0.0, 0.0, 1.0], (len(A), 1))
+        _quad_uv(m, enu_fast(A[:, 0], A[:, 1], za), enu_fast(B[:, 0], B[:, 1], zb), enu_fast(Bi[:, 0], Bi[:, 1], zb),
+                 enu_fast(Ai[:, 0], Ai[:, 1], za), np.array(hexrgb("#e9e7e1")), up3,
+                 [np.column_stack([s0, zero]), np.column_stack([s1, zero]), np.column_stack([s1, one]),
+                  np.column_stack([s0, one])], style=KERB_RW)
+        return float(L.sum())
+    a_, b_ = HELI_JUTS[0] + HELI_JUT_HALF, HELI_JUTS[1] - HELI_JUT_HALF
+    ss = np.linspace(a_, b_, int((b_ - a_) / 2.0) + 1)
+    A = np.array([F.xy(s, HELI_EDGE - 0.02) for s in ss])
+    red_m = kerb_band(A[:-1], A[1:], -F.v, 1.2)
+    for j in HELI["juts"]:
+        ring = np.asarray(orient(j, 1.0).exterior.coords)[:, :2]
+        for p, q in zip(ring[:-1], ring[1:]):
+            mid = (p + q) / 2
+            if heli_st(*mid)[1][0] < HELI_EDGE + 0.5:
+                continue                              # the side on the apron
+            e = (q - p) / np.linalg.norm(q - p)
+            k = max(1, int(np.linalg.norm(q - p) / 2.0))
+            pts = p + np.outer(np.linspace(0, 1, k + 1), q - p)
+            red_m += kerb_band(pts[:-1], pts[1:], np.array([-e[1], e[0]]), 0.7)
+    stats["heliport_red_white_m"] = round(red_m)
+    # Sea edge: a concrete face down to the quay, the safety net frames
+    # sloping out over it on ribs, posts under the outer rail.
+    steel = np.array(hexrgb(HELI_PAINT["steel"]), float)
+    for s_a, s_b in zip(ss[:-1], ss[1:]):
+        za, zb = heli_z(s_a, HELI_EDGE), heli_z(s_b, HELI_EDGE)
+        F.quad((s_a, HELI_EDGE, HELI_QUAY - 0.3), (s_b, HELI_EDGE, HELI_QUAY - 0.3), (s_b, HELI_EDGE, float(zb)),
+               (s_a, HELI_EDGE, float(za)), face, (0, 1, 0))
+    for s_a, s_b in zip(ss[:-1], ss[1:]):
+        za, zb = float(heli_z(s_a, HELI_EDGE)) - 0.15, float(heli_z(s_b, HELI_EDGE)) - 0.15
+        P = [F.E(s_a, HELI_EDGE, za), F.E(s_b, HELI_EDGE, zb), F.E(s_b, HELI_EDGE + HELI_NET, zb - 1.0),
+             F.E(s_a, HELI_EDGE + HELI_NET, za - 1.0)]
+        uv = [np.array([[s_a, 0.0]]), np.array([[s_b, 0.0]]), np.array([[s_b, 1.0]]), np.array([[s_a, 1.0]])]
+        for sg in (1.0, -1.0):
+            _quad_uv(m, *P, np.array(hexrgb(HELI_PAINT["net"])), F.want(s_a, HELI_EDGE + 1, za, 0, 0, sg), uv, style=RAIL)
+    rib = np.arange(a_ + 1.1, b_ - 0.5, 2.2)
+    for s in rib:
+        z0 = float(heli_z(s, HELI_EDGE)) - 0.15
+        for k_ in range(4):
+            t0_, t1_ = HELI_EDGE + k_ * HELI_NET / 4, HELI_EDGE + (k_ + 1) * HELI_NET / 4
+            F.box(s - 0.06, s + 0.06, t0_, t1_, z0 - 1.0 * (k_ + 1) / 4 - 0.12, z0 - 1.0 * k_ / 4 + 0.02, steel)
+    zo = heli_z(ss, HELI_EDGE) - 1.15
+    for s_a, s_b, za, zb in zip(ss[:-1], ss[1:], zo[:-1], zo[1:]):
+        F.box(s_a, s_b, HELI_EDGE + HELI_NET - 0.08, HELI_EDGE + HELI_NET + 0.08, float(min(za, zb)) - 0.12,
+              float(max(za, zb)) + 0.04, steel, bottom=True)
+    for s in rib[::2]:
+        x, y = F.xy(s, HELI_EDGE + HELI_NET - 0.1)
+        _cyl(m, x, y, HELI_QUAY - 0.1, float(heli_z(s, HELI_EDGE)) - 1.2, 0.1, steel * 0.8, 6)
+    # The platforms: faces down to the water, on piers.
+    for sc, j in zip(HELI_JUTS, HELI["juts"]):
+        ring = np.asarray(orient(j, 1.0).exterior.coords)[:, :2]
+        for p, q in zip(ring[:-1], ring[1:]):
+            mid = (p + q) / 2
+            if heli_st(*mid)[1][0] < HELI_EDGE + 0.5:
+                continue
+            sp, tp = heli_st(*p)
+            sq, tq = heli_st(*q)
+            zp, zq = float(heli_z(sp, tp)[0]), float(heli_z(sq, tq)[0])
+            nn = np.array([(q - p)[1], -(q - p)[0]])
+            F.quad((float(sp[0]), float(tp[0]), zp - 1.1), (float(sq[0]), float(tq[0]), zq - 1.1),
+                   (float(sq[0]), float(tq[0]), zq), (float(sp[0]), float(tp[0]), zp), face,
+                   (float(nn @ F.u), float(nn @ F.v), 0))
+            # A white railing at the platform's edge.
+            ins = -nn / np.linalg.norm(nn) * 0.15
+            railing(m, np.array([p + ins]), np.array([q + ins]), np.array([zp]), "#f1f0ea", 1.0, zb=np.array([zq]))
+        jz = HELI["jut_z"][0 if sc < 0 else 1]
+        for ps in (-HELI_JUT_HALF + 1.2, 0.0, HELI_JUT_HALF - 1.2):
+            for pt in (HELI_EDGE + HELI_NET + 1.0, (HELI_EDGE + HELI_JUT_END) / 2 + 2.0, HELI_JUT_END - 1.2):
+                x, y = F.xy(sc + ps, pt)
+                _cyl(m, x, y, -1.0, jz - 1.1, 0.45, face * 0.9, 10)
+        # Under the deck slab: its soffit.
+        sl = j.difference(F.poly(sc - 20, sc + 20, HELI_EDGE - 5, HELI_EDGE + HELI_NET))
+        for q in to_polys(sl):
+            tr = triangulate(orient(q, 1.0))
+            if tr is None:
+                continue
+            v, tri = tr
+            P = enu_fast(v[:, 0], v[:, 1], np.full(len(v), jz - 1.1))
+            m.tri(P[tri[:, 0]], P[tri[:, 2]], P[tri[:, 1]], face * 0.7, PLAIN)
+    # Control tower on the terminal's corner: a shaft and a glazed cab.
+    ts, tt = HELI_TOWER
+    zr = float(heli_z(ts, -12.0)) + 4.1               # the terminal's roof (LiDAR, 9.9 m)
+    cream = np.array(hexrgb("#efe4cf"), float)
+    F.drum(ts, tt, zr - 0.5, HELI_TOWER_TOP - 3.0, 1.7, cream, n=8, th0=math.pi / 8, th1=math.pi / 8 + 2 * math.pi)
+    F.drum(ts, tt, HELI_TOWER_TOP - 3.0, HELI_TOWER_TOP - 0.7, 2.2, np.array(hexrgb("#4a5a66"), float), n=8,
+           th0=math.pi / 8, th1=math.pi / 8 + 2 * math.pi, style=FORUM_GLASS)
+    F.drum(ts, tt, HELI_TOWER_TOP - 3.2, HELI_TOWER_TOP - 3.0, 2.35, cream, n=8, th0=math.pi / 8,
+           th1=math.pi / 8 + 2 * math.pi)
+    F.drum(ts, tt, HELI_TOWER_TOP - 0.7, HELI_TOWER_TOP - 0.3, 2.6, cream, n=8, th0=math.pi / 8,
+           th1=math.pi / 8 + 2 * math.pi)
+    F.cone(ts, tt, HELI_TOWER_TOP - 0.3, 2.6, 0.3, cream, n=8, th0=math.pi / 8, th1=math.pi / 8 + 2 * math.pi, kind=PLAIN)
+    x, y = F.xy(ts, tt)
+    _cyl(m, x, y, HELI_TOWER_TOP, HELI_TOWER_TOP + 2.5, 0.05, np.array(hexrgb("#d0d0d0"), float), 6)
+    # Windsock by platform B (orange and white).
+    xw, yw = F.xy(HELI_JUTS[1] + HELI_JUT_HALF - 0.6, HELI_JUT_END - 3.4)
+    jzb = HELI["jut_z"][1]
+    _cyl(m, xw, yw, jzb, jzb + 5.2, 0.06, steel, 6)
+    Fw = Frame(m, (xw, yw), (-F.u[0], -F.u[1]))
+    for i in range(5):
+        r_ = 0.32 - 0.04 * i
+        Fw.drum(0.25 + 0.5 * i, 0.0, jzb + 4.9 - 0.05 * i - r_, jzb + 4.9 - 0.05 * i + r_, r_,
+                np.array(hexrgb("#e2672c" if i % 2 == 0 else "#f2f1ec"), float), n=8)
+    # The helicopter on stand 5, as in the photo.
+    for name, hd in HELI_PARKED:
+        p_ = next(p for p in HELI_PADS if p[0] == name)
+        x, y = F.xy(p_[1], p_[2])
+        ang = math.radians(HELI_AXIS + hd)
+        helicopter(m, x, y, float(heli_z(p_[1], p_[2])) + 0.03, ang)
+    stats["heliport_tris"] = n_
+    stats["heliport_m2"] = round(deck.area)
+    return n_
+
+
+def heli_hangar_doors(m, poly, base, H):
+    """Hangar doors on the apron side: tall panels in a row, a shade darker
+    than the cladding."""
+    if HELI is None:
+        return 0
+    F = HELI["F"]
+    ring = np.asarray(orient(poly, 1.0).exterior.coords)[:, :2]
+    k = 0
+    for p, q in zip(ring[:-1], ring[1:]):
+        e = q - p
+        L = float(np.linalg.norm(e))
+        if L < 8:
+            continue
+        e /= L
+        out = np.array([e[1], -e[0]])
+        if out @ F.v < 0.8:
+            continue
+        Fd = Frame(m, p, e)          # s along the wall, t out of it
+        n = max(1, int(round((L - 1.0) / 4.6)))
+        w = (L - 1.0) / n
+        top = min(base + 6.0, base + H - 1.0)
+        for i in range(n):
+            a = 0.5 + i * w
+            Fd.box(a + 0.06, a + w - 0.06, -0.02, 0.16, base, top, np.array(hexrgb("#b9c0c6"), float))
+            Fd.box(a + 0.3, a + w - 0.3, 0.16, 0.2, base + 3.4, base + 3.9, np.array(hexrgb("#8f989f"), float))
+        Fd.box(0.3, L - 0.3, -0.02, 0.35, top, top + 0.45, np.array(hexrgb("#d6d6d2"), float), bottom=True)
+        k += n
+    return k
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="download the inputs first")
@@ -12692,6 +13184,7 @@ def main():
     global FM, STADE_POLY
     FM = fairmont_setup(feats, mns, mnt_f)
     STADE_POLY = stade_setup(feats)
+    print("heliport apron…", heliport_setup(ways, mnt_f, feats))
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -12737,8 +13230,9 @@ def main():
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     print("Fontvieille podiums…", podium_setup(ways, mnt_f))
-    gm, gz = ground_mesh(podium_ground(mnt_ground), sea)
+    gm, gz = ground_mesh(heliport_ground(podium_ground(mnt_ground)), sea)
     print("podium walls…", podium_walls(gm, bm, stats), "m")
+    print("heliport…", heliport(gm, bm, ortho_hi, stats), "triangles of apron and paint")
     print("tunnel portals…", portals(gm, bm, stats))
     rm = Mesh()
     print("roads…", road_surfaces(rm, ways, pts, gz, bmask, stats), "m")
