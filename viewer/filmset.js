@@ -162,7 +162,46 @@
               material.diffuse = mix(d, rock, steep * (1.0 - 0.7 * veg));
             }
           }
-          if (a255 > 8.5) {
+          if (a255 > 10.5 && a255 < 11.5) {
+            // Place d'Armes and the Rampe Major (style 11): red brick laid
+            // in herringbone, framed by a grid of grey stone bands.
+            // texCoord_1 = metres along / across the square's grid.
+            vec2 g = fsInput.attributes.texCoord_1;
+            float px = length(fwidth(g));
+            vec3 ref = czm_srgbToLinear(vec3(0.643, 0.333, 0.247));
+            vec3 grey = czm_srgbToLinear(vec3(0.62, 0.61, 0.58));
+            float shade = clamp(dot(mapC, vec3(0.3, 0.59, 0.11)) / dot(ref, vec3(0.3, 0.59, 0.11)), 0.45, 1.1);
+            // Herringbone: 22 x 11 cm bricks at 45 degrees.
+            vec2 h = mat2(0.7071, 0.7071, -0.7071, 0.7071) * g / 0.11;
+            vec2 cell = floor(h), f = fract(h);
+            float k = mod(cell.x - cell.y, 4.0);
+            vec2 lp; vec2 id;
+            if (k < 0.5) { lp = vec2(f.x, f.y); id = cell; }
+            else if (k < 1.5) { lp = vec2(1.0 + f.x, f.y); id = cell - vec2(1.0, 0.0); }
+            else if (k < 2.5) { lp = vec2(1.0 + f.y, f.x); id = cell - vec2(0.0, 1.0) + 50.0; }
+            else { lp = vec2(f.y, f.x); id = cell + 50.0; }
+            vec2 aa = max(fwidth(h) * 1.2, vec2(0.001));
+            float face = box(lp, vec2(0.07, 0.1), vec2(1.93, 0.9), aa);
+            float hb = hash12(id);
+            vec3 col = ref * mix(0.8, 1.15, hb);
+            col = mix(col, ref * vec3(0.8, 0.86, 0.95), step(0.9, hash12(id + 3.1)) * 0.5);
+            col = mix(ref * vec3(0.62, 0.62, 0.62), col, face);
+            col = mix(ref * 0.94, col, 1.0 - smoothstep(0.02, 0.06, px));
+            // The grey bands, 45 cm granite in 60 cm stones.
+            vec2 bd = abs(fract(g / 4.7 + 0.5) - 0.5) * 4.7;
+            vec2 baa = vec2(max(px * 1.2, 0.01));
+            float bandA = 1.0 - smoothstep(0.225 - baa.x, 0.225 + baa.x, bd.y);
+            float bandB = 1.0 - smoothstep(0.225 - baa.y, 0.225 + baa.y, bd.x);
+            float band = max(bandA, bandB);
+            float along = bandA > bandB ? g.x : g.y;
+            float sj = abs(fract(along / 0.6 + 0.5) - 0.5) * 0.6;
+            vec3 gcol = grey * mix(0.9, 1.06, hash12(vec2(floor(along / 0.6), floor(g.x / 4.7) + floor(g.y / 4.7) * 7.0)));
+            gcol = mix(gcol * 0.75, gcol, smoothstep(0.004, 0.004 + baa.x, sj) * (1.0 - smoothstep(0.03, 0.1, px)) + smoothstep(0.03, 0.1, px));
+            col = mix(col, gcol, band);
+            col *= mix(0.92, 1.05, vnoise(g * 0.45)) * mix(0.96, 1.03, vnoise(g * 2.2));
+            material.diffuse = col * shade;
+            material.roughness = 0.88;
+          } else if (a255 > 8.5) {
             // Pavements along the circuit (style 9 red brick pavers, 10
             // pale stone slabs): laid brick by brick in world metres, so
             // they stay crisp up close instead of the 37 cm map's blur.
