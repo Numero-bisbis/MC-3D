@@ -30,6 +30,11 @@ in pipeline/facade_colours.json).
              brick pavements, its pale shutters, the ramparts and cannons,
              the gardens' pines and paths (rocher_streets, rocher_ramparts,
              rocher_gardens).
+  Fontvieille The reclaimed district south-west of the Rock: the generic
+             pipeline, plus the Stade Louis II (stade_louis_ii: its
+             LiDAR-shaped pyramid roofs, office façades, raised pitch,
+             stands, yellow away end and nine white arches) and the
+             Chapiteau's white big top on four masts (chapiteau).
 
 Output: viewer/filmset/monte-carlo.glb (y-up glTF in an east-north-up frame
 centred on Casino square, heights in metres above the ellipsoid minus the
@@ -81,9 +86,12 @@ RAW = ROOT / "data" / "raw" / "filmset"
 OUT = ROOT / "viewer" / "filmset"
 
 # District: Monte-Carlo, Casino square, Port Hercule and the Larvotto edge:
-# the whole Grand Prix circuit, plus Le Rocher (Monaco-Ville) to the south.
-# Lambert-93 metres (a square).
-X0, Y0, X1, Y1 = 1055598, 6302050, 1057548, 6304000   # X0: the old west edge minus a multiple of the 3 m ground grid
+# the whole Grand Prix circuit, plus Le Rocher (Monaco-Ville) to the south and
+# Fontvieille (Stade Louis II, the Chapiteau, its port) to the south-west.
+# Lambert-93 metres (a square). X0 and Y0 move by multiples of the 3 m
+# ground grid, or the lap's ground shifts under the road.
+X0, Y0, X1, Y1 = 1055100, 6301552, 1057548, 6304000
+ORTHO_TILES = 3                     # 20 cm photo: ORTHO_TILES x ORTHO_TILES tiles of 3840 px
 RES = 0.5
 ORIGIN = (7.4280, 43.7395)          # Casino square: the model's 0,0
 GEOID_N = 48.9                      # same as viewer/main.js
@@ -97,9 +105,22 @@ WMS = "https://data.geopf.fr/wms-r"
 # ---------------------------------------------------------------- fetch ----
 WD_QUERY = """SELECT ?item ?itemLabel ?coord ?inc ?styleLabel ?floors WHERE {
   SERVICE wikibase:around { ?item wdt:P625 ?coord . bd:serviceParam wikibase:center "Point(7.4282 43.7393)"^^geo:wktLiteral .
-    bd:serviceParam wikibase:radius "1.4" . }
+    bd:serviceParam wikibase:radius "2.4" . }
   OPTIONAL { ?item wdt:P571 ?inc } OPTIONAL { ?item wdt:P149 ?style } OPTIONAL { ?item wdt:P1101 ?floors }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en,fr". } }"""
+
+
+def _get(url, tries=5):
+    """GET with retries: big WMS images are sometimes cut off mid-transfer."""
+    for k in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "MC-3D film set builder"})
+            return urllib.request.urlopen(req, timeout=300).read()
+        except Exception as e:                  # noqa: BLE001 (network)
+            if k == tries - 1:
+                raise
+            print("  retry after", type(e).__name__)
+            time.sleep(5 * (k + 1))
 
 
 def fetch():
@@ -119,16 +140,14 @@ def fetch():
         "bdtopo.json": ("https://data.geopf.fr/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
                         "&TYPENAMES=BDTOPO_V3:batiment&OUTPUTFORMAT=application/json&SRSNAME=EPSG:2154"
                         f"&COUNT=5000&BBOX={b},EPSG:2154"),
-        "osm.xml": ("https://api.openstreetmap.org/api/0.6/map?bbox="
-                    f"{lon0[0]:.4f},{lat0[0]:.4f},{lon1[0]:.4f},{lat1[0]:.4f}"),
         # Dated places around the square (year built, style, floors).
         "wikidata.json": "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(WD_QUERY),
     }
-    # The roofs, at about 20 cm (the photo's own resolution): four tiles of
+    # The roofs, at about 20 cm (the photo's own resolution): tiles of
     # 3840 px, PNG so the WMS's JPEG blocks do not land on the roofs.
-    half = (X1 - X0) / 2
-    for i in (0, 1):
-        for j in (0, 1):
+    half = (X1 - X0) / ORTHO_TILES
+    for i in range(ORTHO_TILES):
+        for j in range(ORTHO_TILES):
             bx, by = X0 + half * i, Y0 + half * j
             urls[f"ortho20_{i}{j}.png"] = (
                 f"{WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ORTHOIMAGERY.ORTHOPHOTOS"
@@ -139,23 +158,41 @@ def fetch():
         if out.exists() and out.stat().st_size > 1000:
             continue
         print("fetch", name)
-        req = urllib.request.Request(url, headers={"User-Agent": "MC-3D film set builder"})
-        out.write_bytes(urllib.request.urlopen(req, timeout=300).read())
+        out.write_bytes(_get(url))
         time.sleep(1.2)
+    # OpenStreetMap: the API caps one /map call at 50 000 nodes, so the
+    # district comes in four pieces, merged without duplicates.
+    out = RAW / "osm.xml"
+    if not (out.exists() and out.stat().st_size > 1000):
+        merged, seen = ET.Element("osm", version="0.6"), set()
+        lons, lats = np.linspace(lon0[0], lon1[0], 3), np.linspace(lat0[0], lat1[0], 3)
+        for i in range(2):
+            for j in range(2):
+                url = ("https://api.openstreetmap.org/api/0.6/map?bbox="
+                       f"{lons[i]:.4f},{lats[j]:.4f},{lons[i + 1]:.4f},{lats[j + 1]:.4f}")
+                print("fetch osm.xml", i, j)
+                root = ET.fromstring(_get(url))
+                for el in root:
+                    if el.tag in ("node", "way", "relation") and (el.tag, el.get("id")) not in seen:
+                        seen.add((el.tag, el.get("id")))
+                        merged.append(el)
+                time.sleep(1.2)
+        # Nodes first, then ways, then relations, as the API writes them.
+        merged[:] = sorted(merged, key=lambda e: ("node", "way", "relation").index(e.tag))
+        ET.ElementTree(merged).write(out, encoding="utf-8", xml_declaration=True)
 
 
 def load_ortho_hi():
-    """The four 20 cm photo tiles as one image (north up), or None."""
-    tiles = [[RAW / f"ortho20_{i}{j}.png" for j in (0, 1)] for i in (0, 1)]
-    if not all(t.exists() for row in tiles for t in row):
-        tiles = [[RAW / f"ortho20_{i}{j}.jpg" for j in (0, 1)] for i in (0, 1)]
+    """The 20 cm photo tiles as one image (north up), or None."""
+    N = ORTHO_TILES
+    tiles = [[RAW / f"ortho20_{i}{j}.png" for j in range(N)] for i in range(N)]
     if not all(t.exists() for row in tiles for t in row):
         return None
     k = Image.open(tiles[0][0]).size[0]
-    im = Image.new("RGB", (2 * k, 2 * k))
-    for i in (0, 1):
-        for j in (0, 1):
-            im.paste(Image.open(tiles[i][j]).convert("RGB"), (k * i, k * (1 - j)))
+    im = Image.new("RGB", (N * k, N * k))
+    for i in range(N):
+        for j in range(N):
+            im.paste(Image.open(tiles[i][j]).convert("RGB"), (k * i, k * (N - 1 - j)))
     return im
 
 
@@ -856,7 +893,8 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         if not closed:
             continue
         k = t.get("leisure") or t.get("landuse") or t.get("natural")
-        if k in GREEN and not (k == "pitch" and PECHE_DECK.intersects(Point(pts[0]))):
+        if k in GREEN and t.get("name") not in PAVED_GARDENS and not (
+                k == "pitch" and PECHE_DECK.intersects(Point(pts[0]))):
             poly(pts, GREEN[k])
     # Along the circuit, green comes only from mapped gardens: the photo's
     # green beside the road is tree shade, awnings and planters, and painted
@@ -1829,6 +1867,9 @@ def planar_roof(S, part):
     return out, r0, c0
 
 
+LIDAR_EDGE = []      # lidar_roof's rings: (x, y, roof height at the outline), for walls built to meet it
+
+
 def lidar_roof(m, part, z_eave, z_cap, mns, photo, wall_col=None):
     """A roof shaped like the real one: the LiDAR surface (50 cm, lightly
     smoothed) draped inside the outline on a 1 m grid, from the eaves (the
@@ -1844,6 +1885,7 @@ def lidar_roof(m, part, z_eave, z_cap, mns, photo, wall_col=None):
         _MNS_S.clear()
         _MNS_S[key] = ndimage.gaussian_filter(fill, 0.8)
     S = _MNS_S[key]
+    LIDAR_EDGE.clear()
     inner = part.buffer(-0.6, join_style=2)
     if inner.is_empty:
         return False
@@ -1875,6 +1917,7 @@ def lidar_roof(m, part, z_eave, z_cap, mns, photo, wall_col=None):
         # down to the walls' top.
         _, nn = kd.query(np.column_stack([bx_, by_]))
         ze = zin[nn]
+        LIDAR_EDGE.append((bx_, by_, ze))
         verts.extend(zip(bx_, by_))
         vz.extend(ze.tolist())
         segs.extend([[b + i, b + (i + 1) % n_] for i in range(n_)])
@@ -3340,6 +3383,15 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not rest:
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
+            if key in (STADE, STADE_TRIB) and STADE_POLY is not None:
+                # Stade Louis II: built whole from both outlines, once.
+                if not STADE_DONE:
+                    STADE_DONE.append(1)
+                    footprint.append(stade_louis_ii(m, mns, mntR, photo, STADE_POLY, stats))
+                continue
+            if key == CHAPITEAU:
+                footprint.append(chapiteau(m, mntR, stats))
+                continue
             if key in (PALACE, MUSEE, CATH, FORT, PRISON):
                 # Le Rocher's landmarks are built piece by piece.
                 if key == PRISON:
@@ -7248,6 +7300,8 @@ def _outline_boats(pts, HR, moor_d, depth=0):
     near = min(dl(mid + ax * L / 2), dl(mid - ax * L / 2), dl(mid))
     if L < 14 and (L < 7 or near > 6):
         return                             # under way in the fairway, or a glint
+    if near > 12 and FONTVIEILLE_PORT.contains(Point(*mid)):
+        return                             # Port de Fontvieille: wakes stirred white, mid-basin
     if dl(mid + ax * L / 2) < dl(mid - ax * L / 2):
         ax = -ax                           # bow away from the quay
     yield mid - ax * L / 2, ax, L, float(min(W, L / 2.8)), "photo outline"
@@ -11635,7 +11689,659 @@ def fairmont_paint(arr, px, ways, ortho_hi):
     return arr
 
 
-# ------------------------------------------------------------------- main ----
+# ------------------------------------------------------------------- main ----# ------------------------------------------------------------ Fontvieille ----
+# Stade Louis II (1985): a pitch raised 13 m on a concrete platform over car
+# parks, a sports hall and pools; office blocks all round it under big
+# terracotta pyramid roofs (cream frames, ochre spandrels, ribbon windows);
+# the uncovered away end with its yellow seats and the nine white arches.
+# One BD TOPO outline for the whole, plus the away end as a "Tribune".
+# Frame (from the LiDAR): s along the pitch's long axis toward the north-east
+# end, t across it toward the south-east stand.
+STADE = "BATIMENT0000000074079083"
+STADE_POLY = None
+STADE_DONE = []
+STADE_TRIB = "BATIMENT0000000074079011"
+STADE_O = (1055655.0, 6302001.5)
+STADE_U = (112.0, 126.0)
+STADE_PITCH_Z = 13.25                  # m NGF, the platform (LiDAR)
+STADE_NW, STADE_SE, STADE_NE = -38.0, 42.0, 82.0   # the roofed stands' front edges (t, t, s)
+STADE_SW = -70.0                       # where the roofed corners of the away end begin (s)
+STADE_C = (-29.5, 0.0)                 # centre of the away end's curves
+STADE_AWAY = (46.5, 67.0)              # radii: its front row, its back
+STADE_AWAY_T = 28.5                    # half its width, m
+STADE_ARCH_R = 64.0                    # radius of the line of arches
+STADE_ARCH_TOP = 44.0                  # crowns (LiDAR)
+STADE_ARCHES = 9
+STADE_ARCH_SPAN = 6.4                  # centre to centre (LiDAR crowns)
+STADE_PITCH = (-43.0, 62.0, -35.0, 33.0)   # 105 x 68 m (s0, s1, t0, t1), from the 20 cm photo's grass
+STADE_WALL = "#d7ad74"                 # ochre spandrels (Mapillary 2019, 2021)
+STADE_FRAME = "#eadfc9"                # cream concrete frame
+STADE_SEAT = "#b3262c"
+STADE_AWAY_SEAT = "#e2b83a"
+
+
+def stade_setup(feats):
+    g = [shapely.force_2d(shape(f["geometry"])).buffer(0.05) for f in feats
+         if f["properties"].get("cleabs") in (STADE, STADE_TRIB)]
+    if not g:
+        return None
+    out = unary_union(g).buffer(-0.05)
+    out = max(to_polys(out), key=lambda q: q.area)
+    return orient(Polygon(out.exterior), 1.0)
+
+
+def stade_open(F):
+    """The open part, in plan: the bowl and the away end."""
+    c_s, c_t = STADE_C
+    R = STADE_AWAY[1]
+    tt = np.linspace(STADE_AWAY_T, -STADE_AWAY_T, 25)
+    arc = [(c_s - math.sqrt(R * R - t * t), t) for t in tt]
+    pts = [(STADE_SW, STADE_NW), (STADE_NE, STADE_NW), (STADE_NE, STADE_SE), (STADE_SW, STADE_SE),
+           (STADE_SW, STADE_AWAY_T)] + arc + [(STADE_SW, -STADE_AWAY_T)]
+    return orient(Polygon([F.xy(a, b) for a, b in pts]), 1.0)
+
+
+def _strip_wall(m, xs, ys, zb, zt, col, kind=PLAIN, style=None, fh=3.2, bay=3.6, out=None):
+    """Walls along a polyline whose foot (zb) and top (zt) vary point by
+    point, facing out (a (2,) plan direction test: the side away from out)."""
+    xs, ys, zb, zt = (np.asarray(a, float) for a in (xs, ys, zb, zt))
+    k = len(xs) - 1
+    if k < 1:
+        return
+    a = np.column_stack([xs[:-1], ys[:-1]])
+    b = np.column_stack([xs[1:], ys[1:]])
+    L = np.linalg.norm(b - a, axis=1)
+    okk = (L > 0.05) & (np.maximum(zt[:-1], zt[1:]) > np.minimum(zb[:-1], zb[1:]) + 0.05)
+    s0 = np.r_[0.0, np.cumsum(L)[:-1]]
+    P = enu_fast(np.column_stack([a[:, 0], b[:, 0], b[:, 0], a[:, 0]]).ravel(),
+                 np.column_stack([a[:, 1], b[:, 1], b[:, 1], a[:, 1]]).ravel(),
+                 np.column_stack([zb[:-1], zb[1:], zt[1:], zt[:-1]]).ravel()).reshape(k, 4, 3)[okk]
+    d = (b - a)[okk] / L[okk, None]
+    nplan = np.column_stack([d[:, 1], -d[:, 0]])            # right of the direction of travel
+    if out is not None:
+        mid = (a[okk] + b[okk]) / 2
+        flip = ((mid - out) * nplan).sum(1) < 0
+        nplan[flip] *= -1
+    want = enu_fast(((a[okk] + b[okk]) / 2)[:, 0] + nplan[:, 0], ((a[okk] + b[okk]) / 2)[:, 1] + nplan[:, 1],
+                    np.zeros(okk.sum())) - enu_fast(((a[okk] + b[okk]) / 2)[:, 0], ((a[okk] + b[okk]) / 2)[:, 1],
+                                                    np.zeros(okk.sum()))
+    base = zb[:-1][okk]
+    u0, u1 = s0[okk] / bay, (s0[okk] + L[okk]) / bay
+    uv = [np.column_stack([u0, (zb[:-1][okk] - base) / fh]), np.column_stack([u1, (zb[1:][okk] - base) / fh]),
+          np.column_stack([u1, (zt[1:][okk] - base) / fh]), np.column_stack([u0, (zt[:-1][okk] - base) / fh])]
+    _quad_uv(m, P[:, 0], P[:, 1], P[:, 2], P[:, 3], np.asarray(col, float), want, uv, kind=kind, style=style)
+
+
+def stade_louis_ii(m, mns, mntR, photo, outline, stats):
+    F = Frame(m, STADE_O, STADE_U)
+    zp = STADE_PITCH_Z
+    wall = np.array(hexrgb(STADE_WALL), float)
+    frame_c = np.array(hexrgb(STADE_FRAME), float)
+    seat = np.array(hexrgb(STADE_SEAT), float)
+    white = np.array(hexrgb("#eeeae2"), float)
+    concrete = np.array(hexrgb("#b9b2a6"), float)
+    dark = np.array(hexrgb("#4b4640"), float)
+    open_ = stade_open(F)
+    roof = outline.difference(open_.buffer(0.01, join_style=2))
+    roof_parts = [orient(q, 1.0) for q in to_polys(roof) if q.area > 40]
+    ctr = np.array(F.xy(0.0, 0.0))
+
+    # --- the roofs: rows of terracotta pyramids (the 20 cm photo: five or
+    # six to a long stand, valleys between), each hipped from one eave up
+    # to the LiDAR's top for that piece, painted with the photo; the outer
+    # walls built up to meet the eaves.
+    S = Raster(ndimage.median_filter(np.nan_to_num(mns, nan=0.0), size=5))
+    cuts_s = [-300.0, STADE_SW, -40.0, -10.0, 20.0, 51.0, STADE_NE, 300.0]
+    regions = []
+    for t0, t1 in ((-300.0, STADE_NW), (STADE_SE, 300.0)):
+        regions += [F.poly(a_, b_, t0, t1) for a_, b_ in zip(cuts_s[:-1], cuts_s[1:])]
+    regions += [F.poly(STADE_NE, 300.0, STADE_NW, 2.0), F.poly(STADE_NE, 300.0, 2.0, STADE_SE),
+                F.poly(-300.0, STADE_SW, STADE_NW, 0.0), F.poly(-300.0, STADE_SW, 0.0, STADE_SE)]
+    pieces = []
+    for rg in regions:
+        for part in roof_parts:
+            for q in to_polys(part.intersection(rg)):
+                if q.area > 30:
+                    pieces.append(orient(q.simplify(0.3), 1.0))
+    edges, eaves = [], []
+    slope = math.tan(math.radians(17))
+    for q in pieces:
+        x0, y0, x1, y1 = q.bounds
+        gx, gy = np.meshgrid(np.arange(x0, x1, 1.0), np.arange(y0, y1, 1.0))
+        ins = contains_xy(q.buffer(-1.0), gx, gy)
+        zi = S.sample(gx[ins], gy[ins]) if ins.any() else np.array([np.nan])
+        ring = q.buffer(-1.2).exterior if isinstance(q.buffer(-1.2), Polygon) else q.exterior
+        rp = shapely.line_interpolate_point(ring, np.linspace(0, 1, 80), normalized=True)
+        ze = S.sample(shapely.get_x(rp), shapely.get_y(rp))
+        eave = float(np.nanpercentile(ze, 20)) if np.isfinite(ze).any() else 31.0
+        top = float(np.nanpercentile(zi, 97)) if np.isfinite(zi).any() else eave + 4
+        eave = min(max(eave, zp + 4.0), 40.0)
+        top = max(top, eave + 1.0)
+        eaves.append(eave)
+        zg = mntR.sample(*np.asarray(q.exterior.coords)[:, :2].T)
+        base_ = float(np.nanmin(zg)) if np.isfinite(zg).any() else 5.0
+        rs = skeleton_roof(q, eave, slope, (top - eave) / slope, dt=0.5)
+        if rs is None:
+            add_roof(m, q, eave, hexrgb("#c8754a"), False)
+        else:
+            v, zz, tri = rs
+            P = enu_fast(v[:, 0], v[:, 1], zz)
+            if photo is not None:
+                lx, ly = photo["lean"]
+                ph = dict(photo, shift=((eave - base_) * lx, (eave - base_) * ly))
+                dz = zz - eave
+                uv = np.column_stack([v[:, 0] - X0 + dz * lx, Y1 - v[:, 1] - dz * ly])
+                photo["mesh"].tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], [255, 255, 255], ROOF_FLAT,
+                                  uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
+                photo["uvmap"].append((len(photo["mesh"].uv) - 1, len(photo["polys"])))
+                photo["polys"].append((q, ph["shift"], eave))
+                photo["tiled"].append(True)
+            else:
+                m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], hexrgb("#c8754a"), ROOF_TILE)
+        rl = q.exterior
+        n_ = max(4, int(rl.length / 1.0))
+        rq = shapely.line_interpolate_point(rl, np.linspace(0, rl.length, n_, endpoint=False))
+        edges.append((shapely.get_x(rq), shapely.get_y(rq), np.full(n_, eave)))
+    if not edges:
+        return outline
+    outer = outline.exterior
+    open_b = open_.exterior
+    n_out = 0
+    for bx, by, ze in edges:
+        bx, by, ze = np.r_[bx, bx[:1]], np.r_[by, by[:1]], np.r_[ze, ze[:1]]
+        mid = shapely.points((bx[:-1] + bx[1:]) / 2, (by[:-1] + by[1:]) / 2)
+        on_out = shapely.distance(outer, mid) < 0.6
+        on_open = shapely.distance(open_b, mid) < 0.6
+        # Runs of segments on the outline: office façades from the street.
+        for flag, kind_ in ((on_out, "out"), (on_open & ~on_out, "in"), (~on_open & ~on_out, "cut")):
+            idx = np.nonzero(flag)[0]
+            if not len(idx):
+                continue
+            runs = np.split(idx, np.nonzero(np.diff(idx) > 1)[0] + 1)
+            for r_ in runs:
+                j = np.r_[r_, r_[-1] + 1]
+                xs, ys, zt = bx[j], by[j], ze[j]
+                if kind_ == "cut":
+                    # Between two roof pieces: a gable wall up to this one's
+                    # eave (hidden where the neighbour is as high).
+                    for sg_ in (1, -1):
+                        _strip_wall(m, xs[::sg_], ys[::sg_], np.full(len(xs), 5.0), zt[::sg_], frame_c * 0.95)
+                    continue
+                if kind_ == "out":
+                    zb = mntR.sample(xs, ys)
+                    zb = np.where(np.isfinite(zb), zb, 5.0) - 0.3
+                    # Ribbon-window offices up to a cream cornice; the ground floor arcade is a darker band.
+                    _strip_wall(m, xs, ys, zb, np.maximum(zt - 1.2, zb + 3), wall, WALL_NEW, S_RIBBON, 3.25, 3.6, out=ctr)
+                    _strip_wall(m, xs, ys, np.maximum(zt - 1.2, zb + 3), zt, frame_c, out=ctr)
+                    n_out += len(r_)
+                else:
+                    # Faces toward the pitch: a cream fascia under the roof
+                    # edge over the three roofed stands (their seating is
+                    # built by stade_stands), pale concrete elsewhere.
+                    s_, t_ = F_st(F, xs, ys)
+                    main = bool(np.all((np.abs(t_ - STADE_NW) < 0.8) | (np.abs(t_ - STADE_SE) < 0.8)
+                                       | (np.abs(s_ - STADE_NE) < 0.8)))
+                    zb = (zt - 2.6) if main else np.full(len(xs), zp)
+                    away = 2 * np.array([xs.mean(), ys.mean()]) - ctr      # face the pitch
+                    _strip_wall(m, xs, ys, zb, zt, frame_c if main else concrete, out=away)
+    stats["stade_wall_m"] = n_out
+    stade_floor(F, m, zp)
+    stade_stands(F, m, mns, seat, white, dark, frame_c)
+    stade_away(F, m, zp, white)
+    stats["landmarks"] = stats.get("landmarks", 0) + 1
+    stats["stade_louis_ii"] = 1
+    return outline
+
+
+def F_st(F, x, y):
+    d = np.column_stack([np.asarray(x) - F.O[0], np.asarray(y) - F.O[1]])
+    return d @ F.u, d @ F.v
+
+
+def stade_floor(F, m, zp):
+    """The platform: grass in mown stripes, the white lines, red running
+    track round the away curve and along the sides, grey aprons; goals."""
+    s0, s1, t0, t1 = STADE_PITCH
+    c_s, c_t = STADE_C
+    grass = [np.array(hexrgb(c), float) for c in ("#3f7a34", "#4a8a3c")]
+    red = np.array(hexrgb("#b0473a"), float)
+    grey = np.array(hexrgb("#a9a59c"), float)
+    white = np.array(hexrgb("#f1f0ea"), float)
+    open_ = stade_open(F)
+    st = 1.0
+    S_, T_ = np.meshgrid(np.arange(-100.0, 84.0, st), np.arange(STADE_NW - 1, STADE_SE + 1, st))
+    S_, T_ = S_.ravel(), T_.ravel()
+    sc, tc = S_ + st / 2, T_ + st / 2
+    xy = F.O[None] + sc[:, None] * F.u[None] + tc[:, None] * F.v[None]
+    ins = contains_xy(open_.buffer(0.6), xy[:, 0], xy[:, 1])
+    S_, T_, sc, tc = S_[ins], T_[ins], sc[ins], tc[ins]
+    R = np.hypot(sc - c_s, tc - c_t)
+    col = np.tile(grey, (len(sc), 1))
+    pitch = (sc >= s0 - 1) & (sc < s1 + 1) & (tc >= t0 - 1) & (tc < t1 + 1)
+    stripe = (np.floor((sc - s0) / 5.25).astype(int) % 2)
+    col[pitch] = np.where(stripe[pitch, None] == 0, grass[0], grass[1])
+    # The track: 8 lanes round the away curve, on to the sides.
+    track = ((sc < s0 - 1) & (R > 37.0) & (R < 46.5)) | (~pitch & ((tc < t0 - 1) | (tc >= t1 + 1)) & (sc < STADE_NE - 14))
+    col[track] = red
+    # The long-jump runway on the north-east apron.
+    runway = (sc > s1 + 3) & (np.abs(tc - (-14.0)) < 0.7 + 0.6) & (sc < STADE_NE - 1)
+    col[runway] = red * 0.95
+    k = len(sc)
+    zf = zp + 0.06
+    P0, P1, P2, P3 = F.E(S_, T_, zf), F.E(S_ + st, T_, zf), F.E(S_ + st, T_ + st, zf), F.E(S_, T_ + st, zf)
+    up = F.want(0.0, 0.0, zp, 0, 0, 1)
+    _quad(m, P0, P1, P2, P3, col, np.tile(up, (k, 1)))
+
+    # White lines (12 cm), 2 cm above the grass.
+    zl = zp + 0.08
+    w = 0.12
+
+    def line(a, b):
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        d = b - a
+        L = np.hypot(*d)
+        if L < 1e-6:
+            return
+        n_ = np.array([-d[1], d[0]]) / L * w / 2
+        F.quad((*(a - n_), zl), (*(b - n_), zl), (*(b + n_), zl), (*(a + n_), zl), white, (0, 0, 1))
+
+    def rect(a0, a1, b0, b1):
+        for p, q in (((a0, b0), (a1, b0)), ((a1, b0), (a1, b1)), ((a1, b1), (a0, b1)), ((a0, b1), (a0, b0))):
+            line(p, q)
+
+    def arc(cs, ct, r, th0, th1, n=24):
+        th = np.linspace(th0, th1, n + 1)
+        for i in range(n):
+            line((cs + r * math.cos(th[i]), ct + r * math.sin(th[i])), (cs + r * math.cos(th[i + 1]), ct + r * math.sin(th[i + 1])))
+
+    sm, tm = (s0 + s1) / 2, (t0 + t1) / 2
+    rect(s0, s1, t0, t1)
+    line((sm, t0), (sm, t1))
+    arc(sm, tm, 9.15, 0, 2 * math.pi, 32)
+    for end, sg in ((s0, 1), (s1, -1)):
+        rect(end, end + sg * 16.5, tm - 20.16, tm + 20.16)
+        rect(end, end + sg * 5.5, tm - 9.16, tm + 9.16)
+        a0 = math.acos(5.5 / 9.15)           # the penalty arc outside the box
+        arc(end + sg * 11.0, tm, 9.15, (-a0 if sg > 0 else math.pi - a0), (a0 if sg > 0 else math.pi + a0), 10)
+        # The goal: posts, crossbar and a grey net box behind.
+        for dt in (-3.66, 3.66):
+            F.box(end - 0.06, end + 0.06, tm + dt - 0.06, tm + dt + 0.06, zp, zp + 2.44, white)
+        F.box(end - 0.06, end + 0.06, tm - 3.72, tm + 3.72, zp + 2.38, zp + 2.5, white)
+        F.box(end - sg * 2.0, end - sg * 0.08, tm - 3.66, tm + 3.66, zp + 0.05, zp + 2.0,
+              np.array(hexrgb("#d9d9d4"), float), top=True, sides="tT" + ("s" if sg > 0 else "S"))
+    # Lane lines round the curve.
+    for k_ in range(9):
+        r_ = 37.0 + k_ * (46.5 - 37.0) / 8
+        th_ = math.asin(min(1.0, (t1 + 1) / r_))
+        arc(c_s, c_t, r_, math.pi - th_, math.pi + th_, 20)
+
+
+def stade_stands(F, m, mns, seat, white, dark, frame_c):
+    """Under the three roofs: raked rows of red seats (white every few rows),
+    a dark back wall and a grey soffit up to the cream fascia."""
+    zp = STADE_PITCH_Z
+    S = _MNS_S.get(id(mns))
+    if S is None:
+        return
+    soffit_c = np.array(hexrgb("#8f8a82"), float)
+    stair = np.array(hexrgb("#9a948a"), float)
+    # (front line: along a, at c; out: +1/-1 = which way the stand climbs;
+    # axis "t": the row runs along s at t = c; "s": runs along t at s = c).
+    sides = [("t", STADE_NW, -1, STADE_SW + 2, STADE_NE - 2, 22.0),
+             ("t", STADE_SE, +1, STADE_SW + 2, STADE_NE - 2, 22.0),
+             ("s", STADE_NE, +1, STADE_NW + 2, STADE_SE - 2, 16.0)]
+    for ax, c, out, a0, a1, depth in sides:
+        def P(a, d, z):
+            return (a, c + out * d, z) if ax == "t" else (c + out * d, a, z)
+
+        def n_(dd, dz):
+            return (0, out * dd, dz) if ax == "t" else (out * dd, 0, dz)
+        # Roof underside height along the back of the stand.
+        aa = np.linspace(a0, a1, 40)
+        pts = [F.xy(*P(a, depth, 0)[:2]) for a in aa] + [F.xy(*P(a, 0.5, 0)[:2]) for a in aa]
+        zz = np.array([S[int((Y1 - y) / RES), int((x - X0) / RES)] for x, y in pts])
+        z_back = float(np.percentile(zz[:40], 5)) - 1.2
+        z_front = float(np.percentile(zz[40:], 5)) - 2.6
+        rd, rise = 0.8, 0.42
+        nrow = int(depth / rd)
+        z0 = zp + 1.4
+        d_top = rd
+        # Front wall (the barrier) from the pitch to the first row.
+        F.quad(P(a0, 0, zp), P(a1, 0, zp), P(a1, 0, z0), P(a0, 0, z0), frame_c, n_(-1, 0))
+        z_top = z0
+        for k in range(nrow):
+            z = z0 + k * rise
+            if z + rise > z_back - 2.5:
+                break
+            d0, d1 = k * rd, (k + 1) * rd
+            col = white if k % 9 == 8 else seat * (0.96 + 0.04 * (k % 2))
+            F.quad(P(a0, d0, z), P(a1, d0, z), P(a1, d1, z), P(a0, d1, z), col, n_(0, 1))
+            F.quad(P(a0, d1, z), P(a1, d1, z), P(a1, d1, z + rise), P(a0, d1, z + rise), col * 0.78, n_(-1, 0))
+            z_top = z + rise
+            d_top = d1
+        # Stairways every 14 m: grey strips over the seats.
+        for a in np.arange(a0 + 7.0, a1 - 3.0, 14.0):
+            F.quad(P(a - 0.6, 0, z0 + 0.02), P(a + 0.6, 0, z0 + 0.02), P(a + 0.6, d_top, z_top + 0.02),
+                   P(a - 0.6, d_top, z_top + 0.02), stair, n_(-0.3, 1))
+        # Back wall up to the soffit, the soffit out to the fascia.
+        F.quad(P(a0, d_top, z_top), P(a1, d_top, z_top), P(a1, d_top, z_back), P(a0, d_top, z_back), dark, n_(-1, 0))
+        F.quad(P(a0, d_top, z_back), P(a1, d_top, z_back), P(a1, 0.0, z_front), P(a0, 0.0, z_front), soffit_c,
+               n_(0, -1))
+        # The stand's two ends.
+        for a, sg in ((a0, -1), (a1, 1)):
+            q = [P(a, 0, zp), P(a, d_top, zp), P(a, d_top, z_back), P(a, 0, z_front)]
+            nn = (sg, 0, 0) if ax == "t" else (0, sg, 0)
+            F.quad(*q, np.array(hexrgb("#cfc6b6"), float), nn)
+
+
+def stade_away(F, m, zp, white):
+    """The uncovered away end: yellow rows on the curve, a white parapet
+    at the back, and the nine white arches standing over it."""
+    c_s, c_t = STADE_C
+    r0, r1 = STADE_AWAY
+    yel = np.array(hexrgb(STADE_AWAY_SEAT), float)
+    grey = np.array(hexrgb("#b5ada0"), float)
+    rd, rise = 0.82, 0.27
+    T = STADE_AWAY_T
+
+    def ring(r, z, n=48):
+        th = math.asin(min(1.0, T / r))
+        a = np.linspace(math.pi - th, math.pi + th, n + 1)
+        return [(c_s + r * math.cos(x), c_t + r * math.sin(x), z) for x in a], a
+
+    nrow = int((r1 - 0.8 - r0) / rd)
+    z0 = zp + 1.1
+    p, a = ring(r0, zp)
+    q, _ = ring(r0, z0)
+    for i in range(48):
+        xm = (a[i] + a[i + 1]) / 2
+        F.quad(p[i], p[i + 1], q[i + 1], q[i], grey, (-math.cos(xm), -math.sin(xm), 0))
+    zt = z0
+    for k in range(nrow):
+        ra, rb = r0 + k * rd, r0 + (k + 1) * rd
+        z = z0 + k * rise
+        A, a = ring(ra, z)
+        B, _ = ring(rb, z)
+        C, _ = ring(rb, z + rise)
+        col = grey if k % 10 == 9 else yel * (0.97 + 0.03 * (k % 2))
+        for i in range(48):
+            xm = (a[i] + a[i + 1]) / 2
+            # Aisles: every 8th sector is grey steps.
+            cc = grey if i % 8 == 4 else col
+            F.quad(A[i], A[i + 1], B[i + 1], B[i], cc, (0, 0, 1))
+            F.quad(B[i], B[i + 1], C[i + 1], C[i], cc * 0.8, (-math.cos(xm), -math.sin(xm), 0))
+        zt = z + rise
+        r_top = rb
+    # Back terrace and parapet.
+    A, a = ring(r_top, zt)
+    B, _ = ring(r1 + 0.6, zt)
+    for i in range(48):
+        F.quad(A[i], A[i + 1], B[i + 1], B[i], grey, (0, 0, 1))
+    Pp, _ = ring(r1 + 0.6, zt + 1.1)
+    for i in range(48):
+        xm = (a[i] + a[i + 1]) / 2
+        F.quad(B[i], B[i + 1], Pp[i + 1], Pp[i], white, (-math.cos(xm), -math.sin(xm), 0))
+    # The arches: inverted U frames side by side on a curve, crowns at 44 m.
+    R = STADE_ARCH_R
+    z_base = z0 + (R - r0) / rd * rise
+    half = STADE_ARCHES * STADE_ARCH_SPAN / 2
+    ro = STADE_ARCH_SPAN / 2                 # outer radius: neighbours touch at the piers
+    ri = ro - 0.8
+    zs = STADE_ARCH_TOP - ro
+    dep = 1.0
+    for k in range(STADE_ARCHES):
+        tl, tr = -half + k * STADE_ARCH_SPAN, -half + (k + 1) * STADE_ARCH_SPAN
+        sl = c_s - math.sqrt(R * R - tl * tl)
+        sr = c_s - math.sqrt(R * R - tr * tr)
+        p0, p1 = np.array([sl, tl]), np.array([sr, tr])
+        d = (p1 - p0) / np.linalg.norm(p1 - p0)
+        nrm = np.array([-d[1], d[0]])          # toward the pitch (+s side)
+        if nrm[0] < 0:
+            nrm = -nrm
+        mid = (p0 + p1) / 2
+        span = np.linalg.norm(p1 - p0)
+        k_ = span / STADE_ARCH_SPAN
+        roo, rii = ro * k_, ri * k_
+
+        def at(x, z, off):
+            pp = mid + d * x + nrm * off
+            return (pp[0], pp[1], z)
+        # Legs.
+        for x0_, x1_ in ((-roo, -rii), (rii, roo)):
+            for off, sg in ((dep / 2, 1), (-dep / 2, -1)):
+                F.quad(at(x0_, z_base, off), at(x1_, z_base, off), at(x1_, zs, off), at(x0_, zs, off), white,
+                       (nrm[0] * sg, nrm[1] * sg, 0))
+            for xx, sg in ((x0_, -1), (x1_, 1)):
+                F.quad(at(xx, z_base, dep / 2), at(xx, z_base, -dep / 2), at(xx, zs, -dep / 2), at(xx, zs, dep / 2),
+                       white * 0.92, (d[0] * sg, d[1] * sg, 0))
+        # The round head.
+        th = np.linspace(0, math.pi, 17)
+        for i in range(16):
+            for off, sg in ((dep / 2, 1), (-dep / 2, -1)):
+                F.quad(at(rii * math.cos(th[i]), zs + rii * math.sin(th[i]), off),
+                       at(rii * math.cos(th[i + 1]), zs + rii * math.sin(th[i + 1]), off),
+                       at(roo * math.cos(th[i + 1]), zs + roo * math.sin(th[i + 1]), off),
+                       at(roo * math.cos(th[i]), zs + roo * math.sin(th[i]), off), white,
+                       (nrm[0] * sg, nrm[1] * sg, 0))
+            xm = (th[i] + th[i + 1]) / 2
+            for rr, sg, sh in ((roo, 1, 1.02), (rii, -1, 0.85)):
+                F.quad(at(rr * math.cos(th[i]), zs + rr * math.sin(th[i]), dep / 2),
+                       at(rr * math.cos(th[i + 1]), zs + rr * math.sin(th[i + 1]), dep / 2),
+                       at(rr * math.cos(th[i + 1]), zs + rr * math.sin(th[i + 1]), -dep / 2),
+                       at(rr * math.cos(th[i]), zs + rr * math.sin(th[i]), -dep / 2), white * sh,
+                       (d[0] * math.cos(xm) * sg, d[1] * math.cos(xm) * sg, math.sin(xm) * sg))
+
+
+# The Chapiteau de Fontvieille: the permanent big top of the circus
+# festival, a white membrane on four masts (20 cm photo: peaks north,
+# east, south and west of the centre; LiDAR: 23 m at the masts, 21 m in the
+# middle, ~11 m at the rim), a 60 m drum of side curtain; two small white
+# pagoda tents by its south-west door.
+CHAPITEAU = "BATIMENT0000000074079045"
+FONTVIEILLE_PORT = box(1055850, 6302150, 1056160, 6302420)   # its basin (Lambert-93)
+CHAP_C = (1055930.6, 6301882.4)
+CHAP_R = 30.0
+CHAP_EAVE = 10.8
+CHAP_MAST_R = 16.0
+CHAP_PEAK = 23.2
+CHAP_SMALL = [((-37.0, -19.0), 9.0, 16.0), ((-27.0, -34.0), 9.5, 16.5), ((-35.0, -56.0), 8.5, 15.0)]
+
+
+def _tent(F, s, t, R, z_ground, z_eave, masts, peak, centre_z, col, wall_col, n=64, rings=14):
+    """A membrane tent: a drum of side curtain, then a surface from the rim
+    up to the mast heads, sagging between them; radial seams catch the
+    light with a slight scallop between them."""
+    th = np.linspace(0, 2 * math.pi, n + 1)
+    F.drum(s, t, z_ground, z_eave, R, wall_col, n=n)
+
+    def zf(x, y):
+        r = math.hypot(x - s, y - t)
+        base = z_eave + (centre_z - z_eave) * max(0.0, 1 - r / R) ** 0.75
+        bump = 0.0
+        for ms, mt in masts:
+            dd = math.hypot(x - ms, y - mt)
+            rb = (peak - (z_eave + (centre_z - z_eave) * max(0.0, 1 - math.hypot(ms - s, mt - t) / R) ** 0.75))
+            bump = max(bump, rb * max(0.0, 1 - dd / 9.0) ** 1.6)
+        return base + bump
+
+    rr = np.linspace(R, 0.0, rings + 1)
+    grid = [[(s + r_ * math.cos(a), t + r_ * math.sin(a)) for a in th] for r_ in rr]
+    Z = [[zf(*p) for p in row] for row in grid]
+    for j in range(rings):
+        for i in range(n):
+            a = (*grid[j][i], Z[j][i])
+            b = (*grid[j][i + 1], Z[j][i + 1])
+            c = (*grid[j + 1][i + 1], Z[j + 1][i + 1])
+            d = (*grid[j + 1][i], Z[j + 1][i])
+            seam = 0.93 if i % 4 == 0 else 1.0
+            xm = (th[i] + th[i + 1]) / 2
+            F.tri(a, b, c, col * seam, (math.cos(xm) * 0.3, math.sin(xm) * 0.3, 1))
+            if j < rings - 1 or True:
+                F.tri(a, c, d, col * seam, (math.cos(xm) * 0.3, math.sin(xm) * 0.3, 1))
+
+
+def chapiteau(m, mntR, stats):
+    F = Frame(m, CHAP_C, (1.0, 0.0))
+    th = np.linspace(0, 2 * math.pi, 25)
+    zg = mntR.sample(CHAP_C[0] + (CHAP_R + 1.5) * np.cos(th), CHAP_C[1] + (CHAP_R + 1.5) * np.sin(th))
+    zb = float(np.nanmin(zg)) - 0.3 if np.isfinite(zg).any() else 4.5
+    white = np.array(hexrgb("#f3f2ee"), float)
+    curtain = np.array(hexrgb("#e4e1da"), float)
+    steel = np.array(hexrgb("#8d9196"), float)
+    # Frame axes: s east, t south (Frame's v = (u_y, -u_x)).
+    masts = [(0.0, -CHAP_MAST_R), (CHAP_MAST_R, 0.0), (0.0, CHAP_MAST_R), (-CHAP_MAST_R, 0.0)]
+    _tent(F, 0.0, 0.0, CHAP_R, zb, CHAP_EAVE, masts, CHAP_PEAK, 21.0, white, curtain)
+    for ms, mt in masts:
+        x, y = F.xy(ms, mt)
+        _cyl(m, x, y, CHAP_PEAK - 1.0, CHAP_PEAK + 3.2, 0.22, steel, 8)
+        # A Monaco flag on each mast head.
+        F.box(ms + 0.25, ms + 1.75, mt - 0.02, mt + 0.02, CHAP_PEAK + 2.4, CHAP_PEAK + 2.85,
+              np.array(hexrgb("#ce1126"), float))
+        F.box(ms + 0.25, ms + 1.75, mt - 0.02, mt + 0.02, CHAP_PEAK + 1.95, CHAP_PEAK + 2.4, white)
+    # Entrance canopy on the south-west.
+    for (ds, dt), r, pk in CHAP_SMALL:
+        s_, t_ = ds, -dt
+        _tent(F, s_, t_, r, zb, zb + 3.2, [(s_, t_)], pk, pk - 1.0, white, curtain, n=24, rings=6)
+        x, y = F.xy(s_, t_)
+        _cyl(m, x, y, pk - 0.5, pk + 1.5, 0.12, steel, 6)
+    stats["landmarks"] = stats.get("landmarks", 0) + 1
+    stats["chapiteau"] = 1
+    pts = [F.xy(CHAP_R * math.cos(a), CHAP_R * math.sin(a)) for a in th[:-1]]
+    return Polygon(pts)
+
+
+# The Centre Commercial de Fontvieille (Carrefour and its mall): a podium
+# from the streets up to its roof, the Esplanade Rainier III and the
+# Jardin de l'Unesco, which the LiDAR terrain model takes for ground (19 m
+# NGF over streets at 5 m). The 3 m ground grid ran that drop out as steep
+# pale slopes. Its outline (OpenStreetMap) gets white walls with tall
+# arched windows (Mapillary 2021: the Avenue Albert II entrance), the
+# ground nodes either side of each drop go down to the street, and a strip
+# of the esplanade is drawn level on top, with its white railing.
+PODIUM_NAMES = ("Centre Commercial Fontvieille",)
+# Mapped as gardens, but paved squares (Mapillary 2019: red and grey brick
+# on the shopping centre's roof): the photo shows through, not a lawn.
+PAVED_GARDENS = ("Esplanade Rainier III",)
+PODIUM_WALL = "#f0ebe1"
+PODIUM_CAP = 2 * GRID + 0.6            # m of deck drawn level inside the edge
+PODIUMS = []
+
+
+def podium_setup(ways, mnt):
+    PODIUMS.clear()
+    R = Raster(mnt)
+    for t, p_, closed in ways:
+        if not closed or t.get("name") not in PODIUM_NAMES or len(p_) < 4:
+            continue
+        L = Polygon(p_).buffer(0)
+        if L.area < 500:
+            continue
+        # The deck's real edge: where the terrain model stands 5 m or more
+        # over the streets round it (the mapped outline runs along the
+        # street fronts of the blocks, not the drops).
+        x0, y0, x1, y1 = L.buffer(10).bounds
+        c0, c1 = max(int((x0 - X0) / RES), 0), min(int((x1 - X0) / RES) + 1, mnt.shape[1])
+        r0, r1 = max(int((Y1 - y1) / RES), 0), min(int((Y1 - y0) / RES) + 1, mnt.shape[0])
+        sub = np.nan_to_num(mnt[r0:r1, c0:c1], nan=0.0)
+        street = float(np.nanpercentile(R.sample(*np.asarray(L.buffer(8).exterior.coords)[:, :2].T), 10))
+        rr_, cc_ = np.mgrid[r0:r1, c0:c1]
+        cx_, cy_ = cell_xy(rr_, cc_)
+        mk = (sub > street + 5.0) & contains_xy(L.buffer(8), cx_, cy_)
+        mk = ndimage.binary_opening(ndimage.binary_closing(mk, iterations=2), iterations=2)
+        lab, nl = ndimage.label(mk)
+        if not nl:
+            continue
+        big = np.argmax(ndimage.sum(mk, lab, range(1, nl + 1))) + 1
+        rs_, cs_ = np.nonzero(lab == big)
+        bx_, by_ = cell_xy(rs_ + r0, cs_ + c0)
+        P = unary_union([box(a - RES / 2, b - RES / 2, a + RES / 2, b + RES / 2) for a, b in zip(bx_, by_)])
+        P = max(to_polys(P.buffer(0.3).buffer(-0.3).simplify(0.8)), key=lambda q: q.area)
+        P = orient(Polygon(P.exterior), 1.0)
+        ring = P.exterior
+        n = max(8, int(ring.length / 1.0))
+        s = np.linspace(0, ring.length, n + 1)
+        q = shapely.line_interpolate_point(ring, s)
+        x, y = shapely.get_x(q), shapely.get_y(q)
+        d = np.gradient(np.column_stack([x, y]), axis=0)
+        d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+        o = np.column_stack([d[:, 1], -d[:, 0]])              # outward (counter-clockwise ring)
+        zin = np.nanmedian(np.stack([R.sample(x - o[:, 0] * k, y - o[:, 1] * k) for k in (1.5, 2.5, 3.5)]), 0)
+        zout = np.nanmin(np.stack([R.sample(x + o[:, 0] * k, y + o[:, 1] * k) for k in (2.0, 3.5, 5.0)]), 0)
+        drop = np.isfinite(zin) & np.isfinite(zout) & (zin - zout > 2.5)
+        # Smooth the top along the edge (a 1 m sampling of a 50 cm scan).
+        zin = ndimage.median_filter(np.nan_to_num(zin, nan=0.0), 5, mode="wrap")
+        zout = ndimage.minimum_filter1d(np.nan_to_num(zout, nan=0.0), 5, mode="wrap")
+        drop = ndimage.binary_opening(drop, iterations=2) | (drop & ndimage.binary_dilation(drop, iterations=2))
+        PODIUMS.append({"poly": P, "x": x, "y": y, "o": o, "zin": zin, "zout": zout, "drop": drop})
+    return len(PODIUMS)
+
+
+def podium_ground(mnt):
+    """The terrain model for the ground mesh: nodes within a grid step of a
+    podium's drop, on both sides, at the street's level."""
+    if not PODIUMS:
+        return mnt
+    from scipy.spatial import cKDTree
+    out = mnt.copy()
+    for pd in PODIUMS:
+        k = pd["drop"]
+        if not k.any():
+            continue
+        x0, y0, x1, y1 = pd["poly"].buffer(GRID + 4).bounds
+        c0, c1 = max(int((x0 - X0) / RES), 0), min(int((x1 - X0) / RES) + 1, mnt.shape[1])
+        r0, r1 = max(int((Y1 - y1) / RES), 0), min(int((Y1 - y0) / RES) + 1, mnt.shape[0])
+        rr, cc = np.mgrid[r0:r1, c0:c1]
+        cx, cy = cell_xy(rr.ravel(), cc.ravel())
+        kd = cKDTree(np.column_stack([pd["x"][k], pd["y"][k]]))
+        dd, j = kd.query(np.column_stack([cx, cy]), distance_upper_bound=GRID + 2.6)
+        hit = np.isfinite(dd)
+        # Outside: up to a grid step and a bit; inside: the band under the cap.
+        t = ((cx - pd["x"][k][np.where(hit, j, 0)]) * pd["o"][k][np.where(hit, j, 0), 0]
+             + (cy - pd["y"][k][np.where(hit, j, 0)]) * pd["o"][k][np.where(hit, j, 0), 1])
+        sel = hit & (t > -(GRID + 1.6))
+        zo = pd["zout"][k][np.where(hit, j, 0)]
+        sub = out[r0:r1, c0:c1].ravel()
+        sub[sel] = np.minimum(np.nan_to_num(sub[sel], nan=99.0), zo[sel] - 0.1)
+        out[r0:r1, c0:c1] = sub.reshape(rr.shape)
+    return out
+
+
+def podium_walls(gm, m, stats):
+    wall = np.array(hexrgb(PODIUM_WALL), float)
+    n_ = 0
+    for pd in PODIUMS:
+        k = pd["drop"]
+        idx = np.nonzero(k[:-1] & k[1:])[0]
+        if not len(idx):
+            continue
+        for r_ in np.split(idx, np.nonzero(np.diff(idx) > 1)[0] + 1):
+            j = np.r_[r_, r_[-1] + 1]
+            x, y, o = pd["x"][j], pd["y"][j], pd["o"][j]
+            zb, zt = pd["zout"][j] - 0.3, pd["zin"][j]
+            # Arched shop windows, storeys of 5.2 m from the street.
+            _strip_wall(m, x, y, zb, zt - 1.0, wall, WALL_OLD, S_ARCH, 5.2, 4.6)
+            _strip_wall(m, x, y, zt - 1.0, zt + 0.05, wall * 1.03)
+            # The esplanade's edge: level paving painted from the ground map.
+            A = np.column_stack([x, y])
+            Bc = A - o * PODIUM_CAP
+            for a, b, c, d_, za, zb_ in zip(A[:-1] - o[:-1] * 0.05, A[1:] - o[1:] * 0.05, Bc[1:], Bc[:-1], zt[:-1], zt[1:]):
+                V = np.array([a, b, c, d_])
+                Z = np.array([za, zb_, zb_, za]) + 0.04
+                P = enu_fast(V[:, 0], V[:, 1], Z)
+                idx_ = np.array([[0, 1, 2], [0, 2, 3]])
+                e1, e2 = P[idx_[:, 1]] - P[idx_[:, 0]], P[idx_[:, 2]] - P[idx_[:, 0]]
+                fl = np.cross(e1, e2)[:, 2] < 0
+                idx_[fl] = idx_[fl][:, [0, 2, 1]]
+                uv = np.column_stack([(V[:, 0] - X0) / (X1 - X0), (Y1 - V[:, 1]) / (Y1 - Y0)])
+                gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=idx_)
+            # White railing along the top.
+            Ar = A - o * 0.2
+            railing(m, Ar[:-1], Ar[1:], zt[:-1], "#f4f2ec", 1.05, zt[1:])
+            n_ += len(r_)
+    stats["podium_wall_m"] = n_
+    return n_
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="download the inputs first")
@@ -11747,8 +12453,9 @@ def main():
         m_ = raster_mask(SW["poly"])
         mnt_ground[m_] = mnt_f[m_]
     portals_setup(ways, mnt_f)
-    global FM
+    global FM, STADE_POLY
     FM = fairmont_setup(feats, mns, mnt_f)
+    STADE_POLY = stade_setup(feats)
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -11793,7 +12500,9 @@ def main():
     chm = np.nan_to_num(mns - mnt_f, nan=0)
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
-    gm, gz = ground_mesh(mnt_ground, sea)
+    print("Fontvieille podiums…", podium_setup(ways, mnt_f))
+    gm, gz = ground_mesh(podium_ground(mnt_ground), sea)
+    print("podium walls…", podium_walls(gm, bm, stats), "m")
     print("tunnel portals…", portals(gm, bm, stats))
     rm = Mesh()
     print("roads…", road_surfaces(rm, ways, pts, gz, bmask, stats), "m")
