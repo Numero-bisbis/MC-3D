@@ -563,6 +563,7 @@ def ground_mesh(mnt, sea):
             Z[inr] = np.minimum(Z[inr], FM["rim_z"] - 0.2)
     Z, Zs = quai_ground(X, Y, Z)
     Z, Zs = sidewalk_ground(X, Y, Z, Zs)
+    Z = rampe_clamp(X, Y, Z)
     land = valid[r, c] > 0.5
     # A lone land node among sea nodes (the end of a jetty, a quay corner)
     # would stand up from the sea floor as a needle: leave it to the sea.
@@ -670,6 +671,7 @@ def _detail_patch(mnt, Z, i0, i1, j0, j1):
         wt *= np.clip((dtr - (TRACK_HALF + 16)) / 6.0, 0.0, 1.0)
     wt = np.where(np.isfinite(Zm) & (Zc > SEA_FLOOR + 1), wt, 0.0)
     Zf = Zc + wt * (np.nan_to_num(Zm, nan=0.0) - Zc)
+    Zf = rampe_clamp(Xf, Yf, Zf)
     P = enu_fast(Xf.ravel(), Yf.ravel(), Zf.ravel())
     gy, gx = np.gradient(Zf, st)
     N = np.column_stack([-gx.ravel(), gy.ravel(), np.ones(Zf.size)])
@@ -743,6 +745,7 @@ def _detail_mask_patch(mnt, Z, M):
     wt = np.clip(ndimage.distance_transform_edt(inside) * st / 4.0 - 0.25, 0.0, 1.0)
     wt = np.where(np.isfinite(Zm) & (Zc > SEA_FLOOR + 1), wt, 0.0)
     Zf = Zc + wt * (np.nan_to_num(Zm, nan=0.0) - Zc)
+    Zf = rampe_clamp(Xf, Yf, Zf)
     P = enu_fast(Xf.ravel(), Yf.ravel(), Zf.ravel())
     gy, gx = np.gradient(Zf, st)
     N = np.column_stack([-gx.ravel(), gy.ravel(), np.ones(Zf.size)])
@@ -1012,6 +1015,10 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         if hw in ("footway", "pedestrian", "path", "steps", "cycleway") and t.get("area") != "yes" \
                 and t.get("tunnel") != "yes" and t.get("layer", "0") not in ("-1", "-2"):
             line(pts, "#cdbb9c" if hw == "steps" else "#e8dcc6", 3.0 if hw == "pedestrian" else 2.0)
+    if RAMPE is not None:
+        # The Rampe Major's bed: grey stone a little wider than the ribbon.
+        for q in to_polys(RAMPE["line"].buffer(RAMPE_W / 2 + 0.5, cap_style=2, join_style=2, mitre_limit=2.0)):
+            poly(np.asarray(q.exterior.coords), "#b3aca0")
     # Jetties and pontoons: pale concrete, as in the photo (their service
     # lanes are not asphalt roads).
     for t, pts, closed in ways:
@@ -1027,14 +1034,13 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             poly(np.asarray(q.exterior.coords), QA_ASPHALT)
         for q in to_polys(QA["walk"]):
             poly(np.asarray(q.exterior.coords), QA_WALK)
+    # The breakwater's abutment: asphalt, walks and the Solarium's decks.
+    digue_paint(poly, line)
     if ARMES is not None:
         # Place d'Armes and the Rampe Major in their brick red (the viewer
         # reads the shade against it and lays the bricks).
         for q in to_polys(ARMES["poly"]):
             poly(np.asarray(q.exterior.coords), ARMES_BRICK)
-        for r in ARMES["rampe"]:
-            for q in to_polys(r.buffer(ARMES_BAND / 2, cap_style=2)):
-                poly(np.asarray(q.exterior.coords), ARMES_BRICK)
     if SW is not None:
         # Pavements along the circuit: paving (what is in their holes,
         # gardens and planters, stays).
@@ -3400,6 +3406,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     STADE_DONE.append(1)
                     footprint.append(stade_louis_ii(m, mns, mntR, photo, STADE_POLY, stats))
                 continue
+            if key in DIGUE_PARTS:
+                # The breakwater's terminal and raised walk: digue() builds
+                # the whole thing (main), the mask takes its plan once.
+                if not DIGUE_DONE:
+                    DIGUE_DONE.append(1)
+                    footprint.append(digue_footprint())
+                continue
             if key == CHAPITEAU:
                 footprint.append(chapiteau(m, mntR, stats))
                 continue
@@ -3423,6 +3436,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not rest:
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
+            if key in HERACLES_WINGS:
+                # The blocks either side of the Palais Héraclès.
+                footprint.append(heracles_wing(m, poly, key, mntR, stats))
+                stats["buildings"] += 1
+                continue
+            if key == HERACLES_COURT:
+                continue            # its entrance court is built with the slab
             rnd = rng_for(key)
             pr_ = f["properties"]
             if pr_.get("construction_legere") and float(track_dist(poly.centroid.x, poly.centroid.y)[0]) < 30:
@@ -3617,6 +3637,11 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 fh = hwall / max(2, round(hwall / 7.5))
             if mt is not None:
                 fh = max(2.8, (H - 1.0) / mt["levels"])
+            if key in HELI_PLAIN:
+                # The heliport's hangar and the white halls at the apron's
+                # ends: plain cladding, no rows of windows.
+                kind, style, grand = PLAIN, None, False
+                col = np.array(hexrgb(HELI_PLAIN[key]), float)
             # Fine-tune this building's photo shift by up to a metre.
             adj = (0.0, 0.0)
             if photo is not None and photo.get("edges") is not None and poly.area > 80:
@@ -3814,10 +3839,12 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             elif mt is not None:
                 stats["mareterra_slabs"] = stats.get("mareterra_slabs", 0) + mareterra_terraces(
                     m, poly, base, H, fh, mt)
-            elif not hero and not post_scan and (not tiled or info["balconies"]):
+            elif not hero and not post_scan and (not tiled or info["balconies"]) and key not in HELI_PLAIN:
                 stats["balconies"] = stats.get("balconies", 0) + facade_depth(
                     m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
                     info["balconies"], info["depth"])
+            if key == HELI_HANGAR:
+                stats["hangar_doors"] = heli_hangar_doors(m, poly, base, H)
             if key == FAIRMONT:
                 global FAIR
                 FAIR = {"base": base, "fh": fh, "levels": [(r_, base + h_) for r_, h_ in levels],
@@ -6907,6 +6934,7 @@ def no_tree_zones(ways):
         out += [crowd_free(a, b, TRACK_HALF + 10.0) for a, b in CROWD_ZONES]
     if QA is not None:
         out.append(QA["poly"].buffer(3.0))         # quai_albert() plants its own pines
+    out.append(digue_zone())                       # digue() plants the abutment's walk
     if FM is not None:
         out += [c.buffer(1.0) for c in FM["courts"]]
     if TUNNEL is not None and "open_ground" in TUNNEL:
@@ -7838,6 +7866,7 @@ HERACLES_SE = (1056056.55, 6302818.95)
 HERACLES_D = 35.3                       # m, south to north
 HERACLES_LIFT = (1056042.3, 6302842.9)  # lift room on the roof (LiDAR, up to 62.8 m)
 HERACLES_WALL = "#efe1bf"               # cream render
+HERACLES_CANOPY_TIP = (1056067.4, 6302842.9)   # entrance canopy, its tip over the pavement
 HERACLES_AWNING = "#2d4f93"             # blue awnings
 
 
@@ -8002,8 +8031,236 @@ def palais_heracles(m, mntR, stats):
     ls_, lt_ = float(lc @ u), float(lc @ v)
     cuboid(ls_ - 4.6, ls_ + 4.6, lt_ - 2.5, lt_ + 2.5, zr + 0.32, base + 58.6, wall * 0.97, bottom=False)
     cuboid(ls_ - 4.75, ls_ + 4.75, lt_ - 2.65, lt_ + 2.65, base + 58.6, base + 58.85, edge)
+    # The entrance, mid-way along the boulevard side: a folded concrete
+    # canopy cantilevered from the slab out to the pavement (OpenStreetMap
+    # way 1081601378), thick at the root and thin at the tip, between low
+    # planters with clipped hedges.
+    tip = np.array(HERACLES_CANOPY_TIP) - SW
+    s_tip, t_c = float(tip @ u), float(tip @ v)
+    conc = np.array(hexrgb("#bdb8ae"))
+    hw_ = 2.1
+    zt_, zr_b, zt_b = base + 4.25, base + 2.35, base + 3.8
+    cs = [W - DL, s_tip]
+    for sg in (-1, 1):
+        # Side faces: trapezoids.
+        P0, P1 = E(cs, t_c + sg * hw_, [zr_b, zt_b]), E(cs, t_c + sg * hw_, zt_)
+        _quad(m, P0[[0]], P0[[1]], P1[[1]], P1[[0]], conc, want(W + 3, t_c + sg * hw_, zt_ - 0.5, 0, sg, 0))
+    _quad(m, E(cs[0], t_c - hw_, zt_), E(cs[1], t_c - hw_, zt_), E(cs[1], t_c + hw_, zt_), E(cs[0], t_c + hw_, zt_),
+          conc * 1.04, want(W + 3, t_c, zt_, 0, 0, 1))
+    _quad(m, E(cs[0], t_c - hw_, zr_b), E(cs[1], t_c - hw_, zt_b), E(cs[1], t_c + hw_, zt_b), E(cs[0], t_c + hw_, zr_b),
+          conc * 0.82, want(W + 3, t_c, zr_b, 0, 0, -1))
+    _quad(m, E(cs[1], t_c - hw_, zt_b), E(cs[1], t_c + hw_, zt_b), E(cs[1], t_c + hw_, zt_), E(cs[1], t_c - hw_, zt_),
+          conc, want(s_tip, t_c, zt_, 1, 0, 0))
+    # Glass doors under it.
+    pane(W - 0.35 + 0.05, t_c - 1.6, W - 0.35 + 0.05, t_c + 1.6, base + 0.05, base + 2.6, (1, 0, 0), 3, 1)
+    stone_ = np.array(hexrgb("#d6ccb8"))
+    hedge = np.array(hexrgb("#4e6a3c"))
+    for t0, t1 in ((t_c + hw_ + 0.6, t_c + hw_ + 5.5), (t_c - hw_ - 5.5, t_c - hw_ - 0.6)):
+        cuboid(W + 0.4, s_tip - 2.5, t0, t1, base - 0.2, base + 0.75, stone_)
+        cuboid(W + 0.6, s_tip - 2.7, t0 + 0.2, t1 - 0.2, base + 0.75, base + 1.45, hedge)
     stats["heracles"] = {"base": round(base, 2), "top": round(zr + 0.32, 2), "storeys": NF + 2, "bays": nb}
     return orient(Polygon([SW, SE, SE + D * v, SW + D * v]), 1.0)
+
+
+# The two blocks either side of the slab, on the boulevard (Mapillary 2021
+# and 2025): the same cream render and the same hand. South block (BD TOPO
+# 074373, 7 levels, 22 m): shops behind stone piers on the ground floor
+# (Planet Sushi), on the boulevard loggias with brown slatted parapets and
+# blue awnings between windows, plain walls with small windows elsewhere
+# (the entrance court side too), a pergola on the roof terrace
+# under the slab. North block (074452, 6 levels, 19.5 m): an arcade of
+# square stone pillars in front of the shops (Société Générale, Wally),
+# loggias with blue awnings and windows with roller shutters and small iron
+# balconies on the boulevard, small windows towards the court.
+HERACLES_WINGS = {
+    "BATIMENT0000000074074373": {"name": "south", "gf": 4.2, "fh": 2.95, "nf": 6, "ground": "shop",
+                                 "parapet": "#8a5a3a"},
+    "BATIMENT0000000074074452": {"name": "north", "gf": 4.4, "fh": 2.95, "nf": 5, "ground": "arcade",
+                                 "parapet": HERACLES_WALL},
+}
+HERACLES_COURT = "BATIMENT0000000074074393"   # the planted entrance court, under the canopy
+HERACLES_STONE = "#ddd2bd"                     # travertine piers and pillars
+
+
+def _wing_edge_spec(name, mid, nrm, L):
+    """What each wall of a side block shows, from where it faces."""
+    east, north, south = nrm[0] > 0.75, nrm[1] > 0.75, nrm[1] < -0.75
+    if name == "south":
+        if east:                                        # the boulevard
+            return "WLWLWLW"[:max(3, int(round(L / 3.4)))] if L > 9 else "S" * max(1, int(round(L / 3.2)))
+    else:
+        if east and L > 20:
+            n = max(3, int(round(L / 3.45)))
+            return ("WLL" * n)[:n - 1] + "W"
+    if L < 2.5:
+        return ""
+    return "S" * max(1, int(round(L / 3.4)))
+
+
+def heracles_wing(m, poly, key, mntR, stats):
+    spec = HERACLES_WINGS[key]
+    rnd = rng_for(key)
+    ring = np.asarray(poly.exterior.coords)[:, :2]
+    gz = mntR.sample(ring[:, 0], ring[:, 1])
+    base = float(np.nanmin(gz)) if np.isfinite(gz).any() else 3.6
+    GF, FH, NF = spec["gf"], spec["fh"], spec["nf"]
+    ztop = base + GF + NF * FH
+    wall = np.array(hexrgb(HERACLES_WALL))
+    edge = np.minimum(wall * 1.04 + 6, 255)
+    stone = np.array(hexrgb(HERACLES_STONE))
+    par_c = np.array(hexrgb(spec["parapet"]))
+    shutter = np.array(hexrgb("#e9e6de"))
+    awning = np.array(hexrgb(HERACLES_AWNING))
+    glass_c = np.array(hexrgb("#5b6a74"))
+    DL = 1.2
+    n_l = 0
+    for A, B in zip(ring[:-1], ring[1:]):
+        L = float(np.linalg.norm(B - A))
+        if L < 0.5:
+            continue
+        d = (B - A) / L
+        nrm = np.array([d[1], -d[0]])                  # outward (the ring runs anticlockwise)
+        pat = _wing_edge_spec(spec["name"], (A + B) / 2, nrm, L)
+
+        def E(s, dep, z):
+            s, dep, z = np.broadcast_arrays(np.atleast_1d(np.asarray(s, float)),
+                                            np.atleast_1d(np.asarray(dep, float)),
+                                            np.atleast_1d(np.asarray(z, float)))
+            q = A[None] + s[:, None] * d[None] + dep[:, None] * nrm[None]
+            return enu_fast(q[:, 0], q[:, 1], z)
+
+        def W(s, dep, z, ds, dd, dz):
+            return E(s + ds, dep + dd, z + dz) - E(s, dep, z)
+
+        def quad(s0, s1, d0, d1, z0, z1, col, face):
+            """A quad from (s0, d0) to (s1, d1), z0 to z1, facing face
+            (ds, ddep, dz); horizontal when z0 == z1 (then d0 to d1 is
+            its depth)."""
+            if z0 == z1:
+                P = [E(s0, d0, z0), E(s1, d0, z0), E(s1, d1, z0), E(s0, d1, z0)]
+            else:
+                P = [E(s0, d0, z0), E(s1, d1, z0), E(s1, d1, z1), E(s0, d0, z1)]
+            _quad(m, *P, col, W((s0 + s1) / 2, (d0 + d1) / 2, (z0 + z1) / 2, *face))
+
+        def pane(s0, s1, dep, z0, z1, cell, fl):
+            uvs = [np.array([[cell + 0.06, fl + 0.18]]), np.array([[cell + 0.94, fl + 0.18]]),
+                   np.array([[cell + 0.94, fl + 0.9]]), np.array([[cell + 0.06, fl + 0.9]])]
+            _quad_uv(m, E(s0, dep, z0), E(s1, dep, z0), E(s1, dep, z1), E(s0, dep, z1), glass_c,
+                     W((s0 + s1) / 2, dep, z0, 0, 1, 0), uvs, kind=WALL_GLASS, style=S_GLASS)
+
+        OUT = (0, 1, 0)
+        # Ground floor.
+        nb = max(1, len(pat))
+        bay = L / nb
+        g0, g1 = base - 1.0, base + GF
+        if pat and spec["ground"] == "arcade" and L > 20:
+            AD = 2.4
+            quad(0, L, -AD, -AD, g0, g1, wall * 0.9, OUT)                    # back wall
+            for k in range(nb):
+                pane(k * bay + 0.35, (k + 1) * bay - 0.35, -AD + 0.02, base + 0.1, g1 - 0.7, k, 1)
+            _quad(m, E(0, -AD, g1), E(L, -AD, g1), E(L, 0, g1), E(0, 0, g1), wall * 0.8,
+                  W(L / 2, -1, g1, 0, 0, -1))                                # soffit
+            quad(0, 0, -AD, 0, g0, g1, wall * 0.9, (1, 0, 0))                # ends of the arcade
+            quad(L, L, -AD, 0, g0, g1, wall * 0.9, (-1, 0, 0))
+            for k in range(nb + 1):
+                sc = min(max(k * bay, 0.35), L - 0.35)
+                for (a0, a1, b0, b1, f) in ((sc - 0.3, sc + 0.3, 0, 0, OUT), (sc - 0.3, sc + 0.3, -0.6, -0.6, (0, -1, 0)),
+                                            (sc - 0.3, sc - 0.3, -0.6, 0, (-1, 0, 0)), (sc + 0.3, sc + 0.3, -0.6, 0, (1, 0, 0))):
+                    quad(a0, a1, b0, b1, g0, g1, stone, f)
+        elif pat and pat != "S" * len(pat):
+            quad(0, L, 0, 0, g0, g1, stone, OUT)
+            for k in range(nb):
+                pane(k * bay + 0.3, (k + 1) * bay - 0.3, 0.03, base + 0.1, g1 - 0.75, k, 1)
+            # A thin canopy over the shop windows.
+            _quad(m, E(0, 0, g1 - 0.6), E(L, 0, g1 - 0.6), E(L, 1.1, g1 - 0.6), E(0, 1.1, g1 - 0.6), edge,
+                  W(L / 2, 0.5, g1 - 0.6, 0, 0, 1))
+            _quad(m, E(0, 0, g1 - 0.68), E(L, 0, g1 - 0.68), E(L, 1.1, g1 - 0.68), E(0, 1.1, g1 - 0.68), edge * 0.8,
+                  W(L / 2, 0.5, g1 - 0.68, 0, 0, -1))
+            quad(0, L, 1.1, 1.1, g1 - 0.68, g1 - 0.6, edge, OUT)
+        else:
+            quad(0, L, 0, 0, g0, g1, wall, OUT)
+        # Storeys.
+        for i in range(1, NF + 1):
+            z0, z1 = base + GF + (i - 1) * FH, base + GF + i * FH
+            if not pat:
+                quad(0, L, 0, 0, z0, z1, wall, OUT)
+                continue
+            for k, c in enumerate(pat):
+                s0, s1 = k * bay, (k + 1) * bay
+                if c == "L":
+                    p = 0.35
+                    a, b = s0 + p, s1 - p
+                    quad(s0, a, 0, 0, z0, z1, wall, OUT)
+                    quad(b, s1, 0, 0, z0, z1, wall, OUT)
+                    quad(a, b, 0, 0, z1 - 0.22, z1, edge, OUT)               # slab edge
+                    quad(a, b, -DL, -DL, z0, z1 - 0.22, wall * 0.88, OUT)    # back of the loggia
+                    quad(a, a, -DL, 0, z0, z1 - 0.22, wall * 0.84, (1, 0, 0))
+                    quad(b, b, -DL, 0, z0, z1 - 0.22, wall * 0.84, (-1, 0, 0))
+                    quad(a, b, -DL, 0, z1 - 0.22, z1 - 0.22, wall * 0.8, (0, 0, -1))
+                    quad(a, b, -DL, 0, z0, z0, wall * 0.9, (0, 0, 1))
+                    pane(a + 0.15, b - 0.15, -DL + 0.02, z0 + 0.1, z1 - 0.5, k, i)
+                    # Parapet: solid, cream or brown slats.
+                    quad(a, b, 0.02, 0.02, z0, z0 + 1.0, par_c, OUT)
+                    quad(a, b, -0.12, -0.12, z0, z0 + 1.0, par_c * 0.85, (0, -1, 0))
+                    quad(a, b, -0.12, 0.02, z0 + 1.0, z0 + 1.0, np.minimum(par_c * 1.08, 255), (0, 0, 1))
+                    if rnd.random() < 0.6:
+                        za, zb_ = z1 - 0.3, z1 - 1.05
+                        P0, P1 = E([a + 0.03, b - 0.03], -0.05, za), E([b - 0.03, a + 0.03], 0.6, zb_)
+                        for sg in (1, -1):
+                            _quad(m, P0[[0]], P0[[1]], P1[[0]], P1[[1]], awning,
+                                  W((a + b) / 2, 0.3, za, 0, 0.6 * sg, 0.75 * sg))
+                    n_l += 1
+                else:
+                    quad(s0, s1, 0, 0, z0, z1, wall, OUT)
+                    sc = (s0 + s1) / 2
+                    if c == "S":
+                        pane(sc - 0.45, sc + 0.45, 0.02, z0 + 1.0, z0 + 2.15, k, i)
+                    else:
+                        hw = min(0.8, bay * 0.28)
+                        pane(sc - hw, sc + hw, 0.02, z0 + 0.15, z0 + 2.35, k, i)
+                        r = rnd.random()
+                        if r < 0.7:                                          # roller shutter part way down
+                            zs = z0 + 2.35 - (2.2 * rnd.uniform(0.15, 1.0))
+                            quad(sc - hw - 0.03, sc + hw + 0.03, 0.04, 0.04, zs, z0 + 2.4, shutter, OUT)
+                        if spec["name"] == "north" and rnd.random() < 0.5:
+                            # A small iron balcony.
+                            _quad(m, E(sc - hw - 0.2, 0, z0), E(sc + hw + 0.2, 0, z0), E(sc + hw + 0.2, 0.55, z0),
+                                  E(sc - hw - 0.2, 0.55, z0), edge, W(sc, 0.3, z0, 0, 0, 1))
+                            q0, q1 = A + d * (sc - hw - 0.2) + nrm * 0.55, A + d * (sc + hw + 0.2) + nrm * 0.55
+                            railing(m, q0[None], q1[None], z0, "#23272a", h=1.0)
+        # Cornice band at the top.
+        quad(0, L, 0.12, 0.12, ztop - 0.3, ztop, edge, OUT)
+    # Roof and parapet.
+    add_roof(m, poly, ztop, np.array(hexrgb("#d3ccbd")), False)
+    pc = edge * 0.97
+    add_walls(m, poly, ztop, ztop + 0.9, ztop, 10, pc, PLAIN)
+    add_walls(m, poly, ztop, ztop + 0.9, ztop, 10, pc * 0.85, PLAIN, inward=True)
+    inner = poly.buffer(-0.25, join_style=2)
+    for rp in to_polys(poly.difference(inner) if not inner.is_empty else poly):
+        add_roof(m, rp, ztop + 0.9, pc * 1.05, False)
+    if spec["name"] == "south":
+        # The pergola and planters on the roof terrace under the slab's south end.
+        ax = np.array([0.99, 0.17])
+        iron = np.array(hexrgb("#2b2d2c"))
+        cx, cy, w, dd = 1056046.0, 6302806.5, 11.0, 4.6
+        side = np.array([-ax[1], ax[0]])
+        for i_ in (-1, 0, 1):
+            for j_ in (-1, 1):
+                q = np.array([cx, cy]) + ax * i_ * (w / 2 - 0.1) + side * j_ * (dd / 2 - 0.1)
+                _box(m, q[0], q[1], ax, 0.12, 0.12, ztop, ztop + 2.6, iron)
+        for j_ in (-1, 1):
+            q = np.array([cx, cy]) + side * j_ * (dd / 2 - 0.1)
+            _box(m, q[0], q[1], ax, w, 0.14, ztop + 2.45, ztop + 2.6, iron)
+        for i_ in np.linspace(-w / 2 + 0.3, w / 2 - 0.3, 12):
+            q = np.array([cx, cy]) + ax * i_
+            _box(m, q[0], q[1], side, dd, 0.08, ztop + 2.6, ztop + 2.7, iron)
+        for i_ in (-0.38, -0.1, 0.2, 0.42):
+            q = np.array([cx, cy]) + ax * i_ * w - side * (dd / 2 - 0.5)
+            _box(m, q[0], q[1], ax, 1.0, 0.8, ztop, ztop + 0.6, np.array(hexrgb("#b9a789")))
+            add_tree(m, q[0], q[1], ztop + 0.6, rnd.uniform(1.2, 2.0), rnd.uniform(0.6, 0.9), "broad", rnd)
+    stats.setdefault("heracles_wings", {})[spec["name"]] = {"base": round(base, 2), "top": round(ztop, 2),
+                                                            "loggias": n_l}
+    return poly
 
 
 def _box(m, cx, cy, ax, w, d, z0, z1, col, kind=PLAIN, style=None, top=True):
@@ -9198,82 +9455,207 @@ def armes_paving(gm, mntR, gz, stats):
     return round(area)
 
 
-def rampe_major(gm, m, ways, mnt, stats):
-    """The Rampe Major, the stepped ramp from Place d'Armes up to the
-    Palace (street photos 2016-2025): long gently sloping treads of red
-    herringbone brick between grey stone edges, each ending in one low
-    stone step (a pas-d'âne), a rubble parapet with a pale rendered coping
-    on the open side, the cliff on the other."""
+RAMPE_W = 3.6                  # the Rampe Major's width, kerb to kerb (constant; the hairpin's legs are ~5 m apart)
+RAMPE = None                   # {"line", "poly"}: the route from Place d'Armes to Place du Palais
+
+
+def rampe_clamp(X, Y, Z):
+    """Ground nodes under the Rampe Major (and 1.2 m either side) kept
+    below its treads, so the ramp is never buried in the slope it climbs;
+    its uphill side gets a retaining wall instead (rampe_major())."""
+    if RAMPE is None or "z" not in RAMPE:
+        return Z
+    from scipy.spatial import cKDTree
+    x0, y0, x1, y1 = RAMPE["line"].buffer(RAMPE_W / 2 + 1.5).bounds
+    sel = (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
+    if not sel.any():
+        return Z
+    d, j = cKDTree(RAMPE["P"]).query(np.column_stack([X[sel], Y[sel]]))
+    near = d < RAMPE_W / 2 + 1.2
+    Z = Z.copy()
+    v = Z[sel]
+    v[near] = np.minimum(v[near], RAMPE["zt"][j[near]] - 0.25)
+    Z[sel] = v
+    return Z
+
+
+def rampe_heights(mnt, ways):
+    """The ramp's centre line resampled every 0.5 m and its height there:
+    LiDAR ground (median round each point), bridged under the gates'
+    vaults, kept climbing."""
+    if RAMPE is None:
+        return
     mntR = Raster(mnt)
-    lines = [LineString(p_) for t, p_, c in ways if t.get("name") == "Rampe Major" and t.get("highway") == "steps"
-             and t.get("tunnel") not in ("yes", "building_passage") and t.get("layer", "0") == "0" and len(p_) >= 2]
-    W = ARMES_BAND
+    ln = RAMPE["line"]
+    L = ln.length
+    n_ = max(4, int(L / 0.5))
+    ss = np.linspace(0.0, L, n_ + 1)
+    P = np.array([ln.interpolate(x).coords[0] for x in ss])
+    off = np.array([[dx, dy] for dx in (-0.8, 0, 0.8) for dy in (-0.8, 0, 0.8)])
+    z = np.array([np.nanmedian(mntR.sample(*(p_[None] + off).T)) for p_ in P])
+    cov = np.zeros(len(P), bool)
+    for t, p_, c in ways:
+        if t.get("name") == "Rampe Major" and (t.get("tunnel") or t.get("covered") == "yes" or t.get("layer", "0") != "0"):
+            cov |= contains_xy(LineString(p_).buffer(0.6), P[:, 0], P[:, 1])
+    z[cov] = np.nan
+    ok = np.isfinite(z)
+    if ok.sum() < 2:
+        return
+    z = np.maximum.accumulate(np.interp(ss, ss[ok], z[ok]))
+    k_ = max(1, int(round(ARMES_BAND / 0.5)))
+    zt = z.copy()
+    for i0 in range(0, len(P) - 1, k_):
+        i1 = min(i0 + k_, len(P) - 1)
+        f = (ss[i0:i1 + 1] - ss[i0]) / max(1e-6, ss[i1] - ss[i0])
+        zt[i0:i1 + 1] = z[i0] + (z[i1] - z[i0]) * 0.35 * f + 0.12
+    RAMPE.update({"ss": ss, "P": P, "z": z, "zt": zt, "cov": cov})
+
+
+def rampe_setup(ways):
+    """The Rampe Major as one route: every OpenStreetMap piece of it
+    (open flights, the passages under the two gates, the last covered
+    flight onto Place du Palais) merged into one line, bottom first."""
+    from shapely.ops import linemerge
+    parts = [LineString(p_) for t, p_, c in ways if t.get("name") == "Rampe Major" and len(p_) >= 2 and not c]
+    if not parts:
+        return None
+    mg = linemerge(unary_union(parts))
+    lines = list(getattr(mg, "geoms", [mg]))
+    ln = max(lines, key=lambda g: g.length)
+    a_ = np.array(ln.coords[0])
+    if np.hypot(*(a_ - np.array(ARMES_C))) > np.hypot(*(np.array(ln.coords[-1]) - np.array(ARMES_C))):
+        ln = LineString(ln.coords[::-1])
+    return {"line": ln, "poly": ln.buffer(RAMPE_W / 2, cap_style=2, join_style=2, mitre_limit=2.0)}
+
+
+def _ribbon_edges(P, W):
+    """Left and right edges of a constant-width ribbon round polyline P,
+    with mitred joints (capped at 2x) so every cross-section is W wide."""
+    d = np.diff(P, axis=0)
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    n_seg = np.column_stack([-d[:, 1], d[:, 0]])
+    N = np.zeros_like(P)
+    N[0], N[-1] = n_seg[0], n_seg[-1]
+    for i in range(1, len(P) - 1):
+        m_ = n_seg[i - 1] + n_seg[i]
+        nm = np.linalg.norm(m_)
+        if nm < 1e-6:
+            N[i] = n_seg[i]
+            continue
+        m_ /= nm
+        N[i] = m_ / max(0.5, float(m_ @ n_seg[i]))
+    return P + N * W / 2, P - N * W / 2
+
+
+def rampe_major(gm, m, ways, mnt, stats):
+    """The Rampe Major, the stepped ramp from Place d'Armes up to Place du
+    Palais (street photos 2016-2025), as one ribbon of constant width
+    along the whole route (OpenStreetMap, bottom to top, through the two
+    gates): long gently sloping treads of red herringbone brick between
+    grey stone edges, each ending in one low stone step (a pas-d'âne), a
+    rubble parapet with a pale coping on the open side."""
+    if RAMPE is None:
+        return 0
+    mntR = Raster(mnt)
+    if "z" not in RAMPE:
+        return 0
+    W = RAMPE_W
+    ss, P, z, cov = RAMPE["ss"], RAMPE["P"], RAMPE["z"], RAMPE["cov"]
+    n_ = len(P) - 1
+    L = float(ss[-1])
+    Lft, Rgt = _ribbon_edges(P, W)
     stone = np.array(hexrgb("#a9a49a"), float)
     rubble = np.array(hexrgb(WALL_RUBBLE), float)
     cope = np.array(hexrgb("#e2ddd2"), float)
-    n_steps, n_par = 0, 0.0
-    for ln in lines:
-        L = ln.length
-        if L < 3:
-            continue
-        nseg = max(1, int(round(L / W)))
-        ss = np.linspace(0.0, L, nseg + 1)
-        pts_ = np.array([ln.interpolate(x).coords[0] for x in ss])
-
-        def zc(x, y):
-            q = np.array([[x + dx, y + dy] for dx in (-1.0, 0.0, 1.0) for dy in (-1.0, 0.0, 1.0)])
-            z = mntR.sample(q[:, 0], q[:, 1])
-            return float(np.nanmedian(z)) if np.isfinite(z).any() else np.nan
-
-        zs = np.array([zc(*p_) for p_ in pts_])
-        if not np.isfinite(zs).all():
-            continue
-        # Keep the flight monotonic (the LiDAR under the trees wobbles).
-        up = zs[-1] >= zs[0]
-        zs = np.maximum.accumulate(zs) if up else np.minimum.accumulate(zs)
-        for i in range(nseg):
-            a, b = pts_[i], pts_[i + 1]
-            d = b - a
-            Ls = float(np.hypot(*d))
-            if Ls < 0.5:
+    # Pas-d'âne: treads of ~4.7 m (the grey bands' period), each climbing
+    # a third of its rise, then a step.
+    k_tread = max(1, int(round(ARMES_BAND / 0.5)))
+    bounds = list(range(0, n_, k_tread)) + [n_]
+    zt = np.empty(len(P))
+    n_steps = 0
+    for i0, i1 in zip(bounds[:-1], bounds[1:]):
+        za, zb = z[i0], z[i1]
+        f = (ss[i0:i1 + 1] - ss[i0]) / max(1e-6, ss[i1] - ss[i0])
+        zt[i0:i1 + 1] = za + (zb - za) * 0.35 * f + 0.12
+        if zb - za > 0.05:
+            n_steps += 1
+    # Tread tops: one strip of quads per tread (the step is the jump
+    # between this tread's end and the next one's start).
+    for i0, i1 in zip(bounds[:-1], bounds[1:]):
+        za_end = z[i0] + (z[i1] - z[i0]) * 0.35 + 0.12
+        idx = np.arange(i0, i1 + 1)
+        zz = z[i0] + (z[i1] - z[i0]) * 0.35 * (ss[idx] - ss[i0]) / max(1e-6, ss[i1] - ss[i0]) + 0.12
+        V = np.concatenate([Lft[idx], Rgt[idx]])
+        Zv = np.concatenate([zz, zz])
+        Pv = enu_fast(V[:, 0], V[:, 1], Zv)
+        uv = np.column_stack([(V[:, 0] - X0) / (X1 - X0), (Y1 - V[:, 1]) / (Y1 - Y0)])
+        k = len(idx)
+        uv2 = np.column_stack([np.concatenate([ss[idx], ss[idx]]), np.concatenate([np.zeros(k), np.full(k, W)]) + (ARMES_BAND - W) / 2])
+        tri = []
+        for j in range(k - 1):
+            tri += [[j, j + 1, k + j + 1], [j, k + j + 1, k + j]]
+        tri = np.array(tri)
+        # Wind upward.
+        a_, b_, c_ = Pv[tri[:, 0]], Pv[tri[:, 1]], Pv[tri[:, 2]]
+        up = np.cross(b_ - a_, c_ - a_)[:, 2] < 0
+        tri[up] = tri[up][:, [0, 2, 1]]
+        gm.add(Pv, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=HERRING, uv2=uv2)
+        # The riser at its top end, up to the next tread's start.
+        if i1 < n_:
+            z_next = z[i1] + 0.12
+            if z_next - za_end > 0.03:
+                A, B = Lft[i1], Rgt[i1]
+                Pq = enu_fast(np.array([A[0], B[0], B[0], A[0]]), np.array([A[1], B[1], B[1], A[1]]),
+                              np.array([za_end, za_end, z_next, z_next]))
+                back = P[max(0, i1 - 1)] - P[i1]
+                w_ = enu_fast(np.array([P[i1][0] + back[0]]), np.array([P[i1][1] + back[1]]), np.array([za_end]))[0] - \
+                    enu_fast(np.array([P[i1][0]]), np.array([P[i1][1]]), np.array([za_end]))[0]
+                _quad(m, Pq[0][None], Pq[1][None], Pq[2][None], Pq[3][None], stone, w_[None])
+    # Kerbs (the grey stone edges) and the side faces down into the ground;
+    # a rubble parapet on whichever side the ground falls away.
+    n_par = 0.0
+    # Uphill walls' tops: the slope 1.8 m out, smoothed along the ramp.
+    wtop = {}
+    for E_, sg in ((Lft, 1.0), (Rgt, -1.0)):
+        o_ = P + (E_ - P) * (1.0 + 1.8 / (W / 2))
+        gu = mntR.sample(o_[:, 0], o_[:, 1])
+        w_ = np.fmax(np.nan_to_num(gu, nan=-99.0) + 0.2, zt + 0.6)
+        w_ = ndimage.maximum_filter1d(w_, 9)
+        wtop[sg] = ndimage.uniform_filter1d(w_, 9)
+    for E_, sg in ((Lft, 1.0), (Rgt, -1.0)):
+        for j in range(len(P) - 1):
+            if cov[j] and cov[j + 1]:
                 continue
-            F = Frame(m, a, d)
-            lo, hi = (zs[i], zs[i + 1]) if up else (zs[i + 1], zs[i])
-            # The tread climbs a third of the rise, then one step.
-            za = zs[i] + 0.12
-            zb = za + (zs[i + 1] - zs[i]) * 0.35
-            z_next = zs[i + 1] + 0.12
-            # Tread top: herringbone brick (the viewer lays it from uv2).
-            corners = [(0.0, -W / 2, za), (Ls, -W / 2, zb), (Ls, W / 2, zb), (0.0, W / 2, za)]
-            P = np.array([F.E(*c)[0] for c in corners])
-            xy_ = np.array([F.xy(c[0], c[1]) for c in corners])
-            uv = np.column_stack([(xy_[:, 0] - X0) / (X1 - X0), (Y1 - xy_[:, 1]) / (Y1 - Y0)])
-            uv2 = np.array([[ss[i] + c[0], c[1] + W / 2] for c in corners])
-            gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=np.array([[0, 1, 2], [0, 2, 3]]),
-                   style=HERRING, uv2=uv2)
-            # The sides of the tread, down into the ground.
-            for sg in (-1, 1):
-                F.quad((0.0, sg * W / 2, za - 0.8), (Ls, sg * W / 2, zb - 0.8), (Ls, sg * W / 2, zb), (0.0, sg * W / 2, za),
-                       stone, (0, sg, 0))
-            # The step at the top end: a grey stone riser and nosing.
-            zr0, zr1 = (zb, z_next) if up else (z_next, zb)
-            if abs(z_next - zb) > 0.03:
-                riser_s = Ls if up else Ls
-                F.box(riser_s - 0.35, riser_s, -W / 2, W / 2, min(zr0, zr1) - 0.05, max(zr0, zr1), stone, top=True,
-                      sides="sS" if True else "")
-                n_steps += 1
-            # Parapet on the open (lower) side.
-            q1 = mntR.sample(*np.array([F.xy(Ls / 2, W / 2 + 2.5)]).T)[0]
-            q2 = mntR.sample(*np.array([F.xy(Ls / 2, -W / 2 - 2.5)]).T)[0]
-            if np.isfinite(q1) and np.isfinite(q2) and abs(q1 - q2) > 1.0:
-                sg = 1.0 if q1 < q2 else -1.0
-                t0, t1 = sorted((sg * W / 2, sg * (W / 2 + 0.45)))
+            a2, b2 = E_[j], E_[j + 1]
+            za, zb = zt[j], zt[j + 1]
+            d_ = b2 - a2
+            Ls = float(np.hypot(*d_))
+            if Ls < 1e-3:
+                continue
+            F = Frame(m, a2, d_)
+            out_ = sg * -1.0                       # Frame's t points right of travel; left edge is out at -t
+            F.quad((0.0, 0.0, za - 0.6), (Ls, 0.0, zb - 0.6), (Ls, 0.0, zb + 0.08), (0.0, 0.0, za + 0.08), stone,
+                   (0, out_, 0))
+            o = P[j] + (E_[j] - P[j]) * (1.0 + 2.5 / (W / 2))
+            gz = mntR.sample(np.array([o[0]]), np.array([o[1]]))[0]
+            if np.isfinite(gz) and gz < min(za, zb) - 1.0:
+                t0, t1 = sorted((0.0, out_ * 0.45))
                 ztop = max(za, zb) + 1.0
                 F.box(0.0, Ls, t0, t1, min(za, zb) - 1.5, ztop, rubble, top=False, style=RUBBLE, uvm=0.45)
                 F.box(-0.02, Ls + 0.02, t0 - 0.05, t1 + 0.05, ztop, ztop + 0.14, cope)
                 n_par += Ls
+            else:
+                # Uphill: a rubble retaining wall holding the slope back
+                # from the ramp (the ground under the ramp was lowered),
+                # its top following the slope smoothly.
+                wa, wb = wtop[sg][j], wtop[sg][j + 1]
+                for tt in (0.0, out_ * 0.5):
+                    F.quad((0.0, tt, za - 0.4), (Ls, tt, zb - 0.4), (Ls, tt, wb), (0.0, tt, wa), rubble,
+                           (0, -out_ if tt == 0.0 else out_, 0), style=RUBBLE, uvm=0.45)
+                F.quad((0.0, 0.0, wa), (Ls, 0.0, wb), (Ls, out_ * 0.5, wb), (0.0, out_ * 0.5, wa), cope, (0, 0, 1))
     stats["rampe_major_steps"] = n_steps
     stats["rampe_major_parapet_m"] = round(n_par)
+    stats["rampe_major_m"] = round(L)
     return n_steps
 
 
@@ -12222,6 +12604,174 @@ def chapiteau(m, mntR, stats):
     return Polygon(pts)
 
 
+# ------------------------------------------------------------- the Digue ----
+# Port Hercule's semi-floating breakwater (2002, 352 m by 28 m), moored by a
+# giant ball joint to its abutment at the foot of Fort Antoine, and that
+# abutment's platform: a car park, a tree-lined walk and the Solarium's
+# sunbathing decks stepping down to the sea. The LiDAR terrain model has no
+# ground on the floating part (it is "sea"), so BD TOPO's two outlines on it
+# (the cruise terminal, the raised walk) came out as blocks standing in the
+# water, and the abutment was painted like sand with lawns (the photo's tents
+# and the canopy finder). Built here from the IGN 20 cm photo (2023), the
+# LiDAR surface model's levels (2021: harbour deck 3.0-3.1 m, raised walk
+# 8.8 m by the terminal and 7.1 m beyond, terminal roof 14.1 m) and Mapillary
+# photos taken from Fort Antoine and the abutment (2017-2021): a long pale
+# concrete deck with a dark asphalt lane on the harbour side, a high pale
+# walk along the sea side behind a parapet, the terminal's red-brown block
+# over the lane, a scalloped lower walk at the sea's edge and the head's
+# low white building with the port light.
+# Frame: s along the breakwater from the abutment (m), t across, out to sea
+# (south-east) positive; the harbour face is at t = DIGUE_HARBOUR.
+DIGUE_O = (1056645.46, 6302662.51)
+DIGUE_U = (280.54, 382.80)
+DIGUE_PARTS = ("BATIMENT0000002009026510", "BATIMENT0000002009010575",
+               "BATIMENT0000000074074333", "BATIMENT0000002009009578")
+DIGUE_DONE = []
+DIGUE_ROOT, DIGUE_END = 126.0, 474.6     # s: the floating deck's start (the ball joint) and the head
+DIGUE_HARBOUR = -28.5                    # t of the harbour face (the sea face is t = 0)
+DIGUE_DECK = 3.1                         # m NGF: the lane, the quay edge and the lower sea walk
+DIGUE_WALK_HI = 8.8                      # the raised walk from the root to the terminal's end
+DIGUE_WALK_LO = 7.1                      # ... and beyond, toward the head
+DIGUE_STEP_S = 330.0                     # s where the raised walk steps down
+DIGUE_TERMINAL = (215.0, 322.0, -22.0, -8.0, 14.1)
+DIGUE_CONCRETE = "#d7d2c7"               # the deck's pale concrete
+DIGUE_WALL = "#c9c3b6"                   # its faces
+DIGUE_ASPHALT = "#5f6266"
+DIGUE_TERMINAL_COL = "#a9533f"           # red-brown cladding (Mapillary 2017)
+DIGUE_TERMINAL_ROOF = "#8e5446"
+# The abutment, in the same frame: (s0, s1, t0, t1) boxes of what the photo
+# shows. Levels from the LiDAR terrain model.
+DIGUE_SOLARIUM = [(8.0, 140.0, 0.5, 5.5, 4.0), (8.0, 140.0, 5.5, 10.5, 3.0), (8.0, 140.0, 10.5, 14.0, 1.6)]
+DIGUE_PAINT = [
+    ((22.0, 140.0, -95.0, -11.0), "#6d6f72"),      # the car park, the boat yard and the Quai Rainier loop's asphalt
+    ((30.0, 140.0, -11.0, -3.0), "#c9c5bc"),       # the pale walk where the tents stand in summer
+    ((5.0, 140.0, -3.0, 0.5), "#8c5d4e"),          # the red-brown walk under the trees
+    ((20.0, 40.0, -20.0, -9.0), "#9b6a58"),        # the terrace with round planters under the Fort
+    ((8.0, 140.0, 0.5, 14.5), "#e2dccf"),          # the Solarium's decks
+]
+DIGUE_BAYS = [((-30.5, -25.5), (60.0, 100.0)), ((-25.5, -20.5), (60.0, 100.0))]
+
+
+def digue_frame(m=None):
+    return Frame(m, DIGUE_O, DIGUE_U)
+
+
+def digue_zone():
+    """The breakwater and the abutment's decks (no LiDAR trees, no lawn)."""
+    F = digue_frame()
+    return unary_union([F.poly(DIGUE_ROOT - 2.0, DIGUE_END + 1.0, DIGUE_HARBOUR - 0.5, 0.5),
+                        F.poly(26.0, 142.0, -11.0, 15.0)])
+
+
+def digue_paint(poly, line):
+    """The abutment's ground map (paint_ground's poly and line helpers)."""
+    F = digue_frame()
+    for (s0, s1, t0, t1), col in DIGUE_PAINT:
+        poly(np.asarray(F.poly(s0, s1, t0, t1).exterior.coords), col)
+    # The car park's bays: white lines across two rows (20 cm photo).
+    for (t0, t1), (sa, sb) in DIGUE_BAYS:
+        for s in np.arange(sa, sb + 0.1, 2.5):
+            line([F.xy(s, t0), F.xy(s, t1)], "#c4c3be", 0.15)
+    # The decks' step edges, a darker line each.
+    for s0, s1, t0, t1, z in DIGUE_SOLARIUM[1:]:
+        line([F.xy(s0, t0), F.xy(s1, t0)], "#b9b2a4", 0.35)
+
+
+def digue(m, tm, mntR, stats):
+    F = digue_frame(m)
+    C = lambda h: np.array(hexrgb(h), float)
+    conc, wall, asph = C(DIGUE_CONCRETE), C(DIGUE_WALL), C(DIGUE_ASPHALT)
+    r0, r1, th, d = DIGUE_ROOT, DIGUE_END, DIGUE_HARBOUR, DIGUE_DECK
+    ts0, ts1, tt0, tt1, troof = DIGUE_TERMINAL
+    bottom = -2.0
+    # The hull: plain concrete faces into the water, a darker wet band at
+    # the waterline, and the deck. The lane is asphalt between a pale quay
+    # edge (with bollards) and the raised walk's wall.
+    F.box(r0, r1, th, 0.0, bottom, d, wall, top=False, sides="tTS")
+    F.box(r0, r1, th - 0.02, 0.02, 0.2, 1.1, wall * 0.72, top=False, sides="tTS")
+    F.box(r0, r1, th, th + 1.6, d, d + 0.06, conc)                                  # quay edge
+    F.box(r0, r1, th + 1.6, -12.0, d, d + 0.03, asph)                               # the lane
+    for s in np.arange(r0 + 6.0, r1 - 4.0, 12.0):
+        _cyl(m, *F.xy(s, th + 0.5), d, d + 0.55, 0.22, C("#2f3133"), sides=8)       # bollards
+    # A white dashed line down the lane.
+    for s in np.arange(r0 + 4.0, r1 - 12.0, 9.0):
+        F.box(s, s + 4.5, -19.9, -19.75, d + 0.03, d + 0.05, C("#e4e2dc"), sides="")
+    # The raised walk along the sea side: 8.8 m from the root to the
+    # terminal's end, then 7.1 m toward the head behind a lower sea walk
+    # (3.1 m) with its scalloped edge (the wave chambers' curved tops).
+    lo_t0 = -4.5
+    hi = [(r0 + 14.0, ts0, -12.0, 0.0), (ts0, ts1, tt1, 0.0), (ts1, DIGUE_STEP_S, -14.0, 0.0)]
+    for s0, s1, t0, t1 in hi:
+        F.box(s0, s1, t0, t1, d, DIGUE_WALK_HI, conc, sides="stT" if s0 == r0 + 14.0 else "tT")
+    F.box(DIGUE_STEP_S, 440.0, -12.0, lo_t0, d, DIGUE_WALK_LO, conc, sides="tTS")
+    F.box(DIGUE_STEP_S, DIGUE_STEP_S + 0.01, -14.0, lo_t0, DIGUE_WALK_LO, DIGUE_WALK_HI, conc, top=False, sides="S")
+    F.box(DIGUE_STEP_S, r1, lo_t0, 0.0, d, d + 0.05, conc * 0.98)                    # the lower sea walk
+    for s in np.arange(DIGUE_STEP_S + 4.0, r1 - 6.0, 7.4):
+        F.drum(s, 0.0, d, d + 0.55, 3.1, conc * 0.93, n=10, th0=math.pi, th1=2 * math.pi)
+        F.cone(s, 0.0, d + 0.55, 3.1, 0.25, conc * 0.97, n=10, th0=math.pi, th1=2 * math.pi, kind=PLAIN)
+    # Steps: from the raised walk down to the lower one by the terminal's
+    # end, and at the root from the abutment's walk (4 m) up to the deck.
+    _stairs(m, F.xy(DIGUE_STEP_S + 0.5, -2.2), F.xy(DIGUE_STEP_S + 9.0, -2.2), DIGUE_WALK_HI, d, 3.6, conc, wall)
+    _stairs(m, F.xy(r0 + 14.0, -6.0), F.xy(r0 - 4.0, -6.0), DIGUE_WALK_HI, 4.0, 9.0, conc, wall)
+    # Parapets: a pale wall on the sea edge of the high walk, white
+    # railings along its harbour side and round the lower walk.
+    F.box(r0 + 14.0, DIGUE_STEP_S, -0.6, 0.0, DIGUE_WALK_HI, DIGUE_WALK_HI + 1.1, conc * 1.02)
+    for s0, s1, t_, z in ((r0 + 14.0, ts0, -12.0, DIGUE_WALK_HI), (ts1, DIGUE_STEP_S, -14.0, DIGUE_WALK_HI),
+                          (DIGUE_STEP_S, 440.0, -12.0, DIGUE_WALK_LO), (DIGUE_STEP_S + 9.0, 440.0, lo_t0, DIGUE_WALK_LO)):
+        railing(m, np.array([F.xy(s0, t_ + 0.1)]), np.array([F.xy(s1, t_ + 0.1)]), z, STREET_RAIL)
+    # Lamps along the high walk.
+    for s in np.arange(r0 + 22.0, 440.0, 24.0):
+        t_ = -1.2 if s < DIGUE_STEP_S else -5.5
+        z = DIGUE_WALK_HI if s < DIGUE_STEP_S else DIGUE_WALK_LO
+        _cyl(m, *F.xy(s, t_), z, z + 4.2, 0.07, C("#3a3d3f"), sides=6)
+        F.box(s - 0.3, s + 0.3, t_ - 0.2, t_ + 0.2, z + 4.1, z + 4.35, C("#3a3d3f"))
+    # The cruise terminal: a long block over the lane, red-brown cladding
+    # with a band of glass on each floor, a flat brown roof.
+    col = C(DIGUE_TERMINAL_COL)
+    tpoly = F.poly(ts0, ts1, tt0, tt1)
+    add_walls(m, tpoly, d, troof - 0.9, d, 3.6, col, WALL_NEW, style=S_RIBBON)
+    F.box(ts0 - 0.3, ts1 + 0.3, tt0 - 0.3, tt1 + 0.3, troof - 0.9, troof, col * 0.9)
+    add_roof(m, tpoly, troof, C(DIGUE_TERMINAL_ROOF), False)
+    for s in np.arange(ts0 + 8.0, ts1 - 6.0, 18.0):
+        F.box(s, s + 6.0, tt0 + 3.0, tt0 + 7.0, troof, troof + 1.6, C("#b9b5ad"))      # roof plant
+    # The head: a pale platform round a low white building and the port's
+    # light, a white tower with a red lantern (the harbour's red side).
+    F.box(440.0, r1, th + 1.6, lo_t0, d, d + 0.35, conc)
+    add_walls(m, F.poly(452.0, 469.0, -24.0, -9.0), d + 0.35, d + 6.6, d + 0.35, 3.1, C("#efeeea"), WALL_NEW,
+              style=S_MODERN)
+    F.box(451.5, 469.5, -24.5, -8.5, d + 6.6, d + 7.0, C("#dcdad3"))
+    F.box(466.0, 467.0, -22.0, -21.0, d + 7.0, d + 13.0, C("#9a9c9e"))                 # the mast
+    F.drum(r1 - 2.6, th + 2.6, d + 0.35, d + 9.0, 1.1, C("#f4f2ee"), n=10)
+    F.drum(r1 - 2.6, th + 2.6, d + 9.0, d + 10.6, 0.8, C("#c3352c"), n=10)
+    F.cone(r1 - 2.6, th + 2.6, d + 10.6, 1.0, 0.8, C("#7c2a24"), n=10, kind=PLAIN)
+    # The root: the deck runs onto the abutment over a short ramp (the car
+    # park is at 2 m), and the abutment's sea edge steps down in the
+    # Solarium's three sunbathing decks.
+    F.box(r0 - 8.0, r0, th + 1.6, -12.0, 1.9, 2.0, asph, sides="")
+    F.quad((r0 - 8.0, th + 1.6, 2.03), (r0, th + 1.6, d + 0.03), (r0, -12.0, d + 0.03), (r0 - 8.0, -12.0, 2.03), asph,
+           (0, 0, 1))
+    deck = C("#e2dccf")
+    for s0, s1, t0, t1, z in DIGUE_SOLARIUM:
+        F.box(s0, s1, t0, t1, -1.0, z + 0.06, deck, sides="tTS")
+    # The red-brown walk's row of small trees (the 20 cm photo).
+    rnd = rng_for("digue-trees")
+    nt = 0
+    for s in np.arange(9.0, 136.0, 8.5):
+        x, y = F.xy(s + rnd.uniform(-1, 1), -1.4)
+        z = float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=4.0))
+        add_tree(tm, x, y, z, rnd.uniform(4.5, 6.0), rnd.uniform(1.6, 2.2), "broad", rnd)
+        nt += 1
+    stats["digue_m"] = round(r1 - r0, 1)
+    stats["digue_trees"] = nt
+    return nt
+
+
+def digue_footprint():
+    """The breakwater's plan, for the building mask (no trees or lawn on it)."""
+    F = digue_frame()
+    return orient(F.poly(DIGUE_ROOT, DIGUE_END, DIGUE_HARBOUR, 0.0), 1.0)
+
+
 # The Centre Commercial de Fontvieille (Carrefour and its mall): a podium
 # from the streets up to its roof, the Esplanade Rainier III and the
 # Jardin de l'Unesco, which the LiDAR terrain model takes for ground (19 m
@@ -12727,6 +13277,491 @@ def _park_slab(gm, poly, mntR, gz, style, cf, bx0, by1, R, lift=0.08, area=2.5):
     return n_
 
 
+# ------------------------------------------------------- Monaco Heliport ----
+# The Héliport de Monaco (LNMC) on the sea front of Fontvieille: a concrete
+# apron 170 m long on the sea wall, six stands in a row (1 to 6, the second
+# one the white "H" of the landing area) and two square platforms, A and B,
+# out over the water at either end. Everything is placed from open data:
+# OpenStreetMap (the heliport, the eight helipads, the terminal, the hangar,
+# the control tower) and measured on the IGN 20 cm photo (each pad's rings
+# fitted to the paint: 7.45 m and 2.9 m, the arms at 55 degrees, the blue
+# taxi lines, the yellow and black hatching, the red and white edge) and in
+# the LiDAR (the apron at 5.8 m NGF sloping 30 cm to the sea, A and B at
+# 6.4 m, a quay at 1.4 m under the safety nets along the edge).
+# Frame: s along the apron from pad 1's centre (south-west to north-east),
+# t out to sea.
+HELI_O = (1055977.8, 6301799.3)
+HELI_AXIS = 48.4                       # degrees, east to north
+HELI_EDGE = 8.2                        # t of the apron's sea edge
+HELI_BACK = -16.0                      # t, behind the terminal and hangar fronts
+HELI_ENDS = (-30.0, 137.0)             # s, the hatched ends
+HELI_JUTS = (-17.6, 125.3)             # s of pads A and B, the platforms' centre lines
+HELI_JUT_HALF = 8.85
+HELI_JUT_END = 26.6                    # t of the platforms' sea side
+HELI_RAMP = 2.8                        # m from the apron's edge up to a platform
+HELI_NET = 4.4                         # m, the safety net frame out from the edge
+HELI_QUAY = 1.4                        # m NGF, the quay under the nets (LiDAR)
+# Pads: s, t, outer ring radius, inner ring radius, colour, arms. An arm is
+# (side along s, side across t, arrow): arms run at 55 degrees to the apron,
+# from the inner ring to the outer one; an arrow carries on past the ring to
+# a head pointing at the taxi line. "out": a short arrow from the ring only.
+HELI_ARM_DEG = 55.0
+_ALL4 = ((-1, -1, True), (1, -1, True), (-1, 1, False), (1, 1, False))
+HELI_PADS = [
+    ("1", 0.0, -0.30, 7.45, 2.9, "yellow", ((-1, -1, True), (1, 1, False))),
+    ("2", 20.2, -0.16, 7.45, 2.9, "white", _ALL4),
+    ("3", 40.41, -0.16, 7.45, 2.9, "yellow", _ALL4),
+    ("4", 60.7, -0.06, 7.45, 2.9, "yellow", _ALL4),
+    ("5", 84.69, -0.09, 7.45, 2.9, "yellow", _ALL4),
+    ("6", 108.95, 0.04, 7.45, 2.9, "yellow", ((1, -1, True), (-1, 1, False))),
+    ("A", -17.61, 19.78, 6.1, 3.0, "yellow", ((-1, -1, "out"), (1, -1, "out"))),
+    ("B", 125.34, 20.04, 6.1, 3.0, "yellow", ((-1, -1, "out"), (1, -1, "out"))),
+]
+HELI_TAXI_T = -10.75                   # the blue line along the back of the stands
+HELI_TAXI_S = (-8.0, 117.0)            # where it turns down to A and B
+HELI_PAINT = {"yellow": "#e3bd3c", "white": "#f1f0ea", "blue": "#7fb2d8", "concrete": "#9c9d9b",
+              "face": "#c4c0b6", "steel": "#d9dcdc", "net": "#5d6266"}
+HELI_HANGAR = "BATIMENT0000000074078998"
+HELI_TERMINAL = "BATIMENT0000000074079010"
+# Light buildings on the apron's ends: plain white, no windows.
+HELI_PLAIN = {HELI_HANGAR: "#e3e3df", "BATIMENT0000000074079066": "#f2f1ec",
+              "BATIMENT0000002009026616": "#f2f1ec"}
+HELI_TOWER = (28.1, -15.0)             # OSM aeroway=tower, on the terminal's corner
+HELI_TOWER_TOP = 15.1                  # m NGF (LiDAR)
+HELI_PARKED = [("5", 90.0)]            # a red helicopter on stand 5 (the photo), nose: degrees left of +s
+HELI = None
+
+
+def heliport_setup(ways, mnt, feats):
+    """The apron's outline (OpenStreetMap's heliport, cut at the sea edge,
+    less the buildings on it, plus the two platforms) and its levels."""
+    global HELI
+    F = Frame(Mesh(), HELI_O, (math.cos(math.radians(HELI_AXIS)), math.sin(math.radians(HELI_AXIS))))
+    osm = None
+    for t_, p_, closed in ways:
+        if closed and t_.get("aeroway") == "heliport" and len(p_) >= 4:
+            osm = Polygon(p_).buffer(0.5)
+    if osm is None or not box(X0, Y0, X1, Y1).contains(osm.centroid):
+        HELI = None
+        return 0
+    main = F.poly(HELI_ENDS[0], HELI_ENDS[1], HELI_BACK, HELI_EDGE).intersection(osm)
+    juts = []
+    for sc in HELI_JUTS:
+        a, b, c = HELI_JUT_HALF, HELI_JUT_END, 2.8
+        juts.append(orient(Polygon([F.xy(sc - a, HELI_EDGE - 0.01), F.xy(sc + a, HELI_EDGE - 0.01), F.xy(sc + a, b - c),
+                                    F.xy(sc + a - c, b), F.xy(sc - a + c, b), F.xy(sc - a, b - c)]), 1.0))
+    bl = []
+    for f in feats:
+        g = shapely.force_2d(shape(f["geometry"])).buffer(0)
+        if g.intersects(main):
+            bl.append(g.buffer(0.1, join_style=2))
+    deck = unary_union([main] + juts).difference(unary_union(bl)) if bl else unary_union([main] + juts)
+    deck = max(to_polys(deck), key=lambda q: q.area)
+    deck = orient(Polygon(deck.exterior.simplify(0.05)), 1.0)
+    # Levels: a plane through the apron's terrain, the platforms' own level.
+    R = Raster(mnt)
+    ss, tt = np.meshgrid(np.arange(-25.0, 131.0, 2.0), np.arange(-11.0, 6.5, 1.5))
+    P = F.O[None] + ss.ravel()[:, None] * F.u[None] + tt.ravel()[:, None] * F.v[None]
+    z = R.sample(P[:, 0], P[:, 1])
+    ok = np.isfinite(z)
+    A = np.column_stack([np.ones(ok.sum()), ss.ravel()[ok], tt.ravel()[ok]])
+    coef = np.linalg.lstsq(A, z[ok], rcond=None)[0]
+    for _ in range(2):                             # drop the odd parked van and re-fit
+        r_ = z[ok] - A @ coef
+        keep = np.abs(r_) < 0.15
+        coef = np.linalg.lstsq(A[keep], z[ok][keep], rcond=None)[0]
+    jz = []
+    for sc in HELI_JUTS:
+        sj, tj = np.meshgrid(np.linspace(sc - 5, sc + 5, 6), np.linspace(14, 24, 6))
+        Q = F.O[None] + sj.ravel()[:, None] * F.u[None] + tj.ravel()[:, None] * F.v[None]
+        jz.append(float(np.nanmedian(R.sample(Q[:, 0], Q[:, 1]))))
+    HELI = {"F": F, "deck": deck, "main": deck.difference(unary_union(juts).buffer(-0.02)), "juts": juts,
+            "coef": coef, "jut_z": jz, "osm": osm}
+    print(f"  heliport: apron {deck.area:.0f} m2, plane {coef[0]:.2f} {coef[1]:+.4f}/m s {coef[2]:+.4f}/m t,"
+          f" platforms at {jz[0]:.2f} and {jz[1]:.2f} m")
+    return deck.area
+
+
+def heli_st(x, y):
+    F = HELI["F"]
+    d = np.column_stack([np.asarray(x, float) - F.O[0], np.asarray(y, float) - F.O[1]])
+    return d @ F.u, d @ F.v
+
+
+def heli_z(s, t):
+    """The apron's level at (s, t): the plane, then up the short ramps
+    onto the platforms."""
+    s, t = np.broadcast_arrays(np.asarray(s, float), np.asarray(t, float))
+    c = HELI["coef"]
+    z = c[0] + c[1] * s + c[2] * np.minimum(t, HELI_EDGE)
+    for sc, jz in zip(HELI_JUTS, HELI["jut_z"]):
+        on = (np.abs(s - sc) <= HELI_JUT_HALF + 0.05) & (t > HELI_EDGE)
+        w = np.clip((t - HELI_EDGE) / HELI_RAMP, 0.0, 1.0)
+        z = np.where(on, z * (1 - w) + jz * w, z)
+    return z
+
+
+def heliport_ground(mnt):
+    """Terrain under the apron sunk out of sight, and the quay below the
+    sea edge level, so the 3 m ground grid does not run the drop out as a
+    slope."""
+    if HELI is None:
+        return mnt
+    out = mnt.copy()
+    zone = HELI["deck"].buffer(GRID + 2.0, join_style=2)
+    x0, y0, x1, y1 = zone.bounds
+    c0, c1 = max(int((x0 - X0) / RES), 0), min(int((x1 - X0) / RES) + 1, mnt.shape[1])
+    r0, r1 = max(int((Y1 - y1) / RES), 0), min(int((Y1 - y0) / RES) + 1, mnt.shape[0])
+    rr, cc = np.mgrid[r0:r1, c0:c1]
+    cx, cy = cell_xy(rr.ravel(), cc.ravel())
+    s, t = heli_st(cx, cy)
+    sub = out[r0:r1, c0:c1].ravel()
+    inside = contains_xy(HELI["deck"], cx, cy)
+    near_edge = (t > HELI_EDGE - GRID - 1.6) & (t < HELI_EDGE + HELI_NET + 3.0) & \
+        (s > HELI_JUTS[0] - HELI_JUT_HALF) & (s < HELI_JUTS[1] + HELI_JUT_HALF) & ((t >= HELI_EDGE) | inside)
+    on_jut = contains_xy(unary_union(HELI["juts"]).buffer(GRID + 1.0, join_style=2), cx, cy) & (t > HELI_EDGE - GRID - 1.6)
+    low = (near_edge | on_jut) & np.isfinite(sub)
+    sub[low] = np.minimum(sub[low], HELI_QUAY - 0.05)
+    deep = inside & ~low & np.isfinite(sub)
+    sub[deep] = sub[deep] - 0.5
+    out[r0:r1, c0:c1] = sub.reshape(rr.shape)
+    return out
+
+
+def _heli_flat(m, geom, col, lift, area=None):
+    """Paint or slab lying on the apron: triangulated, each vertex at the
+    apron's level plus lift."""
+    n_ = 0
+    for q in to_polys(geom):
+        if q.area < 0.02:
+            continue
+        tr = triangulate(orient(q, 1.0), area)
+        if tr is None:
+            continue
+        v, tri = tr
+        s, t = heli_st(v[:, 0], v[:, 1])
+        P = enu_fast(v[:, 0], v[:, 1], heli_z(s, t) + lift)
+        m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], np.asarray(col, float), PLAIN)
+        n_ += len(tri)
+    return n_
+
+
+def _st_poly(F, pts):
+    return Polygon([F.xy(s, t) for s, t in pts])
+
+
+def _heli_blue_from_photo(F, hi):
+    """The light blue taxi lines' junctions between the stands, read off the
+    20 cm photo (the straight runs are drawn exactly, below)."""
+    if hi is None:
+        return Polygon()
+    ppm = hi.size[0] / (X1 - X0)
+    T, s0, s1, t0, t1 = 10.0, -30.0, 137.0, -15.0, -1.0
+    w, h = int((s1 - s0) * T), int((t1 - t0) * T)
+    cx = (F.O[0] + s0 * F.u[0] + t0 * F.v[0] - X0) * ppm
+    cy = (Y1 - (F.O[1] + s0 * F.u[1] + t0 * F.v[1])) * ppm
+    coef = (F.u[0] * ppm / T, F.v[0] * ppm / T, cx, -F.u[1] * ppm / T, -F.v[1] * ppm / T, cy)
+    a = np.asarray(hi.transform((w, h), Image.AFFINE, coef, resample=Image.BICUBIC)).astype(np.float32)
+    a = ndimage.gaussian_filter(a, (1.0, 1.0, 0))
+    r_, g_, b_ = a[..., 0], a[..., 1], a[..., 2]
+    blue = (b_ - r_ > 14) & (b_ >= g_ - 2) & (g_ - r_ > 4)
+    blue = ndimage.binary_closing(ndimage.binary_opening(blue, iterations=2), iterations=2)
+    lab, n = ndimage.label(blue)
+    if not n:
+        return Polygon()
+    sz = ndimage.sum(blue, lab, range(1, n + 1))
+    blue = np.isin(lab, np.nonzero(sz > 4.0 * T * T)[0] + 1)     # pieces over 4 m2
+    jj, ii = np.nonzero(blue)
+    if not len(jj):
+        return Polygon()
+    cells = unary_union([box(s0 + i / T, t0 + j / T, s0 + (i + 1) / T, t0 + (j + 1) / T) for j, i in zip(jj, ii)])
+    cells = cells.buffer(0.25, join_style=1).buffer(-0.5, join_style=1).buffer(0.25, join_style=1).simplify(0.08)
+    return unary_union([_st_poly(F, q.exterior.coords) for q in to_polys(cells) if q.area > 2.0])
+
+
+def _arrow(sa, ta, d, r0, r1, half, head_len, head_half):
+    """A shaft from r0 to r1 along d from (sa, ta), with a head at r1."""
+    n = np.array([-d[1], d[0]])
+    c = np.array([sa, ta])
+    p0, p1 = c + d * r0, c + d * (r1 - head_len)
+    tip = c + d * r1
+    return unary_union([Polygon([p0 - n * half, p1 - n * half, p1 + n * half, p0 + n * half]),
+                        Polygon([p1 - n * head_half, tip, p1 + n * head_half])])
+
+
+def heli_markings(F, hi):
+    """The paint on the apron, in (s, t): {colour: geometry}."""
+    out = {k: [] for k in ("yellow", "white", "blue")}
+    ca, sa_ = math.cos(math.radians(HELI_ARM_DEG)), math.sin(math.radians(HELI_ARM_DEG))
+    for name, s, t, R, ri, col, arms in HELI_PADS:
+        c = Point(s, t)
+        out[col].append(c.buffer(R, 96).difference(c.buffer(R - 0.4, 96)))
+        out[col].append(c.buffer(ri, 64).difference(c.buffer(ri - 0.35, 64)))
+        for ds, dt, arrow in arms:
+            d = np.array([ds * ca, dt * sa_])
+            if arrow == "out":
+                out[col].append(_arrow(s, t, d, R - 0.2, R + 2.2, 0.35, 1.0, 0.75))
+            elif arrow:
+                out[col].append(_arrow(s, t, d, ri - 0.1, 10.6, 0.42, 1.9, 1.15))
+            else:
+                out[col].append(_arrow(s, t, d, ri - 0.1, R - 0.2, 0.42, 0.0, 0.42))
+        if name == "2":
+            # The H, upright to the north as painted.
+            nth = np.array([F.u[1], F.v[1]])          # north in (s, t)
+            nth = nth / np.linalg.norm(nth)
+            est = np.array([nth[1], -nth[0]])
+            def rect(a0, a1, b0, b1):
+                return Polygon([np.array([s, t]) + est * a + nth * b for a, b in ((a0, b0), (a1, b0), (a1, b1), (a0, b1))])
+            out[col] += [rect(-1.05, -0.55, -1.45, 1.45), rect(0.55, 1.05, -1.45, 1.45), rect(-0.55, 0.55, -0.22, 0.22)]
+    # Blue taxi lines: along the back of the stands, down to the platforms.
+    w = 0.45
+    s0, s1 = HELI_TAXI_S
+    for sc, se in ((HELI_JUTS[0], s0), (HELI_JUTS[1], s1)):
+        corner = HELI_TAXI_T + abs(se - sc)
+        line = LineString([(se, HELI_TAXI_T), (sc, corner), (sc, HELI_PADS[6 if sc < 0 else 7][2] - 6.1)])
+        out["blue"].append(line.buffer(w, cap_style=2, join_style=2))
+    out["blue"].append(LineString([(s0, HELI_TAXI_T), (s1, HELI_TAXI_T)]).buffer(w, cap_style=2))
+    # Hatched ends: yellow stripes on the grey, between the line and the
+    # buildings.
+    for sc, se in ((HELI_JUTS[0], s0), (HELI_JUTS[1], s1)):
+        lo, hi_ = (HELI_ENDS[0] + 2.0, se - 0.5) if sc < 0 else (se + 0.5, HELI_ENDS[1] - 1.0)
+        zone = box(lo, -12.0, hi_, 7.0)
+        inner = Polygon([(se, HELI_TAXI_T - 5), (se, HELI_TAXI_T), (sc, HELI_TAXI_T + abs(se - sc)), (sc, 9.0),
+                         (se + (40 if sc < 0 else -40), 9.0), (se + (40 if sc < 0 else -40), HELI_TAXI_T - 5)])
+        zone = zone.difference(inner.buffer(0.9, join_style=2))
+        zone = zone.difference(LineString([(sc, -20), (sc, 9)]).buffer(1.1, cap_style=2))
+        k = np.arange(-40, 40) * 1.6
+        stripes = unary_union([Polygon([(lo + a, 7.0), (lo + a + 0.75, 7.0), (lo + a + 0.75 + 19.0, -12.0),
+                                        (lo + a + 19.0, -12.0)]) for a in k])
+        out["yellow"].append(zone.intersection(stripes))
+    res = {}
+    for k, v in out.items():
+        g = unary_union([q for q in v if not q.is_empty])
+        res[k] = unary_union([_st_poly(F, q.exterior.coords).difference(
+            unary_union([_st_poly(F, h.coords) for h in q.interiors])) for q in to_polys(g)])
+    res["blue"] = unary_union([res["blue"], _heli_blue_from_photo(F, hi)]).difference(
+        unary_union([res["yellow"], res["white"]]).buffer(0.15))
+    return res
+
+
+def helicopter(m, x, y, z, heading, body="#c4232b", trim="#f2f1ec"):
+    """A small single-engine helicopter (an AS350 / EC130 shape): cabin,
+    tail boom with fin, three-blade rotor, skids. heading: radians, east = 0."""
+    d = np.array([math.cos(heading), math.sin(heading)])
+    n = np.array([-d[1], d[0]])
+    body_c, trim_c, glass = (np.array(hexrgb(c), float) for c in (body, trim, "#27323a"))
+    dark = np.array(hexrgb("#2b2d30"), float)
+
+    def at(a, b, c):
+        p = np.array([x, y]) + np.outer(np.atleast_1d(a), d) + np.outer(np.atleast_1d(b), n)
+        return enu_fast(p[:, 0], p[:, 1], z + np.atleast_1d(c))
+    # Cabin: a squashed egg, glazed at the front, white below.
+    v, tri = unit_sphere(14, 8)
+    L, W, H = 2.3, 0.85, 0.82
+    a, b, c = v[:, 0] * L, v[:, 1] * W, v[:, 2] * H
+    a = np.where(a > 0, a, a * 0.9)
+    c = np.where(c < 0, c * 0.8, c)
+    cols = np.where(((a > 0.9) & (c > -0.15))[:, None], glass, np.where((c < -0.35)[:, None], trim_c, body_c))
+    P = at(a, b, c + 1.35)
+    Q = at(a * 1.1, b * 1.1, c * 1.1 + 1.35)
+    nrm = Q - P
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+    m.add(P, nrm, cols, PLAIN, idx=tri)
+    F = Frame(m, (x, y), d)              # s forward, t to the right of the nose
+    # Engine cowling and mast.
+    F.box(-1.2, 0.4, -0.45, 0.45, z + 1.9, z + 2.35, body_c)
+    _cyl(m, x, y, z + 2.35, z + 2.75, 0.12, dark, 8)
+    # Tail boom, tapering, and the fin with its small tailplane.
+    for i in range(6):
+        s_a, s_b = -2.0 - i * 0.85, -2.0 - (i + 1) * 0.85
+        hw = 0.28 - 0.025 * i
+        F.box(s_b, s_a, -hw, hw, z + 1.45 - 0.02 * i, z + 1.45 + 2 * hw - 0.02 * i, body_c if i < 4 else trim_c)
+    F.box(-7.4, -6.9, -0.06, 0.06, z + 1.4, z + 2.85, body_c)
+    F.box(-6.6, -6.1, -1.1, 1.1, z + 1.5, z + 1.58, trim_c)
+    # Rotor: three blades, one along the boom as they park.
+    for k in range(3):
+        ang = heading + math.pi + k * 2 * math.pi / 3
+        e = np.array([math.cos(ang), math.sin(ang)])
+        Fb = Frame(m, (x, y), e)
+        Fb.box(0.15, 5.35, -0.17, 0.17, z + 2.74, z + 2.8, dark, bottom=True)
+    # Skids on struts.
+    for sd in (-1.05, 1.05):
+        F.box(-1.6, 1.9, sd - 0.06, sd + 0.06, z + 0.05, z + 0.17, dark)
+        for sa in (-0.9, 0.9):
+            F.box(sa - 0.07, sa + 0.07, sd * 0.55 - 0.05, sd * 0.55 + 0.05, z + 0.12, z + 0.75, dark)
+            F.box(sa - 0.07, sa + 0.07, min(sd, sd * 0.55) - 0.03, max(sd, sd * 0.55) + 0.03, z + 0.12, z + 0.2, dark)
+
+
+def heliport(gm, m, hi, stats):
+    """The apron, its paint, edges, nets and platforms; the control tower;
+    a parked helicopter."""
+    if HELI is None:
+        return 0
+    F = Frame(m, HELI["F"].O, HELI["F"].u)
+    deck = HELI["deck"]
+    conc = np.array(hexrgb(HELI_PAINT["concrete"]), float)
+    face = np.array(hexrgb(HELI_PAINT["face"]), float)
+    # The concrete, a shade darker on the platforms (newer slabs, photo).
+    n_ = _heli_flat(m, HELI["main"], conc, 0.0, 8.0)
+    for j in HELI["juts"]:
+        n_ += _heli_flat(m, j, conc * 0.94, 0.0, 4.0)
+    paint = heli_markings(F, hi)
+    for k, g in paint.items():
+        n_ += _heli_flat(m, g.intersection(deck.buffer(-0.05)), hexrgb(HELI_PAINT[k]), 0.03, 0.8)
+    # Red and white edge: along the sea edge between the platforms and
+    # round the platforms (the viewer's red and white kerb paint).
+    def kerb_band(A, B, inward, width):
+        A, B = np.asarray(A, float), np.asarray(B, float)
+        L = np.linalg.norm(B - A, axis=1)
+        s0 = np.r_[0.0, np.cumsum(L)[:-1]]
+        s1 = s0 + L
+        Ai, Bi = A + inward * width, B + inward * width
+        za = heli_z(*heli_st(A[:, 0], A[:, 1])) + 0.035
+        zb = heli_z(*heli_st(B[:, 0], B[:, 1])) + 0.035
+        zero, one = np.zeros(len(A)), np.ones(len(A))
+        up3 = np.tile([0.0, 0.0, 1.0], (len(A), 1))
+        _quad_uv(m, enu_fast(A[:, 0], A[:, 1], za), enu_fast(B[:, 0], B[:, 1], zb), enu_fast(Bi[:, 0], Bi[:, 1], zb),
+                 enu_fast(Ai[:, 0], Ai[:, 1], za), np.array(hexrgb("#e9e7e1")), up3,
+                 [np.column_stack([s0, zero]), np.column_stack([s1, zero]), np.column_stack([s1, one]),
+                  np.column_stack([s0, one])], style=KERB_RW)
+        return float(L.sum())
+    a_, b_ = HELI_JUTS[0] + HELI_JUT_HALF, HELI_JUTS[1] - HELI_JUT_HALF
+    ss = np.linspace(a_, b_, int((b_ - a_) / 2.0) + 1)
+    A = np.array([F.xy(s, HELI_EDGE - 0.02) for s in ss])
+    red_m = kerb_band(A[:-1], A[1:], -F.v, 1.2)
+    for j in HELI["juts"]:
+        ring = np.asarray(orient(j, 1.0).exterior.coords)[:, :2]
+        for p, q in zip(ring[:-1], ring[1:]):
+            mid = (p + q) / 2
+            if heli_st(*mid)[1][0] < HELI_EDGE + 0.5:
+                continue                              # the side on the apron
+            e = (q - p) / np.linalg.norm(q - p)
+            k = max(1, int(np.linalg.norm(q - p) / 2.0))
+            pts = p + np.outer(np.linspace(0, 1, k + 1), q - p)
+            red_m += kerb_band(pts[:-1], pts[1:], np.array([-e[1], e[0]]), 0.7)
+    stats["heliport_red_white_m"] = round(red_m)
+    # Sea edge: a concrete face down to the quay, the safety net frames
+    # sloping out over it on ribs, posts under the outer rail.
+    steel = np.array(hexrgb(HELI_PAINT["steel"]), float)
+    for s_a, s_b in zip(ss[:-1], ss[1:]):
+        za, zb = heli_z(s_a, HELI_EDGE), heli_z(s_b, HELI_EDGE)
+        F.quad((s_a, HELI_EDGE, HELI_QUAY - 0.3), (s_b, HELI_EDGE, HELI_QUAY - 0.3), (s_b, HELI_EDGE, float(zb)),
+               (s_a, HELI_EDGE, float(za)), face, (0, 1, 0))
+    for s_a, s_b in zip(ss[:-1], ss[1:]):
+        za, zb = float(heli_z(s_a, HELI_EDGE)) - 0.15, float(heli_z(s_b, HELI_EDGE)) - 0.15
+        P = [F.E(s_a, HELI_EDGE, za), F.E(s_b, HELI_EDGE, zb), F.E(s_b, HELI_EDGE + HELI_NET, zb - 1.0),
+             F.E(s_a, HELI_EDGE + HELI_NET, za - 1.0)]
+        uv = [np.array([[s_a, 0.0]]), np.array([[s_b, 0.0]]), np.array([[s_b, 1.0]]), np.array([[s_a, 1.0]])]
+        for sg in (1.0, -1.0):
+            _quad_uv(m, *P, np.array(hexrgb(HELI_PAINT["net"])), F.want(s_a, HELI_EDGE + 1, za, 0, 0, sg), uv, style=RAIL)
+    rib = np.arange(a_ + 1.1, b_ - 0.5, 2.2)
+    for s in rib:
+        z0 = float(heli_z(s, HELI_EDGE)) - 0.15
+        for k_ in range(4):
+            t0_, t1_ = HELI_EDGE + k_ * HELI_NET / 4, HELI_EDGE + (k_ + 1) * HELI_NET / 4
+            F.box(s - 0.06, s + 0.06, t0_, t1_, z0 - 1.0 * (k_ + 1) / 4 - 0.12, z0 - 1.0 * k_ / 4 + 0.02, steel)
+    zo = heli_z(ss, HELI_EDGE) - 1.15
+    for s_a, s_b, za, zb in zip(ss[:-1], ss[1:], zo[:-1], zo[1:]):
+        F.box(s_a, s_b, HELI_EDGE + HELI_NET - 0.08, HELI_EDGE + HELI_NET + 0.08, float(min(za, zb)) - 0.12,
+              float(max(za, zb)) + 0.04, steel, bottom=True)
+    for s in rib[::2]:
+        x, y = F.xy(s, HELI_EDGE + HELI_NET - 0.1)
+        _cyl(m, x, y, HELI_QUAY - 0.1, float(heli_z(s, HELI_EDGE)) - 1.2, 0.1, steel * 0.8, 6)
+    # The platforms: faces down to the water, on piers.
+    for sc, j in zip(HELI_JUTS, HELI["juts"]):
+        ring = np.asarray(orient(j, 1.0).exterior.coords)[:, :2]
+        for p, q in zip(ring[:-1], ring[1:]):
+            mid = (p + q) / 2
+            if heli_st(*mid)[1][0] < HELI_EDGE + 0.5:
+                continue
+            sp, tp = heli_st(*p)
+            sq, tq = heli_st(*q)
+            zp, zq = float(heli_z(sp, tp)[0]), float(heli_z(sq, tq)[0])
+            nn = np.array([(q - p)[1], -(q - p)[0]])
+            F.quad((float(sp[0]), float(tp[0]), zp - 1.1), (float(sq[0]), float(tq[0]), zq - 1.1),
+                   (float(sq[0]), float(tq[0]), zq), (float(sp[0]), float(tp[0]), zp), face,
+                   (float(nn @ F.u), float(nn @ F.v), 0))
+            # A white railing at the platform's edge.
+            ins = -nn / np.linalg.norm(nn) * 0.15
+            railing(m, np.array([p + ins]), np.array([q + ins]), np.array([zp]), "#f1f0ea", 1.0, zb=np.array([zq]))
+        jz = HELI["jut_z"][0 if sc < 0 else 1]
+        for ps in (-HELI_JUT_HALF + 1.2, 0.0, HELI_JUT_HALF - 1.2):
+            for pt in (HELI_EDGE + HELI_NET + 1.0, (HELI_EDGE + HELI_JUT_END) / 2 + 2.0, HELI_JUT_END - 1.2):
+                x, y = F.xy(sc + ps, pt)
+                _cyl(m, x, y, -1.0, jz - 1.1, 0.45, face * 0.9, 10)
+        # Under the deck slab: its soffit.
+        sl = j.difference(F.poly(sc - 20, sc + 20, HELI_EDGE - 5, HELI_EDGE + HELI_NET))
+        for q in to_polys(sl):
+            tr = triangulate(orient(q, 1.0))
+            if tr is None:
+                continue
+            v, tri = tr
+            P = enu_fast(v[:, 0], v[:, 1], np.full(len(v), jz - 1.1))
+            m.tri(P[tri[:, 0]], P[tri[:, 2]], P[tri[:, 1]], face * 0.7, PLAIN)
+    # Control tower on the terminal's corner: a shaft and a glazed cab.
+    ts, tt = HELI_TOWER
+    zr = float(heli_z(ts, -12.0)) + 4.1               # the terminal's roof (LiDAR, 9.9 m)
+    cream = np.array(hexrgb("#efe4cf"), float)
+    F.drum(ts, tt, zr - 0.5, HELI_TOWER_TOP - 3.0, 1.7, cream, n=8, th0=math.pi / 8, th1=math.pi / 8 + 2 * math.pi)
+    F.drum(ts, tt, HELI_TOWER_TOP - 3.0, HELI_TOWER_TOP - 0.7, 2.2, np.array(hexrgb("#4a5a66"), float), n=8,
+           th0=math.pi / 8, th1=math.pi / 8 + 2 * math.pi, style=FORUM_GLASS)
+    F.drum(ts, tt, HELI_TOWER_TOP - 3.2, HELI_TOWER_TOP - 3.0, 2.35, cream, n=8, th0=math.pi / 8,
+           th1=math.pi / 8 + 2 * math.pi)
+    F.drum(ts, tt, HELI_TOWER_TOP - 0.7, HELI_TOWER_TOP - 0.3, 2.6, cream, n=8, th0=math.pi / 8,
+           th1=math.pi / 8 + 2 * math.pi)
+    F.cone(ts, tt, HELI_TOWER_TOP - 0.3, 2.6, 0.3, cream, n=8, th0=math.pi / 8, th1=math.pi / 8 + 2 * math.pi, kind=PLAIN)
+    x, y = F.xy(ts, tt)
+    _cyl(m, x, y, HELI_TOWER_TOP, HELI_TOWER_TOP + 2.5, 0.05, np.array(hexrgb("#d0d0d0"), float), 6)
+    # Windsock by platform B (orange and white).
+    xw, yw = F.xy(HELI_JUTS[1] + HELI_JUT_HALF - 0.6, HELI_JUT_END - 3.4)
+    jzb = HELI["jut_z"][1]
+    _cyl(m, xw, yw, jzb, jzb + 5.2, 0.06, steel, 6)
+    Fw = Frame(m, (xw, yw), (-F.u[0], -F.u[1]))
+    for i in range(5):
+        r_ = 0.32 - 0.04 * i
+        Fw.drum(0.25 + 0.5 * i, 0.0, jzb + 4.9 - 0.05 * i - r_, jzb + 4.9 - 0.05 * i + r_, r_,
+                np.array(hexrgb("#e2672c" if i % 2 == 0 else "#f2f1ec"), float), n=8)
+    # The helicopter on stand 5, as in the photo.
+    for name, hd in HELI_PARKED:
+        p_ = next(p for p in HELI_PADS if p[0] == name)
+        x, y = F.xy(p_[1], p_[2])
+        ang = math.radians(HELI_AXIS + hd)
+        helicopter(m, x, y, float(heli_z(p_[1], p_[2])) + 0.03, ang)
+    stats["heliport_tris"] = n_
+    stats["heliport_m2"] = round(deck.area)
+    return n_
+
+
+def heli_hangar_doors(m, poly, base, H):
+    """Hangar doors on the apron side: tall panels in a row, a shade darker
+    than the cladding."""
+    if HELI is None:
+        return 0
+    F = HELI["F"]
+    ring = np.asarray(orient(poly, 1.0).exterior.coords)[:, :2]
+    k = 0
+    for p, q in zip(ring[:-1], ring[1:]):
+        e = q - p
+        L = float(np.linalg.norm(e))
+        if L < 8:
+            continue
+        e /= L
+        out = np.array([e[1], -e[0]])
+        if out @ F.v < 0.8:
+            continue
+        Fd = Frame(m, p, e)          # s along the wall, t out of it
+        n = max(1, int(round((L - 1.0) / 4.6)))
+        w = (L - 1.0) / n
+        top = min(base + 6.0, base + H - 1.0)
+        for i in range(n):
+            a = 0.5 + i * w
+            Fd.box(a + 0.06, a + w - 0.06, -0.02, 0.16, base, top, np.array(hexrgb("#b9c0c6"), float))
+            Fd.box(a + 0.3, a + w - 0.3, 0.16, 0.2, base + 3.4, base + 3.9, np.array(hexrgb("#8f989f"), float))
+        Fd.box(0.3, L - 0.3, -0.02, 0.35, top, top + 0.45, np.array(hexrgb("#d6d6d2"), float), bottom=True)
+        k += n
+    return k
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="download the inputs first")
@@ -12773,8 +13808,10 @@ def main():
     MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
     global PORTIER
     PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
-    global ARMES, CONDA, ROCHER_GARDENS
+    global ARMES, CONDA, ROCHER_GARDENS, RAMPE
     ARMES = armes_setup(ways)
+    RAMPE = rampe_setup(ways)
+    rampe_heights(mnt, ways)
     CONDA = condamine_setup(ways)
     ROCHER_GARDENS = rocher_gardens_setup(ways)
     mnt_f = np.where(sea, np.nan, mnt)
@@ -12841,6 +13878,7 @@ def main():
     global FM, STADE_POLY
     FM = fairmont_setup(feats, mns, mnt_f)
     STADE_POLY = stade_setup(feats)
+    print("heliport apron…", heliport_setup(ways, mnt_f, feats))
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -12886,8 +13924,9 @@ def main():
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     print("Fontvieille podiums…", podium_setup(ways, mnt_f))
-    gm, gz = ground_mesh(podium_ground(mnt_ground), sea)
+    gm, gz = ground_mesh(heliport_ground(podium_ground(mnt_ground)), sea)
     print("podium walls…", podium_walls(gm, bm, stats), "m")
+    print("heliport…", heliport(gm, bm, ortho_hi, stats), "triangles of apron and paint")
     print("tunnel portals…", portals(gm, bm, stats))
     rm = Mesh()
     print("roads…", road_surfaces(rm, ways, pts, gz, bmask, stats), "m")
@@ -12920,6 +13959,7 @@ def main():
           stats.get("rocher_brick_m2"), "m2 of brick pavement")
     print("Pêcheurs garden…", peche_terrace(gm, bm, mnt_f, gz, stats), "m of sea wall,",
           stats.get("peche_walk_m2"), "m2 of walk")
+    print("Digue…", digue(bm, tm, Raster(mnt_f), stats), "trees,", stats.get("digue_m"), "m of breakwater")
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     print("parks…", parks(gm, bm, ways, pts, mnt_f, mns, ortho_hi, gz, fps, stats), "parks and gardens")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
