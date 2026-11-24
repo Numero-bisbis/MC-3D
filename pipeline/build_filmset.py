@@ -4908,6 +4908,19 @@ def edge_walls(U, mnt, zfn, skip, gardens=None):
         return {"up_m": 0.0, "down_m": 0.0, "a": np.zeros((0, 2))}
     w = {k_: np.concatenate(v) for k_, v in (("a", A), ("b", B), ("out", OUT), ("up", KIND), ("top", TOP),
                                              ("low", LOW), ("zw", ZW), ("garden", GARD))}
+    if TRACK is not None:
+        # Never on the circuit itself: an edge of the pavement polygon can
+        # cut a corner across the lap (by the Casino a 10 cm shift in the
+        # polygon stood the ground on a wall's top on the road).
+        mid = (w["a"] + w["b"]) / 2
+        on = (track_dist(mid[:, 0], mid[:, 1]) < TRACK_HALF - 0.2) | \
+             (track_dist(w["a"][:, 0], w["a"][:, 1]) < TRACK_HALF - 0.2) | \
+             (track_dist(w["b"][:, 0], w["b"][:, 1]) < TRACK_HALF - 0.2)
+        # (nor the level ground laid on top of a retaining wall, behind it)
+        for e_ in ("a", "b"):
+            q_ = w[e_] + w["out"] * SW_CAP
+            on |= w["up"] & (track_dist(q_[:, 0], q_[:, 1]) < TRACK_HALF - 0.2)
+        w = {k_: v[~on] for k_, v in w.items()}
     seg = np.linalg.norm(w["b"] - w["a"], axis=1)
     w["up_m"], w["down_m"] = float(seg[w["up"]].sum()), float(seg[~w["up"]].sum())
     return w

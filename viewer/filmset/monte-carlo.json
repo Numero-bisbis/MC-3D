@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3617461,
+ "triangles": 3617385,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -135,7 +135,7 @@
  "side_street_steps_m": 346,
  "street_railing_m": 339,
  "garden_wall_m": 510,
- "street_wall_up_m": 969,
+ "street_wall_up_m": 968,
  "street_wall_down_m": 494,
  "carpark_doors": 1,
  "grid_slots": 20,
@@ -164,7 +164,7 @@
  "gastaud_olives": 10,
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
- "track_clear": false,
+ "track_clear": true,
  "roof_kit": 3537,
  "roof_texels_per_m": 4.73,
  "sources": [
