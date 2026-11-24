@@ -3110,6 +3110,16 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not rest:
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
+            if key == HERACLES:
+                # Palais Héraclès: the slab is built on its own; what is
+                # left of the shared outline (the low wing to the north)
+                # carries on below, at most a storey high.
+                body = palais_heracles(m, mntR, stats)
+                footprint.append(body)
+                rest = [q for q in to_polys(poly.difference(body.buffer(1.0, join_style=2))) if q.area >= 10]
+                if not rest:
+                    continue
+                poly = orient(max(rest, key=lambda q: q.area), 1.0)
             rnd = rng_for(key)
             pr_ = f["properties"]
             if pr_.get("construction_legere") and float(track_dist(poly.centroid.x, poly.centroid.y)[0]) < 30:
@@ -3153,6 +3163,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             if ins.sum() < 4:
                 continue
             hrel = sub[ins] - base
+            if key == HERACLES:
+                hrel = np.minimum(hrel, 4.5)
             top = float(np.percentile(hrel, 92))
             if TRACK is not None and poly.distance(TRACK["line"]) < 8:
                 # A building down the slope below the circuit (Avenue
@@ -7234,6 +7246,196 @@ def metropole(m, ways, mntR, mns, stats):
 
 # PLAIN styles drawn by the viewer: 5 polished steel, 6 bronze.
 METAL, BRONZE = 5, 6
+
+
+# --------------------------------------------------------- Palais Héraclès ----
+# 17 Boulevard Albert 1er: the 1950s residential slab that stands over the
+# start straight, facing Port Hercule. BD TOPO's outline for it is the low
+# block it shares with its neighbours (5 m), so the generic builder made it
+# a LiDAR massing with a random 1970s-tower façade. Rebuilt here from the
+# LiDAR (the slab: 18 x 35.5 m, flat roof at 59.4 m NGF, a lift room at the
+# north end) and Mapillary street photos (2019 and 2025, from the boulevard
+# looking north): smooth cream render; on the long sides a regular grid of
+# recessed loggias behind solid parapets, many with blue roller awnings; on
+# the south end a single stack of projecting box balconies on the west
+# half, the rest blank; the north end blank but for one column of windows;
+# a set-back top floor under a thin flat roof that overhangs the long
+# sides, a square post at the south-west corner. 16 levels (OpenStreetMap):
+# a tall ground floor, 14 storeys of flats and the top floor. Nobody has
+# photographed the west side from the street (it faces the courtyards off
+# Rue Louis Notari); it gets the same loggias as the east side.
+HERACLES = "BATIMENT0000000074074389"
+HERACLES_SW = (1056039.35, 6302815.95)  # the slab's corners, from the LiDAR (Lambert-93)
+HERACLES_SE = (1056056.55, 6302818.95)
+HERACLES_D = 35.3                       # m, south to north
+HERACLES_LIFT = (1056042.3, 6302842.9)  # lift room on the roof (LiDAR, up to 62.8 m)
+HERACLES_WALL = "#efe1bf"               # cream render
+HERACLES_AWNING = "#2d4f93"             # blue awnings
+
+
+def palais_heracles(m, mntR, stats):
+    SW, SE = np.array(HERACLES_SW), np.array(HERACLES_SE)
+    W = float(np.linalg.norm(SE - SW))
+    u = (SE - SW) / W                    # along the south end, west to east
+    v = np.array([-u[1], u[0]])          # along the long sides, south to north
+    D = HERACLES_D
+    gz = mntR.sample(np.array([SW[0], SE[0], (SW + D * v)[0], (SE + D * v)[0]]),
+                     np.array([SW[1], SE[1], (SW + D * v)[1], (SE + D * v)[1]]))
+    base = float(np.nanmin(gz)) if np.isfinite(gz).any() else 4.0
+    wall = np.array(hexrgb(HERACLES_WALL))
+    edge = np.minimum(wall * 1.04 + 6, 255)          # slab edges and parapets catch more light
+    inner = wall * 0.86                              # loggia walls, in the shade
+    shutter = np.array(hexrgb("#e9e6de"))
+    awning = np.array(hexrgb(HERACLES_AWNING))
+    glass_c = np.array(hexrgb("#5b6a74"))
+    roof_c = np.array(hexrgb("#d3ccbd"))
+    rnd = rng_for(HERACLES)
+
+    def E(s, t, z):
+        s, t, z = np.broadcast_arrays(np.atleast_1d(np.asarray(s, float)), np.atleast_1d(np.asarray(t, float)),
+                                      np.atleast_1d(np.asarray(z, float)))
+        q = SW[None] + s[:, None] * u[None] + t[:, None] * v[None]
+        return enu_fast(q[:, 0], q[:, 1], z)
+
+    def want(s, t, z, ds, dt, dz):
+        return E(s + ds, t + dt, z + dz) - E(s, t, z)
+
+    def cuboid(s0, s1, t0, t1, z0, z1, col, bottom=True, top=True):
+        """A box in the slab's frame (s across, t along, z up): all its faces."""
+        sc, tc, zc = (s0 + s1) / 2, (t0 + t1) / 2, (z0 + z1) / 2
+        faces = [((s0, t0, z0), (s0, t1, z0), (s0, t1, z1), (s0, t0, z1), (-1, 0, 0)),
+                 ((s1, t0, z0), (s1, t1, z0), (s1, t1, z1), (s1, t0, z1), (1, 0, 0)),
+                 ((s0, t0, z0), (s1, t0, z0), (s1, t0, z1), (s0, t0, z1), (0, -1, 0)),
+                 ((s0, t1, z0), (s1, t1, z0), (s1, t1, z1), (s0, t1, z1), (0, 1, 0))]
+        if top:
+            faces.append(((s0, t0, z1), (s1, t0, z1), (s1, t1, z1), (s0, t1, z1), (0, 0, 1)))
+        if bottom:
+            faces.append(((s0, t0, z0), (s1, t0, z0), (s1, t1, z0), (s0, t1, z0), (0, 0, -1)))
+        for a, b, c, d, n in faces:
+            _quad(m, E(*a), E(*b), E(*c), E(*d), col, want(sc, tc, zc, *n))
+
+    def pane(s0, t0, s1, t1, z0, z1, n, cell, floor_):
+        """Window glass on a wall (from (s0, t0) to (s1, t1)), facing n: the
+        viewer's glass façade style, so it reflects by day and some
+        windows light up at night."""
+        uvs = [np.array([[cell + 0.06, floor_ + 0.18]]), np.array([[cell + 0.94, floor_ + 0.18]]),
+               np.array([[cell + 0.94, floor_ + 0.9]]), np.array([[cell + 0.06, floor_ + 0.9]])]
+        _quad_uv(m, E(s0, t0, z0), E(s1, t1, z0), E(s1, t1, z1), E(s0, t0, z1), glass_c,
+                 want((s0 + s1) / 2, (t0 + t1) / 2, z0, *n), uvs, kind=WALL_GLASS, style=S_GLASS)
+
+    def awning_(s_front, t0, t1, z, out):
+        """A blue roller awning hung under a soffit: from the loggia's front
+        edge, sloping out and down (out = +1 east, -1 west)."""
+        a0, a1 = E(s_front, t0, z), E(s_front, t1, z)
+        b0, b1 = E(s_front + out * 0.75, t0, z - 0.85), E(s_front + out * 0.75, t1, z - 0.85)
+        sc_ = s_front + out * 0.4
+        for sg in (1, -1):
+            _quad(m, a0, a1, b1, b0, awning, want(sc_, (t0 + t1) / 2, z - 0.4, sg * out * 0.75, 0, sg * 0.75))
+
+    GF = 4.5                             # ground floor height
+    FH = 3.4                             # storey height
+    NF = 14                              # storeys of flats
+    zf = lambda i: base + GF + (i - 1) * FH          # floor level of storey i (1..NF)
+    ztop = base + GF + NF * FH                       # top of the slab's walls (~56.1 m)
+    zr = ztop + 3.05                                 # the top floor's roof (LiDAR: 59.4 m)
+    DL = 1.35                                        # loggia depth
+    CORNER = 2.4                                     # solid wall at each end of the long sides
+
+    # Ground floor: a tall plinth, glazed onto the boulevard (east).
+    cuboid(0.35, W - 0.35, 0.0, D, base - 1.0, base + GF, wall, bottom=False)
+    for side, sf in ((1, W - 0.35 + 0.03), (-1, 0.35 - 0.03)):
+        n_g = int(round((D - 2 * CORNER) / 2.4))
+        for k in range(n_g):
+            t0 = CORNER + k * (D - 2 * CORNER) / n_g
+            pane(sf, t0 + 0.12, sf, t0 + (D - 2 * CORNER) / n_g - 0.12, base + 0.25, base + GF - 0.55, (side, 0, 0), k, 1)
+    # Core of the storeys, behind the loggias, and the solid ends of the long sides.
+    cuboid(DL, W - DL, 0.0, D, base + GF, ztop, wall, bottom=False)
+    for s0, s1 in ((0.0, DL), (W - DL, W)):
+        cuboid(s0, s1, 0.0, CORNER, base + GF - 0.25, ztop, wall)
+        cuboid(s0, s1, D - CORNER, D, base + GF - 0.25, ztop, wall)
+
+    # The long sides: a grid of loggias, piers at each bay.
+    span = D - 2 * CORNER
+    nb = int(round(span / 3.45))
+    bay = span / nb
+    for side in (1, -1):
+        front = W if side > 0 else 0.0
+        back = W - DL if side > 0 else DL
+        sin_ = lambda a, b: (min(a, b), max(a, b))
+        for k in range(nb + 1):
+            t = CORNER + k * bay
+            if 0 < k < nb:
+                s0, s1 = sin_(front - side * 0.02, back)
+                cuboid(s0, s1, t - 0.22, t + 0.22, base + GF - 0.25, ztop, wall)
+        for i in range(1, NF + 1):
+            z = zf(i)
+            # Floor slab (its edge 2 cm behind the piers) and a solid parapet.
+            s0, s1 = sin_(front - side * 0.03, back)
+            cuboid(s0, s1, CORNER, D - CORNER, z - 0.22, z, edge)
+            s0, s1 = sin_(front - side * 0.05, front - side * 0.2)
+            cuboid(s0, s1, CORNER, D - CORNER, z, z + 1.0, edge)
+            for k in range(nb):
+                t0, t1 = CORNER + k * bay + 0.25, CORNER + (k + 1) * bay - 0.25
+                sb = back + side * 0.03
+                if rnd.random() < 0.14:
+                    # A window with its pale roller shutter down.
+                    _quad(m, E(sb, t0 + 0.12, z + 0.1), E(sb, t1 - 0.12, z + 0.1), E(sb, t1 - 0.12, z + 2.6),
+                          E(sb, t0 + 0.12, z + 2.6), shutter, want(sb, (t0 + t1) / 2, z + 1, side, 0, 0))
+                else:
+                    pane(sb, t0 + 0.12, sb, t1 - 0.12, z + 0.1, z + 2.6, (side, 0, 0), k, i)
+                if rnd.random() < 0.55:
+                    awning_(front - side * 0.1, t0 + 0.02, t1 - 0.02, z + FH - 0.3, side)
+                    stats["heracles_awnings"] = stats.get("heracles_awnings", 0) + 1
+        # The top floor's glazing, set back behind a terrace.
+        sa = W - DL if side > 0 else DL
+        n_top = int(round((D - 0.8) / 3.5))
+        for k in range(n_top):
+            t0 = 0.4 + k * (D - 0.8) / n_top
+            t1 = t0 + (D - 0.8) / n_top - 0.3
+            pane(sa + side * 0.03, t0, sa + side * 0.03, t1, ztop + 0.1, zr - 0.35, (side, 0, 0), k, NF + 1)
+        railing(m, np.array([[*(SW + (front - side * 0.12) * u + 0.15 * v)]]),
+                np.array([[*(SW + (front - side * 0.12) * u + (D - 0.15) * v)]]), ztop, "#dfe3e1", h=1.05)
+
+    # The south end: one stack of box balconies on its west half.
+    sa_, sb_ = 2.9, 9.3
+    for i in range(1, NF + 2):
+        z = zf(i) if i <= NF else ztop
+        h_ = FH if i <= NF else zr - ztop
+        cuboid(sa_, sb_, -1.35, 0.0, z - 0.2, z, edge)                       # slab
+        cuboid(sa_ + 0.18, sb_ - 0.18, -1.35, -1.2, z, z + 1.05, edge)      # parapet
+        for s0 in (sa_, sb_ - 0.18):
+            cuboid(s0, s0 + 0.18, -1.35, 0.0, z, z + h_, wall, bottom=False)  # cheeks
+        pane(sa_ + 0.6, -0.03, sb_ - 0.6, -0.03, z + 0.1, z + 2.6, (0, -1, 0), 0, i)
+        if rnd.random() < 0.5:
+            # Awnings across the balcony's mouth.
+            a0, a1 = E(sa_ + 0.2, -1.3, z + h_ - 0.25), E(sb_ - 0.2, -1.3, z + h_ - 0.25)
+            b0, b1 = E(sa_ + 0.2, -1.95, z + h_ - 1.05), E(sb_ - 0.2, -1.95, z + h_ - 1.05)
+            for sg in (1, -1):
+                _quad(m, a0, a1, b1, b0, awning, want((sa_ + sb_) / 2, -1.6, z + h_ - 0.6, 0, -0.6 * sg, 0.7 * sg))
+    # The north end: one column of windows.
+    for i in range(1, NF + 1):
+        pane(W * 0.62 + 0.8, D + 0.03, W * 0.62 - 0.8, D + 0.03, zf(i) + 0.9, zf(i) + 2.4, (0, 1, 0), 0, i)
+
+    # Cornice band round the slab's top, the top floor and its roof.
+    cuboid(-0.12, W + 0.12, -0.12, D + 0.12, ztop - 0.32, ztop, edge)
+    cuboid(DL, W - DL, 0.0, D, ztop, zr, wall, bottom=False)
+    for t0, t1 in ((0.0, 0.3), (D - 0.3, D)):
+        # The ends rise to the roof, so the south face reads as one wall.
+        for s0, s1 in ((0.0, DL), (W - DL, W)):
+            cuboid(s0, s1, t0, t1, ztop, zr, wall, bottom=False)
+    cuboid(-0.85, W + 0.85, -0.05, D + 0.05, zr, zr + 0.32, edge)                # thin overhanging roof
+    _quad(m, E(-0.85, -0.05, zr + 0.33), E(W + 0.85, -0.05, zr + 0.33), E(W + 0.85, D + 0.05, zr + 0.33),
+          E(-0.85, D + 0.05, zr + 0.33), roof_c, want(W / 2, D / 2, zr, 0, 0, 1))
+    # Square post at the south-west corner, with a cap.
+    cuboid(-0.25, 1.05, -0.25, 1.05, zr + 0.32, zr + 1.25, wall)
+    cuboid(-0.4, 1.2, -0.4, 1.2, zr + 1.25, zr + 1.45, edge)
+    # Lift room (LiDAR).
+    lc = np.array(HERACLES_LIFT) - SW
+    ls_, lt_ = float(lc @ u), float(lc @ v)
+    cuboid(ls_ - 4.6, ls_ + 4.6, lt_ - 2.5, lt_ + 2.5, zr + 0.32, base + 58.6, wall * 0.97, bottom=False)
+    cuboid(ls_ - 4.75, ls_ + 4.75, lt_ - 2.65, lt_ + 2.65, base + 58.6, base + 58.85, edge)
+    stats["heracles"] = {"base": round(base, 2), "top": round(zr + 0.32, 2), "storeys": NF + 2, "bays": nb}
+    return orient(Polygon([SW, SE, SE + D * v, SW + D * v]), 1.0)
 
 
 def _box(m, cx, cy, ax, w, d, z0, z1, col, kind=PLAIN, style=None, top=True):
