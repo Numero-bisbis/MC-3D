@@ -508,6 +508,14 @@ def ground_mesh(mnt, sea):
             from scipy.spatial import cKDTree
             _, j = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]])).query(np.column_stack([X[og], Y[og]]))
             Z[og] = np.minimum(Z[og], TUNNEL["z"][j] - 1.2)
+    if FM is not None:
+        # The Fairmont's sunken roof courts: flat at their floor.
+        for court_, zf in zip(FM["courts"], FM["floors"]):
+            inc = contains_xy(court_, X, Y)
+            Z[inc] = zf - 0.3
+        if "rim" in FM:
+            inr = contains_xy(FM["rim"], X, Y)
+            Z[inr] = np.minimum(Z[inr], FM["rim_z"] - 0.2)
     Z, Zs = quai_ground(X, Y, Z)
     Z, Zs = sidewalk_ground(X, Y, Z, Zs)
     land = valid[r, c] > 0.5
@@ -534,6 +542,11 @@ def ground_mesh(mnt, sea):
         endz = contains_xy(TUNNEL["ends"], X, Y) & ~ins
         anyq = lambda a_: a_[:-1, :-1] | a_[:-1, 1:] | a_[1:, :-1] | a_[1:, 1:]
         keep &= ~(anyq(ins) & anyq(endz))
+    if FM is not None and "cut" in FM:
+        # Round the Fairmont's open court the wall, the court's floor and
+        # the rim's slab stand in for the ground grid.
+        cut = contains_xy(FM["cut"], X, Y)
+        keep &= ~(cut[:-1, :-1] | cut[:-1, 1:] | cut[1:, :-1] | cut[1:, 1:])
     fine = []
     for zx0, zy0, zx1, zy1 in DETAIL_ZONES:
         # A 1 m grid over the zone instead of the 3 m one: the ravine walls
@@ -893,6 +906,7 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         ph = (ph - 118) * 1.1 + 126
         ph *= np.array([1.03, 1.0, 0.96], np.float32)
         arr = arr * (1 - mkf) + ph * mkf
+    arr = fairmont_paint(arr, px, ways, roofs[0] if roofs is not None else None)
     img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).resize((TEX, TEX), Image.LANCZOS)
     b = io.BytesIO()
     img.save(b, "JPEG", quality=86)
@@ -2324,7 +2338,7 @@ LANDMARKS = [
     ("Hôtel Métropole", (1056558, 6303555), S_BELLE, "#eee2c8"),
     ("One Monte-Carlo", (1056448, 6303367), S_MODERN, "#eeede8"),
     ("One Monte-Carlo", (1056433, 6303407), S_MODERN, "#eeede8"),
-    ("Fairmont", (1056743, 6303450), S_RIBBON, "#eee8dc"),
+    ("Fairmont", (1056743, 6303450), S_MODERN, "#ece5d6"),
     ("Théâtre Princesse Grace", (1056443, 6303173), S_DECO, "#efe2c8"),
     ("Yacht Club de Monaco", (1056540, 6303156), S_RIBBON, "#f4f3ef"),   # white decks like a yacht
     ("Église Saint-Charles", (1056513, 6303731), S_ARCH, "#e9dcc4"),
@@ -3189,7 +3203,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 zt = base + hz
                 last = li == len(levels) - 1
                 ph = None
-                if photo is not None and not hero and not post_scan:
+                if photo is not None and not hero and not post_scan and key != FAIRMONT:
                     lx, ly = photo["lean"]
                     ph = dict(photo, shift=(hz * lx + adj[0], hz * ly + adj[1]))
                 for part in tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
@@ -3352,6 +3366,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 stats["balconies"] = stats.get("balconies", 0) + facade_depth(
                     m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
                     info["balconies"], info["depth"])
+            if key == FAIRMONT:
+                global FAIR
+                FAIR = {"base": base, "fh": fh, "levels": [(r_, base + h_) for r_, h_ in levels],
+                        "kind": kind, "style": style, "col": col}
             SHOP_NOW = None
             footprint.append(poly)
             stats["buildings"] += 1
@@ -5677,23 +5695,15 @@ def tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
                     q = orient(q, 1.0)
                     add_walls(m, q, max(zb, top), zt, base, fh, col, kind, style=style)
                     add_roof(m, q, zt, rcol, False)
-                    # The underside, and stilts down to the ground where
-                    # the building stands over the open side.
+                    # The underside where the building stands over the
+                    # open side; fairmont() builds the quay and columns.
                     if "open_band" in TUNNEL and q.intersects(TUNNEL["open_band"]) and zb < top:
                         t_ = triangulate(q)
                         if t_ is not None:
                             v_, tri_ = t_
                             P_ = enu_fast(v_[:, 0], v_[:, 1], np.full(len(v_), top))
-                            m.tri(P_[tri_[:, 0]], P_[tri_[:, 2]], P_[tri_[:, 1]], np.asarray(col) * 0.8, PLAIN)
-                        inner = q.buffer(-1.2)
-                        bx0, by0, bx1, by1 = q.bounds
-                        for gx_ in np.arange(bx0 + 3, bx1, 7.5):
-                            for gy_ in np.arange(by0 + 3, by1, 7.5):
-                                if inner.contains(shapely.Point(gx_, gy_)) and \
-                                        TUNNEL["open_ground"].contains(shapely.Point(gx_, gy_)) and \
-                                        track_dist(gx_, gy_)[0] > TUBE_HALF + 2.5:
-                                    add_walls(m, box(gx_ - 0.45, gy_ - 0.45, gx_ + 0.45, gy_ + 0.45),
-                                              zb - 3, top, zb, 10, np.asarray(col) * 0.92, PLAIN)
+                            m.tri(P_[tri_[:, 0]], P_[tri_[:, 2]], P_[tri_[:, 1]], np.asarray(col) * 0.6, PLAIN)
+                        OPEN_PARTS.append((q, top))
         out += [orient(q, 1.0) for q in to_polys(part.difference(lift).buffer(0)) if q.area > 2]
     return out
 
@@ -5765,7 +5775,7 @@ def tunnel_gallery(m, oa, ob, t):
     """The open sea side: a low parapet, square pillars every 7.5 m and a
     lintel under the deck, with daylight (and the sea) between them."""
     W, D = TUBE_HALF, 0.8                       # wall line, wall thickness
-    stone_in, stone_out = np.array(hexrgb("#d8d4c8")), np.array(hexrgb("#e2d9c6"))
+    stone_in, stone_out = np.array(hexrgb("#d8d4c8")), np.array(hexrgb("#a9a296"))   # outside: in the hotel's shade
 
     def P(s_, w, h):
         x, y, z, fx, fy = (float(v[0]) for v in tunnel_frame(np.array([float(s_)])))
@@ -6203,6 +6213,10 @@ def no_tree_zones(ways):
         out += [crowd_free(a, b, TRACK_HALF + 10.0) for a, b in CROWD_ZONES]
     if QA is not None:
         out.append(QA["poly"].buffer(3.0))         # quai_albert() plants its own pines
+    if FM is not None:
+        out += [c.buffer(1.0) for c in FM["courts"]]
+    if TUNNEL is not None and "open_ground" in TUNNEL:
+        out.append(TUNNEL["open_ground"])          # the Fairmont's quay and sea wall
     al = allee_line(ways)
     if al is not None and al.length > 30:
         # The Allée François Blanc is open paving from the square down to
@@ -8083,6 +8097,406 @@ def drive_map(gz, bmask, sea):
             "affine": [[round(float(v_), 9) for v_ in row] for row in AFF]}
 
 
+
+# --------------------------------------------------------------- Fairmont ----
+# The Fairmont Monte-Carlo (1975, the old Loews): a long, low hotel on
+# land won from the sea, with the Grand Prix tunnel running through its
+# foot and its roof a garden at the level of the Casino's lower gardens.
+# What the open data gives (IGN LiDAR 2021, aerial photo 2023, OSM lawns
+# on the roof, Mapillary 2018/2025 drives through the tunnel and round the
+# hairpin):
+# - the roof at about 33 m NGF: lawns, pink paving, palms, and two sunken
+#   hexagonal courts 11 m down whose floors carry a white star pattern;
+#   BD TOPO keeps the north court as a hole in the outline but leaves the
+#   south one open to the west, where the garden runs straight on to it;
+# - cream walls with a continuous balcony on every floor;
+# - on the sea side the tunnel opens behind round columns on to a covered
+#   quay at road level, with a sea wall and concrete blocks below.
+FAIRMONT = "BATIMENT0000000074074334"
+FAIRMONT_PARTS = {FAIRMONT, "BATIMENT0000000074070366", "BATIMENT0000000074070395"}
+FAIR_COL = "#ece5d6"                      # cream walls
+FAIR_RAIL = "#f6f3ec"                     # white balcony fronts
+FAIR_PAVING = "#d6b9a2"                   # the roof garden's pink paving
+FAIR_LAWN = "#88aa58"
+FAIR = None                               # set by buildings(): the hotel's levels, base, storey height
+FM = None                                 # set by fairmont_setup(): courts, rim, garden
+OPEN_PARTS = []                           # building parts over the tunnel's open sea side
+GROUND_FM = None
+
+
+def fairmont_setup(feats, mns, mnt):
+    """The two sunken courts on the roof and the roof garden's west rim,
+    from the LiDAR. Returns a dict, or None."""
+    fair = None
+    for f in feats:
+        if f["properties"].get("cleabs") == FAIRMONT:
+            fair = shapely.force_2d(shape(f["geometry"])).buffer(0)
+    if fair is None or fair.is_empty:
+        return None
+    fair = max(to_polys(fair), key=lambda q: q.area)
+    courts = [Polygon(h.coords) for h in fair.interiors if Polygon(h.coords).area > 300]
+    # The south court: low surface (opened, so palms do not count) next to
+    # the outline, outside it, within the outline's reach.
+    x0, y0, x1, y1 = fair.buffer(6).bounds
+    c0, c1 = max(int((x0 - X0) / RES), 0), int((x1 - X0) / RES)
+    r0, r1 = max(int((Y1 - y1) / RES), 0), int((Y1 - y0) / RES)
+    S = ndimage.grey_opening(np.nan_to_num(mns[r0:r1, c0:c1], nan=0.0), size=7)
+    xs = X0 + (c0 + np.arange(S.shape[1]) + 0.5) * RES
+    ys = Y1 - (r0 + np.arange(S.shape[0]) + 0.5) * RES
+    XX, YY = np.meshgrid(xs, ys)
+    roof_z = float(np.median(S[contains_xy(fair.buffer(-1.5), XX, YY)]))
+    low = (S < roof_z - 6) & (S > 5) & ~contains_xy(fair.buffer(0.5), XX, YY) \
+        & contains_xy(fair.convex_hull, XX, YY)
+    for c in courts:
+        low &= ~contains_xy(c.buffer(2), XX, YY)
+    low = ndimage.binary_opening(low, iterations=2)
+    lab, n = ndimage.label(low)
+    open_court = None
+    if n:
+        sizes = ndimage.sum(low, lab, np.arange(1, n + 1))
+        k = int(np.argmax(sizes)) + 1
+        if sizes[k - 1] * RES * RES > 600:
+            g = cells_to_poly(lab == k, X0 + c0 * RES, Y1 - r0 * RES, RES)
+            g = max(to_polys(g), key=lambda q: q.area).convex_hull.difference(fair.buffer(0.3))
+            g = max(to_polys(g), key=lambda q: q.area).simplify(0.6)
+            open_court = orient(g, 1.0)
+            courts.append(open_court)
+    floors = []
+    for c in courts:
+        inner = contains_xy(c.buffer(-2.0), XX, YY)
+        floors.append(float(np.median(S[inner])) if inner.sum() > 20 else roof_z - 11)
+    out = {"fair": fair, "courts": courts, "floors": floors, "roof_z": roof_z, "open": open_court}
+    if open_court is not None:
+        # Its west side, where the garden meets it: the court's own wall
+        # (BD TOPO stops short of it) and a strip of garden at roof level.
+        free = open_court.exterior.difference(fair.buffer(1.5))
+        free = [l for l in (free.geoms if hasattr(free, "geoms") else [free]) if l.length > 3]
+        if free:
+            fl = unary_union(free)
+            out["free"] = fl
+            out["wall"] = fl.buffer(0.9, cap_style=2).difference(open_court)
+            out["rim"] = fl.buffer(5.0, cap_style=2).difference(open_court).difference(fair)
+            # Ground nodes near the free edge go: the 3 m grid would
+            # slope from the garden into the court.
+            out["cut"] = fl.buffer(3.4, cap_style=2).union(open_court)
+            zr = S[contains_xy(out["rim"], XX, YY)]
+            out["rim_z"] = float(np.median(zr)) if len(zr) else roof_z
+    out["garden"] = fair.union(out.get("rim", Polygon())).buffer(0)
+    for c in courts:
+        out["garden"] = out["garden"].difference(c)
+    print(f"Fairmont roof {roof_z:.1f} m, courts", [round(c.area) for c in courts],
+          "floors", [round(f, 1) for f in floors], "rim" if "rim" in out else "")
+    return out
+
+
+def _flat_slab(gm, poly, z, style=None):
+    """A flat piece of ground (GROUND kind, the painted map)."""
+    n = 0
+    for pg in to_polys(poly):
+        if pg.area < 1:
+            continue
+        pg = set_precision(pg.simplify(0.03), 0.01) if hasattr(shapely, "set_precision") else pg
+        for q in to_polys(pg):
+            if q.area < 0.5:
+                continue
+            tr = triangulate(orient(q, 1.0), area=8)
+            if tr is None:
+                continue
+            v, tri = tr
+            zz = z(v[:, 0], v[:, 1]) if callable(z) else np.full(len(v), float(z))
+            P = enu_fast(v[:, 0], v[:, 1], zz)
+            uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+            gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=style)
+            n += 1
+    return n
+
+
+def set_precision(g, grid):
+    return shapely.set_precision(g, grid)
+
+
+def _column(m, x, y, z0, z1, r, col, sides=10):
+    """A round column (a many-sided prism)."""
+    a = np.linspace(0, 2 * math.pi, sides + 1)
+    ring = [(x + r * math.cos(t), y + r * math.sin(t)) for t in a[:-1]]
+    add_walls(m, orient(Polygon(ring), 1.0), z0, z1, z0, 100, col, PLAIN)
+
+
+def fairmont(gm, bm, tm, mns, mnt, sea, stats):
+    if FM is None or FAIR is None:
+        return 0
+    global GROUND_FM
+    GROUND_FM = Raster(mnt)
+    rnd = rng_for("fairmont")
+    col = np.array(hexrgb(FAIR_COL))
+    fh, base = FAIR["fh"], FAIR["base"]
+    # Court floors, at their own level (the aerial photo is painted there).
+    for c, zf in zip(FM["courts"], FM["floors"]):
+        _flat_slab(gm, c, zf + 0.05)
+    # The south court's west wall, from its floor to the garden, with the
+    # hotel's windows, and a white parapet along the top.
+    if "wall" in FM:
+        zr = FM["rim_z"]
+        zf = FM["floors"][-1]
+        for q in to_polys(FM["wall"]):
+            if q.area > 1:
+                add_walls(bm, orient(q, 1.0), zf - 0.5, zr, base, fh, col, FAIR["kind"], style=FAIR["style"])
+                add_roof(bm, orient(q, 1.0), zr, col * 0.97, False)
+        _flat_slab(gm, FM["rim"], zr + 0.02)
+        par = FM["free"].buffer(0.12, cap_style=2).difference(FM["fair"])
+        for q in to_polys(par):
+            if q.area > 0.2:
+                add_walls(bm, orient(q, 1.0), zr, zr + 1.0, zr, 100, np.array(hexrgb(FAIR_RAIL)), PLAIN)
+                add_roof(bm, orient(q, 1.0), zr + 1.0, np.array(hexrgb(FAIR_RAIL)), False)
+    # The roof garden: on each level's roof, what no higher level covers.
+    lv = sorted(FAIR["levels"], key=lambda t: t[1])
+    for i, (reg, z) in enumerate(lv):
+        top = unary_union([r for r, _ in lv[i + 1:]]) if i + 1 < len(lv) else Polygon()
+        g = reg.difference(top).buffer(0)
+        _flat_slab(gm, g, z + 0.05)
+    # Palms and shrubs on the roof, where the LiDAR has them.
+    roofs = unary_union([r for r, _ in lv]).buffer(-1.0)
+    zroof = max(z for _, z in lv)
+    x0, y0, x1, y1 = roofs.bounds
+    c0, c1 = int((x0 - X0) / RES), int((x1 - X0) / RES)
+    r0, r1 = int((Y1 - y1) / RES), int((Y1 - y0) / RES)
+    S = np.nan_to_num(mns[r0:r1, c0:c1], nan=0.0)
+    xs = X0 + (c0 + np.arange(S.shape[1]) + 0.5) * RES
+    ys = Y1 - (r0 + np.arange(S.shape[0]) + 0.5) * RES
+    XX, YY = np.meshgrid(xs, ys)
+    on = contains_xy(roofs, XX, YY)
+    for c in FM["courts"]:
+        on &= ~contains_xy(c.buffer(1.5), XX, YY)
+    hgt = np.where(on, S - zroof, 0)
+    crown = ndimage.binary_opening(hgt > 1.8, iterations=1)
+    lab, n = ndimage.label(crown)
+    nt = 0
+    for k in range(1, n + 1):
+        mk = lab == k
+        a = mk.sum() * RES * RES
+        if a < 2.0:
+            continue
+        h = float(np.percentile(hgt[mk], 90))
+        if h > 14:
+            continue                    # roof kit, not a tree
+        cx, cy = float(XX[mk].mean()), float(YY[mk].mean())
+        kind = "palm" if (a < 22 and h > 4) else "pine"
+        add_tree(tm, cx, cy, zroof, max(2.5, h), min(4.5, max(1.2, math.sqrt(a / math.pi))), kind, rnd)
+        nt += 1
+    stats["fairmont_roof_trees"] = nt
+    # A balcony with a white front on every floor, all round the outside.
+    nb = 0
+    hotel = FM["fair"]
+    keep = TRACK["line"].buffer(TRACK_HALF + 1.2) if TRACK is not None else None
+    keep_z = lambda p_: float(TRACK["z"][TRACK["kd"].query([p_[0], p_[1]])[1]]) if TRACK is not None else -1e9
+    for reg, zt in lv:
+        for pg in to_polys(reg):
+            ring = np.asarray(orient(pg, 1.0).exterior.coords)[:, :2]
+            for a_, b_ in zip(ring[:-1], ring[1:]):
+                L = float(np.linalg.norm(b_ - a_))
+                if L < 5:
+                    continue
+                u = (b_ - a_) / L
+                out = np.array([u[1], -u[0]])
+                mid = (a_ + b_) / 2
+                if hotel.buffer(-0.2).contains(Point(mid + out * 1.5)):
+                    continue                # an inside edge (a court, a step)
+                if any(c.buffer(0.5).contains(Point(mid + out * 1.5)) for c in FM["courts"]):
+                    continue
+                if "rim" in FM and FM["rim"].buffer(0.5).contains(Point(mid + out * 1.5)):
+                    continue
+                dd_ = np.array([0.8, 2.0, 3.5, 5.0])
+                gz_ = GROUND_FM.sample(mid[0] + out[0] * dd_, mid[1] + out[1] * dd_)
+                gz_ = float(np.nanmax(gz_)) if np.isfinite(gz_).any() else -1e9
+                lift = TUNNEL is not None and ("open_band" in TUNNEL and TUNNEL["open_band"].buffer(1).contains(Point(mid))
+                                               or TUNNEL["bld"].contains(Point(mid)))
+                zlow = (TUNNEL["top"] if lift else base) + 2.0
+                a2, b2 = a_ + u * 0.4, b_ - u * 0.4
+                dep = 1.7
+                k = 1
+                while base + k * fh < zt - 1.2:
+                    z = base + k * fh
+                    k += 1
+                    if z < zlow or (not lift and z < gz_ + 2.0):
+                        continue
+                    q = Polygon([a2, b2, b2 + out * dep, a2 + out * dep])
+                    fr = Polygon([a2 + out * (dep - 0.12), b2 + out * (dep - 0.12), b2 + out * dep, a2 + out * dep])
+                    if keep is not None and z < keep_z(mid) + 6.0:
+                        q, fr = q.difference(keep), fr.difference(keep)
+                    for qq in to_polys(q):
+                        if qq.area > 0.5:
+                            qq = orient(qq, 1.0)
+                            add_walls(bm, qq, z - 0.22, z, z - 0.22, 100, col * 1.02, PLAIN)
+                            add_roof(bm, qq, z, col, False)
+                            add_roof(bm, orient(qq, -1.0), z - 0.22, col * 0.8, False)
+                    for qq in to_polys(fr):
+                        if qq.area > 0.05:
+                            qq = orient(qq, 1.0)
+                            add_walls(bm, qq, z, z + 1.05, z, 100, np.array(hexrgb(FAIR_RAIL)), PLAIN)
+                            add_roof(bm, qq, z + 1.05, np.array(hexrgb(FAIR_RAIL)), False)
+                    nb += 1
+    stats["fairmont_balconies"] = nb
+    # The sea side over the tunnel: a covered quay at road level out to the
+    # hotel's front, round columns along it, a sea wall below.
+    ncol = 0
+    stone = np.array(hexrgb("#e4dccb"))
+    seawall = np.array(hexrgb("#a8a397"))
+    if TUNNEL is not None and OPEN_PARTS:
+        from scipy.spatial import cKDTree
+        kd = cKDTree(np.column_stack([TUNNEL["x"], TUNNEL["y"]]))
+        zroad = lambda x, y: TUNNEL["z"][kd.query(np.column_stack([np.atleast_1d(x), np.atleast_1d(y)]))[1]]
+        tline = LineString(np.column_stack([TUNNEL["x"], TUNNEL["y"]]))
+        top = TUNNEL["top"]
+        for q in to_polys(unary_union([q_ for q_, _ in OPEN_PARTS]).buffer(0.05, join_style=2)):
+            deck = q.difference(tline.buffer(TUBE_HALF + 0.8)).buffer(0)
+            for d in to_polys(deck):
+                if d.area < 4:
+                    continue
+                _flat_slab(gm, d, lambda x, y: zroad(x, y) + 0.12, style=10)
+                # Outer edges: those away from the tunnel.
+                ring = np.asarray(orient(d, 1.0).exterior.coords)[:, :2]
+                for a_, b_ in zip(ring[:-1], ring[1:]):
+                    L = float(np.linalg.norm(b_ - a_))
+                    mid = (a_ + b_) / 2
+                    if L < 1.0 or tline.distance(Point(mid)) < TUBE_HALF + 2.5:
+                        continue
+                    u = (b_ - a_) / L
+                    out = np.array([u[1], -u[0]])
+                    if q.buffer(-0.1).contains(Point(mid + out * 0.8)):
+                        continue                    # against the rest of the building
+                    zr = float(zroad(*mid)[0]) + 0.12
+                    w = orient(Polygon([a_, b_, b_ - out * 0.5, a_ - out * 0.5]), 1.0)
+                    add_walls(bm, w, -1.5, zr + 1.0, -1.5, 100, seawall, PLAIN)     # sea wall and parapet
+                    add_roof(bm, w, zr + 1.0, stone, False)
+                    nn = max(1, int(round(L / 6.5)))
+                    for j in range(nn):
+                        p_ = a_ + u * (j + 0.5) * L / nn - out * 1.4
+                        _column(bm, p_[0], p_[1], zr, top, 0.65, col * 0.98)
+                        ncol += 1
+        # Concrete blocks along the shore at the foot of the sea wall.
+        band = unary_union([q for q, _ in OPEN_PARTS]).buffer(9.0)
+        seaB = ndimage.binary_dilation(sea, iterations=2) & ~sea
+        rr, cc = np.nonzero(seaB)
+        bx, by = X0 + (cc + 0.5) * RES, Y1 - (rr + 0.5) * RES
+        ins = contains_xy(band, bx, by)
+        nbk = 0
+        grey = np.array(hexrgb("#9d9a92"))
+        for x, y in zip(bx[ins][::3], by[ins][::3]):
+            for lay in range(3):
+                xx, yy = x + rnd.uniform(-2.0, 2.0), y + rnd.uniform(-2.0, 2.0)
+                s_ = rnd.uniform(0.9, 1.6)
+                th = rnd.uniform(0, math.pi)
+                bq = shapely.affinity.rotate(box(xx - s_, yy - s_, xx + s_, yy + s_), th, use_radians=True)
+                z0 = rnd.uniform(-1.0, 0.4) + 1.3 * lay
+                add_walls(bm, orient(bq, 1.0), z0 - 1.5, z0 + s_ * 1.4, z0, 100, grey * rnd.uniform(0.85, 1.05), PLAIN)
+                add_roof(bm, orient(bq, 1.0), z0 + s_ * 1.4, grey * 1.04, False)
+                nbk += 1
+        stats["fairmont_blocks"] = nbk
+    stats["fairmont_columns"] = ncol
+    return nb
+
+
+def _paint_garden(arr, px, ways, hi_, garden, base_hex, lawn_hex, paths=False, shade_lawn=False):
+    """A garden painted crisp into the ground map: a base (paving or
+    gravel), lawns where OpenStreetMap maps them or the 20 cm photo is
+    green (tidied into clean beds), a pale kerb round each, and with
+    `paths` the mapped footways and drives drawn back on top."""
+    S = arr.shape[0]
+    xy = lambda pts: [((x - X0) * px, (Y1 - y) * px) for x, y in pts]
+    mk = Image.new("L", (S, S), 0)
+    lawn = Image.new("L", (S, S), 0)
+    dm, dl = ImageDraw.Draw(mk), ImageDraw.Draw(lawn)
+    for q in to_polys(garden):
+        dm.polygon(xy(q.exterior.coords), fill=255)
+        for h in q.interiors:
+            dm.polygon(xy(h.coords), fill=0)
+    for t, pts, closed in ways:
+        if closed and len(pts) > 3 and t.get("landuse") in ("grass", "flowerbed"):
+            g = Polygon(pts).buffer(0)
+            if g.intersects(garden):
+                for q in to_polys(g.intersection(garden.buffer(-0.6))):
+                    dl.polygon(xy(q.exterior.coords), fill=255)
+    x0_, y0_, x1_, y1_ = garden.bounds
+    a0, b0 = max(int((x0_ - X0) * px) - 2, 0), max(int((Y1 - y1_) * px) - 2, 0)
+    a1, b1 = min(int((x1_ - X0) * px) + 3, S), min(int((Y1 - y0_) * px) + 3, S)
+    if hi_ is not None:
+        # (Lawns are often a dull grey-green in the photo, under trees too.)
+        o_ = hi_[b0:b1, a0:a1]
+        veg = (2 * o_[..., 1] - o_[..., 0] - o_[..., 2] > 7) & (o_.mean(-1) < 160) & (o_[..., 1] > o_[..., 0])
+        if shade_lawn:
+            # In a park the dark of the photo is the trees' shade: plants.
+            veg |= o_.mean(-1) < 85
+        veg = ndimage.binary_closing(ndimage.binary_opening(veg, iterations=2), iterations=3)
+        veg = ndimage.binary_opening(veg, iterations=3)
+        lw_ = np.asarray(lawn).copy()
+        lw_[b0:b1, a0:a1] = np.maximum(lw_[b0:b1, a0:a1], (veg * 255).astype(np.uint8))
+        lawn = Image.fromarray(lw_)
+    if paths:
+        dl = ImageDraw.Draw(lawn)
+        for t, pts, closed in ways:
+            hw = t.get("highway")
+            if hw and not closed and t.get("tunnel") is None and t.get("layer", "0") not in ("-1", "-2") \
+                    and LineString(pts).intersects(garden):
+                w = max(1, int((2.2 if hw in ("footway", "path", "steps", "pedestrian") else 5.0) * px))
+                dl.line(xy(pts), fill=0, width=w, joint="curve")
+    lawn = ImageChops.multiply(lawn, mk.filter(ImageFilter.MinFilter(5)))
+    sl = (slice(b0, b1), slice(a0, a1))
+    m = np.asarray(mk).astype(np.float32)[sl][..., None] / 255
+    lw = np.asarray(lawn.filter(ImageFilter.GaussianBlur(1))).astype(np.float32)[sl][..., None] / 255
+    rng = np.random.default_rng(11)
+    h_, w_ = m.shape[:2]
+    noise = np.asarray(Image.fromarray(rng.normal(0, 1, (max(2, h_ // 8), max(2, w_ // 8))).astype(np.float32)).resize((w_, h_), Image.BILINEAR))[..., None]
+    pav = np.array(hexrgb(base_hex), np.float32) * (1 + 0.03 * noise)
+    grn = np.array(hexrgb(lawn_hex), np.float32) * (1 + 0.06 * noise)
+    g = pav * (1 - lw) + grn * lw
+    # A pale stone kerb round each lawn.
+    edge = np.asarray(lawn.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.MaxFilter(3))).astype(np.float32)[sl][..., None] / 255
+    g = g * (1 - edge * 0.8) + np.array(hexrgb("#ece4d4"), np.float32) * edge * 0.8
+    # Keep a little of the map's shade (tree and building shadows), softly.
+    old = arr[sl]
+    lum = old.mean(-1, keepdims=True) / max(float(np.median(old.mean(-1))), 1.0)
+    g = g * np.clip(0.75 + 0.25 * lum, 0.7, 1.05)
+    arr[sl] = old * (1 - m) + g * m
+    return arr
+
+
+CASINO_GARDENS = ("Jardin d‘acclimatation", "Jardin d'acclimatation")
+
+
+def fairmont_paint(arr, px, ways, ortho_hi):
+    """The roof garden in the ground map: pink paving, lawns, paths; the
+    Casino's lower gardens next to it crisp too; the courts' floors from
+    the aerial photo."""
+    if FM is None:
+        return arr
+    S = arr.shape[0]
+    xy = lambda pts: [((x - X0) * px, (Y1 - y) * px) for x, y in pts]
+    hi_ = None
+    if ortho_hi is not None:
+        hi_ = np.asarray(ortho_hi.resize((S, S), Image.BILINEAR) if ortho_hi.size != (S, S) else ortho_hi).astype(np.float32)
+    for t, pts, closed in ways:
+        if closed and len(pts) > 3 and t.get("name") in CASINO_GARDENS:
+            g = Polygon(pts).buffer(0).difference(FM["fair"].buffer(0.5))
+            arr = _paint_garden(arr, px, ways, hi_, g, "#d2c8b2", "#82a456", paths=True, shade_lawn=True)
+    arr = _paint_garden(arr, px, ways, hi_, FM["garden"], FAIR_PAVING, FAIR_LAWN)
+    # The courts' floors: the 20 cm photo (white star on grey gravel).
+    if ortho_hi is not None:
+        hi = ortho_hi.resize((S, S), Image.LANCZOS) if ortho_hi.size != (S, S) else ortho_hi
+        for c in FM["courts"]:
+            bx0, by0, bx1, by1 = c.bounds
+            a0, b0 = int((bx0 - X0) * px), int((Y1 - by1) * px)
+            a1, b1 = int((bx1 - X0) * px) + 1, int((Y1 - by0) * px) + 1
+            patch = np.asarray(hi.crop((a0, b0, a1, b1))).astype(np.float32)
+            pm = Image.new("L", (a1 - a0, b1 - b0), 0)
+            ImageDraw.Draw(pm).polygon([(X - a0, Y - b0) for X, Y in xy(c.exterior.coords)], fill=255)
+            pmf = np.asarray(pm).astype(np.float32)[..., None] / 255
+            # Lift the photo's shadows a little (the court is lit in the set).
+            patch = np.clip((patch - 110) * 1.05 + 140, 0, 255)
+            sub = arr[b0:b1, a0:a1]
+            arr[b0:b1, a0:a1] = sub * (1 - pmf) + patch * pmf
+    return arr
+
+
 # ------------------------------------------------------------------- main ----
 def main():
     ap = argparse.ArgumentParser()
@@ -8183,6 +8597,8 @@ def main():
     if SW is not None and mnt_ground is not mnt_f:
         m_ = raster_mask(SW["poly"])
         mnt_ground[m_] = mnt_f[m_]
+    global FM
+    FM = fairmont_setup(feats, mns, mnt_f)
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -8246,6 +8662,8 @@ def main():
     ostende_promenade(bm, mnt_f, stats)
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     print("Quai Albert 1er…", quai_albert(gm, bm, tm, ways, pts, Raster(mnt_f), stats, fps), "pines")
+    print("Fairmont…", fairmont(gm, bm, tm, mns, mnt_f, sea, stats), "balconies,", stats.get("fairmont_columns"), "columns,",
+          stats.get("fairmont_roof_trees"), "roof trees")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
