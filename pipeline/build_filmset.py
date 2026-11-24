@@ -23,9 +23,13 @@ in pipeline/facade_colours.json).
   sea        One flat plane the viewer animates.
   Mareterra  The 2024 land extension, absent from the 2021 LiDAR: rebuilt
              from OpenStreetMap (see mareterra_setup and friends).
-  Le Rocher  Monaco-Ville: the generic pipeline, plus the Prince's Palace
-             and the Oceanographic Museum built piece by piece (Frame,
-             palais_princier, musee_oceanographique).
+  Le Rocher  Monaco-Ville: the generic pipeline, plus the Prince's Palace,
+             the Oceanographic Museum, the Cathedral and Fort Antoine built
+             piece by piece (Frame, palais_princier, musee_oceanographique,
+             cathedrale, fort_antoine); the old town's lanes in setts with
+             brick pavements, its pale shutters, the ramparts and cannons,
+             the gardens' pines and paths (rocher_streets, rocher_ramparts,
+             rocher_gardens).
 
 Output: viewer/filmset/monte-carlo.glb (y-up glTF in an east-north-up frame
 centred on Casino square, heights in metres above the ellipsoid minus the
@@ -998,6 +1002,7 @@ def triangulate(poly, area=None):
 BAY_NOW = None    # window spacing measured in the photos for the building being built
 GROUND_R = None   # the terrain, while buildings() runs: street level along each wall
 SHOP_NOW = None   # the real shops of the building being built (shop_spans)
+PALE_NOW = 0.0    # TEXCOORD_1.y on its walls: 1 = white / cream shutters (Le Rocher's old town)
 
 # Shopfronts only where OpenStreetMap has a real shop, café, restaurant,
 # bank or agency: most ground floors in Monte-Carlo are hotel entrances,
@@ -1203,7 +1208,7 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None, mi
         uv = np.stack([np.column_stack([u0, u1, u1, u0]),
                        np.column_stack([v0, v0, v1, v1])], -1)
         idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
-        uv2 = np.column_stack([np.repeat(shop, 4), np.zeros(4 * k)])
+        uv2 = np.column_stack([np.repeat(shop, 4), np.full(4 * k, PALE_NOW)])
         m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style,
               uv2=uv2)
 
@@ -1247,7 +1252,7 @@ def sloped_walls(m, pieces, A, B, z0, z1, base, fh, col, kind, style):
     nrm = np.cross(H, np.broadcast_to(Up, H.shape))
     nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
     idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
-    uv2 = np.column_stack([np.repeat(np.array(flags), 4), np.zeros(4 * k)])
+    uv2 = np.column_stack([np.repeat(np.array(flags), 4), np.full(4 * k, PALE_NOW)])
     m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=np.array(uvs, np.float64).reshape(-1, 2),
           idx=idx, style=style, uv2=uv2)
 
@@ -3098,7 +3103,7 @@ def grimaldi_forum(m, polys, mns, mntR, photo, stats):
 
 
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
-    global BAY_NOW, GROUND_R, SHOP_NOW, ARCADE_NOW
+    global BAY_NOW, GROUND_R, SHOP_NOW, ARCADE_NOW, PALE_NOW
     mntR = Raster(mnt)
     GROUND_R = mntR
     # Shops whose point lies inside some outline belong to that building only.
@@ -3142,9 +3147,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not rest:
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
-            if key in (PALACE, MUSEE):
-                # Le Rocher's two landmarks are built piece by piece.
-                (palais_princier if key == PALACE else musee_oceanographique)(m, None, mntR, stats)
+            if key in (PALACE, MUSEE, CATH, FORT):
+                # Le Rocher's landmarks are built piece by piece.
+                {PALACE: palais_princier, MUSEE: musee_oceanographique, CATH: cathedrale,
+                 FORT: fort_antoine}[key](m, None, mntR, stats)
                 footprint.append(poly)
                 stats["landmarks"] = stats.get("landmarks", 0) + 1
                 continue
@@ -3364,6 +3370,9 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 SHOP_NOW = {"pts": [], "areas": []}       # the Allée's boutique row
             if SHOP_NOW is not None:
                 stats["shop_buildings"] = stats.get("shop_buildings", 0) + 1
+            # Le Rocher's old town: mostly white and cream louvred shutters
+            # (2019 street photos), a few green ones.
+            PALE_NOW = 1.0 if ROCHER_ZONE.contains(poly.centroid) and rng_for(key + "pale").random() < 0.75 else 0.0
             zb = base - 1.0
             ARCADE_NOW = None
             if ARMES is not None and key in ARCADES:
@@ -3543,6 +3552,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         "kind": kind, "style": style, "col": col}
             SHOP_NOW = None
             ARCADE_NOW = None
+            PALE_NOW = 0.0
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
@@ -4563,7 +4573,8 @@ def _road_polys(ways):
     for t, p_, closed in ways:
         hw = t.get("highway")
         if hw not in ROAD_W or t.get("tunnel") in ("yes", "building_passage") or t.get("area") == "yes" \
-                or t.get("layer", "0") not in ("0",) or t.get("bridge") or len(p_) < 2 or is_carpark_way(p_):
+                or t.get("layer", "0") not in ("0",) or t.get("bridge") or len(p_) < 2 or is_carpark_way(p_) \
+                or rocher_paved(t, p_):
             continue
         W = float(ROAD_W[hw])
         try:
@@ -6404,6 +6415,8 @@ def no_tree_zones(ways):
     out = []
     # Place du Palais: its pines come from rocher_trees().
     out.append(Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0))
+    if ROCHER_GARDENS is not None:
+        out.append(ROCHER_GARDENS)                 # ... and the Rock's gardens' too
     for tg, pts, closed in ways:
         if not closed or len(pts) < 4:
             continue
@@ -7647,11 +7660,12 @@ class Frame:
         _quad_uv(self.m, *P, np.array(hexrgb(col)), self.want(*self._on(face, *ctr), (z0 + z1) / 2, *self._n(face)),
                  uvs, kind=WALL_GLASS, style=S_GLASS)
 
-    def arch_glass(self, face, c, a, w, zs, cell, floor_, col="#5b6a74", nseg=8, dark=False):
-        """The round head of an arched window (springing at zs), as a fan."""
+    def arch_glass(self, face, c, a, w, zs, cell, floor_, col="#5b6a74", nseg=8, dark=False, th1=math.pi):
+        """The round head of an arched window (springing at zs), as a fan
+        (th1 = 2 pi: a round window centred at zs)."""
         sg = 1.0 if face[0] == "+" else -1.0
         cc = c + sg * 0.03
-        th = np.linspace(0, math.pi, nseg + 1)
+        th = np.linspace(0, th1, nseg + 1)
         r = w / 2
         ctr = self.E(*self._on(face, a, cc), zs)
         pts = [self.E(*self._on(face, a + r * math.cos(x), cc), zs + r * math.sin(x)) for x in th]
@@ -7668,12 +7682,13 @@ class Frame:
                 uv = np.array([[[cell + 0.5, floor_ + 0.6], [cell + 0.1, floor_ + 0.85], [cell + 0.9, floor_ + 0.85]]])
                 self.m.tri(ctr, A_, B_, colv, WALL_GLASS, uv=uv, style=S_GLASS)
 
-    def arch_ring(self, face, c, a, w, zs, depth, band, col, nseg=12):
+    def arch_ring(self, face, c, a, w, zs, depth, band, col, nseg=12, th1=math.pi):
         """The moulded surround of an arch: a half ring standing proud of
-        the face by depth, with its outer edge returned to the wall."""
+        the face by depth, with its outer edge returned to the wall
+        (th1 = 2 pi: the ring of a round window)."""
         sg = 1.0 if face[0] == "+" else -1.0
         r0, r1 = w / 2, w / 2 + band
-        th = np.linspace(0, math.pi, nseg + 1)
+        th = np.linspace(0, th1, nseg + 1)
         cf = c + sg * depth
         n = self._n(face)
         col = np.asarray(col, float)
@@ -7767,6 +7782,81 @@ class Frame:
                         self.box(a_ - 0.2, a_ + 0.2, c, c + sg * o, z - 1.1, z, col * 0.95)
                     else:
                         self.box(c, c + sg * o, a_ - 0.2, a_ + 0.2, z - 1.1, z, col * 0.95)
+
+    def tri(self, a, b, c, col, n, kind=PLAIN):
+        """One triangle of (s, t, z) corners, facing n = (ds, dt, dz)."""
+        P = [self.E(*p) for p in (a, b, c)]
+        w = self.want(*np.mean(np.array([a, b, c], float), 0), *n)
+        if (np.cross(P[1] - P[0], P[2] - P[0]) * w).sum() < 0:
+            P[1], P[2] = P[2], P[1]
+        self.m.tri(P[0], P[1], P[2], np.asarray(col, float), kind)
+
+    def gable_roof(self, s0, s1, t0, t1, z, rise, col, wall=None, along="t", over=0.4):
+        """A pitched roof, its ridge along t (along="t") or s, eaves at z,
+        and, with wall, the two triangular gable ends in that colour."""
+        col = np.asarray(col, float)
+
+        def rq(a, b, c, d, cc, n):
+            self.tri(a, b, c, cc, n, ROOF_TILE)
+            self.tri(a, c, d, cc, n, ROOF_TILE)
+        if along == "t":
+            sm = (s0 + s1) / 2
+            for se, sg in ((s0 - over, -1), (s1 + over, 1)):
+                ze = z - over * rise / ((s1 - s0) / 2)
+                rq((se, t0 - over, ze), (se, t1 + over, ze), (sm, t1 + over, z + rise), (sm, t0 - over, z + rise),
+                          col * (1.0 if sg < 0 else 0.94), (sg * rise, 0, (s1 - s0) / 2))
+            if wall is not None:
+                for tt, sg in ((t0, -1), (t1, 1)):
+                    self.tri((s0, tt, z), (s1, tt, z), (sm, tt, z + rise), wall, (0, sg, 0))
+        else:
+            tm = (t0 + t1) / 2
+            for te, sg in ((t0 - over, -1), (t1 + over, 1)):
+                ze = z - over * rise / ((t1 - t0) / 2)
+                rq((s0 - over, te, ze), (s1 + over, te, ze), (s1 + over, tm, z + rise), (s0 - over, tm, z + rise),
+                          col * (1.0 if sg < 0 else 0.94), (0, sg * rise, (t1 - t0) / 2))
+            if wall is not None:
+                for ss, sg in ((s0, -1), (s1, 1)):
+                    self.tri((ss, t0, z), (ss, t1, z), (ss, tm, z + rise), wall, (sg, 0, 0))
+
+    def _ring_pts(self, s, t, r, n, th0, th1):
+        th = np.linspace(th0, th1, n + 1)
+        return [(s + r * math.cos(x), t + r * math.sin(x)) for x in th], th
+
+    def drum(self, s, t, z0, z1, r, col, n=12, th0=0.0, th1=2 * math.pi, style=None, uvm=None):
+        """A polygonal wall round (s, t): the round turrets, the apse."""
+        pts, th = self._ring_pts(s, t, r, n, th0, th1)
+        for i in range(n):
+            xm = (th[i] + th[i + 1]) / 2
+            (a0, b0), (a1, b1) = pts[i], pts[i + 1]
+            self.quad((a0, b0, z0), (a1, b1, z0), (a1, b1, z1), (a0, b0, z1), col, (math.cos(xm), math.sin(xm), 0),
+                      style, uvm)
+
+    def cone(self, s, t, z, r, h, col, n=12, th0=0.0, th1=2 * math.pi, kind=ROOF_TILE):
+        """A conical (n = 4, 8: pyramidal) roof, or a fan of it."""
+        pts, th = self._ring_pts(s, t, r, n, th0, th1)
+        for i in range(n):
+            xm = (th[i] + th[i + 1]) / 2
+            (a0, b0), (a1, b1) = pts[i], pts[i + 1]
+            self.tri((a0, b0, z), (a1, b1, z), (s, t, z + h), np.asarray(col, float) * (0.94 + 0.06 * math.sin(xm)),
+                     (math.cos(xm) * h, math.sin(xm) * h, r), kind)
+
+    def dome(self, s, t, z, r, h, col, n=12, rings=5, kind=PLAIN):
+        """A round dome (the turrets' stone caps)."""
+        prof = [(math.cos(k / rings * math.pi / 2), math.sin(k / rings * math.pi / 2)) for k in range(rings + 1)]
+        th = np.linspace(0, 2 * math.pi, n + 1)
+        col = np.asarray(col, float)
+        for j in range(rings):
+            (ra, za), (rb, zb) = prof[j], prof[j + 1]
+            for i in range(n):
+                xm = (th[i] + th[i + 1]) / 2
+                pa = [(s + r * ra * math.cos(x), t + r * ra * math.sin(x), z + h * za) for x in (th[i], th[i + 1])]
+                pb = [(s + r * rb * math.cos(x), t + r * rb * math.sin(x), z + h * zb) for x in (th[i], th[i + 1])]
+                nz = (ra + rb) / 2
+                nrm = (math.cos(xm) * nz, math.sin(xm) * nz, (za + zb) / 2 * r / max(h, 0.1))
+                cc = col * (0.9 + 0.1 * (za + zb) / 2)
+                self.tri(pa[0], pa[1], pb[1], cc, nrm, kind)
+                if rb > 1e-6:
+                    self.tri(pa[0], pb[1], pb[0], cc, nrm, kind)
 
     def hip_roof(self, s0, s1, t0, t1, z, col, overhang=0.5, pitch=19):
         poly = self.poly(s0 - overhang, s1 + overhang, t0 - overhang, t1 + overhang)
@@ -8109,7 +8199,7 @@ def palais_princier(m, gm, mntR, stats):
 
     # -- On the square: the guard's cobbled enclosure, cannons --------------
     cob = np.array(hexrgb("#8d8a84"), float)
-    F.box(gc - 9.0, gc + 9.0, 9.0, 21.0, Z - 0.2, Z + 0.06, cob, sides="stST")
+    F.box(gc - 9.0, gc + 9.0, 9.0, 21.0, Z - 0.2, Z + 0.18, cob, sides="stST")
     bol = np.array(hexrgb("#33463c"), float)
     for a in np.arange(gc - 9.0, gc + 9.01, 2.25):
         for b in (9.0, 21.0):
@@ -8591,6 +8681,481 @@ def armes_paving(gm, mntR, gz, stats):
     return round(area)
 
 
+# ------------------------------------------------ Saint-Nicolas Cathedral ----
+CATH = "BATIMENT0000000074078980"
+CATH_O = (1056200.0, 6302309.5)           # the west end of the south front, on its plane (20 cm photo)
+CATH_U = (1.0, 0.0)                       # along the front, west to east; the nave runs north
+CATH_STONE = "#ebe6da"                    # white La Turbie stone (street photos)
+CATH_ROOF = "#b2684b"
+
+
+def cathedrale(m, gm, mntR, stats):
+    """Saint-Nicolas Cathedral (1875-1903), Romanesque Revival, in a frame
+    on its front: s along it from the west (0) to the east, t out onto the
+    forecourt (the nave runs to t = -66, the chevet to -76), z m NGF. Plan
+    and heights from the LiDAR and the 20 cm photo (the front block, the
+    nave and aisles, the transept, the octagon over the crossing, the two
+    square towers by the choir, the apse in its ring of chapels); the
+    front from the 2015 and 2019 street photos: three portals, a gallery
+    of arches, the rose window under a steep gable, round corner turrets."""
+    F = Frame(m, CATH_O, CATH_U)
+    zg = mntR.sample(np.array([F.xy(15.5, 5.0)[0]]), np.array([F.xy(15.5, 5.0)[1]]))[0]
+    Zg = float(zg) if np.isfinite(zg) else 60.0           # the forecourt
+    F0 = Zg + 1.6                                          # the floor, up the steps
+    zb = Zg - 1.0                                          # walls start below the ground
+    st = np.array(hexrgb(CATH_STONE), float)
+    lit, shade = st * 1.03, st * 0.92
+    roof = np.array(hexrgb(CATH_ROOF), float)
+    dark = np.array(hexrgb("#2b2723"), float)
+    n_win = 0
+
+    # -- The front block: a centre bay under the gable, two side bays. ------
+    CB = (10.0, 21.0)
+    SB = ((2.5, 10.0), (21.0, 29.5))
+    FT = -13.0
+    F.box(CB[0], CB[1], FT, 0.0, zb, F0 + 23.0, st, top=False)
+    F.gable_roof(CB[0], CB[1], FT, 0.0, F0 + 23.0, 4.5, roof, wall=st, along="t", over=0.3)
+    for s0, s1 in SB:
+        F.box(s0, s1, FT, 0.0, zb, F0 + 22.0, st)
+        F.slab("+t", 0.0, s0 - 0.2, s1 + 0.2, F0 + 21.2, F0 + 22.0, 0.45, lit)        # cornice
+        for k in range(int((s1 - s0) / 0.7)):                                            # arched corbel table
+            a_ = s0 + 0.35 + k * 0.7
+            F.slab("+t", 0.0, a_ - 0.1, a_ + 0.1, F0 + 20.4, F0 + 21.2, 0.2, lit)
+        F.slab("+t", 0.0, s0, s1, F0 + 20.25, F0 + 20.45, 0.25, lit)
+        if s0 < 5:
+            F.slab("-s", s0, FT, 0.2, F0 + 21.2, F0 + 22.0, 0.45, lit)
+        else:
+            F.slab("+s", s1, FT, 0.2, F0 + 21.2, F0 + 22.0, 0.45, lit)
+        for sp in (s0 + 0.5, s1 - 0.5):                                                 # corner pinnacles
+            F.box(sp - 0.4, sp + 0.4, -0.9, -0.1, F0 + 22.0, F0 + 23.6, lit)
+            F.cone(sp, -0.5, F0 + 23.6, 0.55, 1.4, lit, n=8, kind=PLAIN)
+    # The steep front gable, standing a little proud, its edge in arcading.
+    gz0, gz1 = F0 + 21.5, F0 + 28.5
+    F.slab("+t", 0.0, CB[0] - 0.2, CB[1] + 0.2, F0, gz0, 0.35, st)
+    F.tri((CB[0] - 0.2, 0.35, gz0), (CB[1] + 0.2, 0.35, gz0), (15.5, 0.35, gz1), st, (0, 1, 0))
+    for sg in (-1, 1):                                                                  # coping up the rakes
+        e = 15.5 + sg * 5.9
+        lo = lambda tt, dz=0.0: [(e, tt, gz0 - 0.1 + dz), (15.5, tt, gz1 - 0.1 + dz)]
+        (p0, p1), (q0, q1) = lo(0.6), lo(0.6, 0.5)
+        F.quad(p0, p1, q1, q0, lit, (0, 1, 0))
+        (r0, r1) = lo(-0.1, 0.5)
+        F.quad(q0, q1, r1, r0, lit * 1.02, (sg * (gz1 - gz0), 0, 5.9))
+        (u0, u1) = lo(-0.1)
+        F.quad(p0, p1, u1, u0, shade, (-sg * (gz1 - gz0), 0, -5.9))
+        # A frieze of little blind arches under the coping.
+        for k in range(9):
+            f = (k + 0.5) / 9
+            a_ = e + (15.5 - e) * f
+            z_ = gz0 + (gz1 - gz0) * f - 0.75
+            F.slab("+t", 0.35, a_ - 0.12, a_ + 0.12, z_ - 0.5, z_, 0.12, lit)
+    F.box(15.1, 15.9, -0.1, 0.5, gz1, gz1 + 1.1, lit)                                  # the angel on the apex
+    F.column(15.5, 0.2, gz1 + 1.1, gz1 + 2.4, 0.22, lit)
+    _ball(m, *F.xy(15.5, 0.2), gz1 + 2.6, 0.3, lit, None, 8, 5)
+    # Rose window under the gable.
+    F.arch_glass("+t", 0.35, 15.5, 4.2, F0 + 17.2, 0, 7, nseg=16, th1=2 * math.pi)
+    F.arch_ring("+t", 0.35, 15.5, 4.2, F0 + 17.2, 0.3, 0.45, lit, nseg=20, th1=2 * math.pi)
+    for k in range(8):                                                                  # tracery spokes
+        x = k * math.pi / 8
+        F.slab("+t", 0.38, 15.5 + 1.9 * math.cos(x) - 0.06, 15.5 + 1.9 * math.cos(x) + 0.06,
+               F0 + 17.2 + 1.9 * math.sin(x) - 0.06, F0 + 17.2 + 1.9 * math.sin(x) + 0.06, 0.05, lit)
+    F.arch_ring("+t", 0.38, 15.5, 1.0, F0 + 17.2, 0.12, 0.25, lit, nseg=12, th1=2 * math.pi)
+    n_win += 1
+    # The gallery: a row of five round arches on little columns.
+    F.slab("+t", 0.35, CB[0], CB[1], F0 + 10.6, F0 + 11.1, 0.35, lit)
+    for k in range(5):
+        a = CB[0] + 1.3 + k * (CB[1] - CB[0] - 2.6) / 4
+        F.window("+t", 0.35, a, 1.25, F0 + 11.1, F0 + 13.4, k, 3, frame=lit, arch=True, band=0.18, sill=False)
+        n_win += 1
+    F.slab("+t", 0.35, CB[0], CB[1], F0 + 14.2, F0 + 14.6, 0.3, lit)
+
+    def portal(a, w, zs, depth, rings, gable):
+        """A portal: the door under stepped arches on nook shafts, in a
+        porch standing proud of the front, under a little gable."""
+        nonlocal n_win
+        c = 0.35 if CB[0] < a < CB[1] else 0.0
+        F.face_quad("+t", c, a - w / 2, a + w / 2, F0, zs, dark, out=0.02)
+        F.arch_glass("+t", c, a, w, zs, 0, 0, nseg=10, dark=True)
+        bw = w / 2 + rings * 0.32
+        for side in (-1, 1):                                                        # the jambs
+            F.slab("+t", c, *sorted((a + side * w / 2, a + side * (bw + 0.6))), F0, zs, depth, st)
+            for k in range(rings):
+                F.column(a + side * (w / 2 + 0.16 + k * 0.32), c + depth * (k + 0.5) / (rings + 0.5),
+                         F0 + 0.4, zs - 0.3, 0.13, lit)
+        for k in range(rings):                                                       # archivolts
+            F.arch_ring("+t", c, a, w + 2 * k * 0.32, zs, depth * (k + 1) / rings, 0.32, lit * (1 - 0.02 * k), nseg=14)
+        F.slab("+t", c, a - bw - 0.6, a + bw + 0.6, zs + bw, zs + bw + 0.5, depth, st)
+        F.slab("+t", c, a - bw - 0.6, a - bw, zs, zs + bw, depth, st)
+        F.slab("+t", c, a + bw, a + bw + 0.6, zs, zs + bw, depth, st)
+        if gable:
+            zt = zs + bw + 0.5
+            F.tri((a - bw - 0.6, c + depth, zt), (a + bw + 0.6, c + depth, zt), (a, c + depth, zt + bw * 0.7), lit, (0, 1, 0))
+            F.gable_roof(a - bw - 0.6, a + bw + 0.6, c, c + depth, zt, bw * 0.7, lit, along="t", over=0.15)
+        n_win += 1
+
+    portal(15.5, 3.2, F0 + 4.6, 1.3, 4, True)
+    for s0, s1 in SB:
+        a = (s0 + s1) / 2
+        portal(a, 1.9, F0 + 3.5, 0.8, 2, False)
+        for i, (z0, z1) in enumerate(((F0 + 8.4, F0 + 11.2), (F0 + 14.2, F0 + 17.6))):
+            for d in (-0.95, 0.95):                                                  # twin arched windows
+                F.window("+t", 0.0, a + d, 1.15, z0, z1, int(a), i + 1, frame=lit, arch=True, band=0.2, sill=False)
+                n_win += 1
+            F.column(a, 0.15, z0, z1, 0.12, lit)
+            F.slab("+t", 0.0, s0, s1, z0 - 0.9, z0 - 0.5, 0.25, lit)
+    for a in (CB[0], CB[1]):                                                         # buttresses
+        F.slab("+t", 0.0, a - 0.55, a + 0.55, zb, F0 + 21.5, 0.75, st)
+        F.box(a - 0.5, a + 0.5, 0.0, 0.7, F0 + 21.5, F0 + 23.4, lit)
+        F.cone(a, 0.35, F0 + 23.4, 0.6, 1.8, lit, n=8, kind=PLAIN)
+    F.slab("+t", 0.0, 2.5, 29.5, F0 - 0.2, F0 + 0.4, 0.4, lit)                     # plinth
+
+    # Round turrets on the front's corners, domed, with little arcades.
+    for (sc, tc, r) in ((1.3, -4.5, 2.0), (31.0, -6.0, 2.4)):
+        F.drum(sc, tc, zb, F0 + 9.0, r, st, n=14)
+        F.drum(sc, tc, F0 + 9.0, F0 + 9.4, r + 0.25, lit, n=14)
+        F.drum(sc, tc, F0 + 9.4, F0 + 11.2, r - 0.1, st * 0.97, n=14)
+        for k in range(10):
+            x = k * 2 * math.pi / 10
+            p = (sc + (r - 0.05) * math.cos(x), tc + (r - 0.05) * math.sin(x))
+            F.column(p[0], p[1], F0 + 9.4, F0 + 11.2, 0.09, lit)
+        F.drum(sc, tc, F0 + 11.2, F0 + 11.6, r + 0.2, lit, n=14)
+        F.dome(sc, tc, F0 + 11.6, r + 0.05, r * 0.8, lit, n=14)
+        _ball(m, *F.xy(sc, tc), F0 + 11.6 + r * 0.8 + 0.25, 0.22, lit, None, 8, 5)
+
+    # -- Nave, aisles, transept, crossing, towers, choir, chevet. -----------
+    NV = (10.5, 20.5)
+    AI = ((3.5, NV[0]), (NV[1], 27.5))
+    T0, T1 = FT, -40.0
+    F.box(NV[0], NV[1], T1, T0, zb, F0 + 19.5, st, top=False)
+    F.gable_roof(NV[0], NV[1], T1, T0, F0 + 19.5, 2.6, roof, along="t")
+    nbay = 6
+    for (s0, s1), face in zip(AI, ("-s", "+s")):
+        F.box(s0, s1, T1, T0, zb, F0 + 11.0, st, top=False)
+        outer, inner = (s0, s1) if face == "-s" else (s1, s0)
+        # Lean-to roof from the outer eaves up to the nave wall.
+        F.tri((outer - (0.4 if face == "-s" else -0.4), T1, F0 + 10.8), (inner, T1, F0 + 13.0), (inner, T0, F0 + 13.0),
+              roof, (-1 if face == "-s" else 1, 0, 3), ROOF_TILE)
+        F.tri((outer - (0.4 if face == "-s" else -0.4), T1, F0 + 10.8), (inner, T0, F0 + 13.0),
+              (outer - (0.4 if face == "-s" else -0.4), T0, F0 + 10.8), roof, (-1 if face == "-s" else 1, 0, 3), ROOF_TILE)
+        F.slab(face, outer, T1, T0, F0 + 10.5, F0 + 11.0, 0.35, lit)                 # eaves cornice
+        nf = "-s" if face == "-s" else "+s"
+        cl = NV[0] if face == "-s" else NV[1]
+        for k in range(nbay):
+            a = T0 - (k + 0.5) * (T0 - T1) / nbay
+            F.window(face, outer, a, 1.3, F0 + 4.2, F0 + 7.6, k, 1, frame=lit, arch=True, band=0.22, sill=True)
+            F.window(nf, cl, a - 0.85, 0.9, F0 + 14.2, F0 + 16.8, k, 2, frame=lit, arch=True, band=0.16, sill=False)
+            F.window(nf, cl, a + 0.85, 0.9, F0 + 14.2, F0 + 16.8, k, 2, frame=lit, arch=True, band=0.16, sill=False)
+            n_win += 3
+            b = T0 - k * (T0 - T1) / nbay
+            if k:
+                F.slab(face, outer, b - 0.45, b + 0.45, zb, F0 + 10.5, 0.7, st)        # buttresses
+        F.slab(nf, cl, T1, T0, F0 + 19.0, F0 + 19.5, 0.35, lit)                        # nave cornice
+        F.slab(face, outer, T1, T0, F0 - 0.3, F0 + 0.4, 0.3, lit)
+    # Transept: gabled arms, round windows in the gable ends.
+    TR = (0.5, 32.0)
+    TT = (-50.0, T1)
+    F.box(TR[0], TR[1], TT[0], TT[1], zb, F0 + 19.5, st, top=False)
+    F.gable_roof(TR[0], TR[1], TT[0], TT[1], F0 + 19.5, 3.2, roof, wall=st, along="s")
+    tm = (TT[0] + TT[1]) / 2
+    for face, c in (("-s", TR[0]), ("+s", TR[1])):
+        F.arch_glass(face, c, tm, 3.2, F0 + 14.5, 0, 7, nseg=14, th1=2 * math.pi)
+        F.arch_ring(face, c, tm, 3.2, F0 + 14.5, 0.3, 0.4, lit, nseg=16, th1=2 * math.pi)
+        for d in (-1.6, 1.6):
+            F.window(face, c, tm + d, 1.2, F0 + 5.0, F0 + 9.0, 7, 1, frame=lit, arch=True, band=0.22)
+        F.slab(face, c, TT[0], TT[1], F0 + 19.0, F0 + 19.5, 0.35, lit)
+        for b in (TT[0] + 0.4, TT[1] - 0.4):
+            F.slab(face, c, b - 0.5, b + 0.5, zb, F0 + 19.0, 0.6, st)
+        n_win += 3
+    # The octagon over the crossing: a drum with arched openings, a low roof.
+    oc = (15.3, -46.5)
+    F.drum(*oc, F0 + 19.0, F0 + 26.6, 6.3, st, n=8, th0=math.pi / 8, th1=2 * math.pi + math.pi / 8)
+    for k in range(8):
+        x = math.pi / 8 + (k + 0.5) * math.pi / 4
+        fc = (oc[0] + 5.85 * math.cos(x), oc[1] + 5.85 * math.sin(x))
+        nrm = (math.cos(x), math.sin(x), 0.0)
+        P = [F.xy(fc[0] + 0.85 * -math.sin(x) * sg, fc[1] + 0.85 * math.cos(x) * sg) for sg in (-1, 1)]
+        q = [(fc[0] + 0.85 * -math.sin(x) * sg + 0.02 * math.cos(x), fc[1] + 0.85 * math.cos(x) * sg + 0.02 * math.sin(x))
+             for sg in (-1, 1)]
+        F.quad((*q[0], F0 + 21.2), (*q[1], F0 + 21.2), (*q[1], F0 + 24.4), (*q[0], F0 + 24.4), dark, nrm)
+    F.drum(*oc, F0 + 26.6, F0 + 27.1, 6.6, lit, n=8, th0=math.pi / 8, th1=2 * math.pi + math.pi / 8)
+    F.cone(*oc, F0 + 27.1, 6.9, 2.4, roof, n=8, th0=math.pi / 8, th1=2 * math.pi + math.pi / 8)
+    F.column(oc[0], oc[1], F0 + 29.4, F0 + 30.4, 0.12, lit)
+    # The two square towers by the choir.
+    for s0, s1 in ((6.0, 13.5), (20.0, 27.5)):
+        F.box(s0, s1, -57.5, -50.0, zb, F0 + 29.6, st, top=False)
+        sm = (s0 + s1) / 2
+        for face, c, a in (("-s", s0, -53.75), ("+s", s1, -53.75), ("-t", -57.5, sm)):
+            for d in (-1.0, 1.0):
+                F.window(face, c, a + d, 1.0, F0 + 23.8, F0 + 27.0, 9, 4, frame=lit, arch=True, band=0.18, sill=False)
+            F.slab(face, c, *((-57.7, -49.8) if face[1] == "s" else (s0 - 0.2, s1 + 0.2)), F0 + 22.8, F0 + 23.2, 0.3, lit)
+            F.slab(face, c, *((-57.8, -49.7) if face[1] == "s" else (s0 - 0.3, s1 + 0.3)), F0 + 29.2, F0 + 29.6, 0.45, lit)
+        F.cone(sm, -53.75, F0 + 29.6, 5.6, 2.6, roof, n=4, th0=math.pi / 4, th1=2 * math.pi + math.pi / 4)
+        n_win += 6
+    # Choir, its rounded apse, the ambulatory and its chapels.
+    AC = (15.5, -64.5)
+    F.box(NV[0], NV[1], AC[1], -50.0, zb, F0 + 18.0, st, top=False, sides="tT")
+    F.gable_roof(NV[0], NV[1], AC[1], -57.5, F0 + 18.0, 2.6, roof, along="t", over=0.2)
+    F.drum(*AC, zb, F0 + 16.5, 5.0, st, n=12, th0=math.pi, th1=2 * math.pi)
+    F.cone(*AC, F0 + 16.5, 5.3, 2.8, roof, n=12, th0=math.pi, th1=2 * math.pi)
+    for sb in ((0.5, NV[0]), (NV[1], 31.0)):                                          # side chapels
+        F.box(sb[0], sb[1], -66.0, -57.5, zb, F0 + 11.0, st)
+        F.slab("-t", -66.0, sb[0], sb[1], F0 + 10.6, F0 + 11.0, 0.3, lit)
+    F.drum(*AC, zb, F0 + 10.5, 11.0, st, n=16, th0=math.pi, th1=2 * math.pi)        # ambulatory
+    pts, th = F._ring_pts(*AC, 11.4, 16, math.pi, 2 * math.pi)
+    for i in range(16):
+        xm = (th[i] + th[i + 1]) / 2
+        (a0, b0), (a1, b1) = pts[i], pts[i + 1]
+        i0 = (AC[0] + 5.0 * math.cos(th[i]), AC[1] + 5.0 * math.sin(th[i]))
+        i1 = (AC[0] + 5.0 * math.cos(th[i + 1]), AC[1] + 5.0 * math.sin(th[i + 1]))
+        F.tri((a0, b0, F0 + 10.3), (a1, b1, F0 + 10.3), (*i1, F0 + 13.0), roof, (math.cos(xm), math.sin(xm), 2.5), ROOF_TILE)
+        F.tri((a0, b0, F0 + 10.3), (*i1, F0 + 13.0), (*i0, F0 + 13.0), roof, (math.cos(xm), math.sin(xm), 2.5), ROOF_TILE)
+    for k in range(5):                                                                 # the radiating chapels
+        x = math.pi + k * math.pi / 4
+        cs, ct = AC[0] + 11.2 * math.cos(x), AC[1] + 11.2 * math.sin(x)
+        F.drum(cs, ct, zb, F0 + 8.5, 2.9, st, n=10)
+        F.drum(cs, ct, F0 + 8.5, F0 + 8.9, 3.1, lit, n=10)
+        F.cone(cs, ct, F0 + 8.9, 3.2, 1.6, roof, n=10)
+        for d in (-0.5, 0.0, 0.5):
+            y = x + d
+            p = (cs + 2.92 * math.cos(y), ct + 2.92 * math.sin(y))
+            q = (cs + 2.92 * math.cos(y + 0.2), ct + 2.92 * math.sin(y + 0.2))
+            F.quad((*p, F0 + 3.5), (*q, F0 + 3.5), (*q, F0 + 6.4), (*p, F0 + 6.4), dark, (math.cos(y), math.sin(y), 0))
+    # The sacristy along the east side.
+    F.box(27.5, 38.5, -53.0, -29.0, zb, F0 + 6.5, st * 0.97)
+    F.slab("+s", 38.5, -53.0, -29.0, F0 + 6.1, F0 + 6.5, 0.3, lit)
+    # The steps up from the forecourt.
+    ns = 8
+    for k in range(ns):
+        F.box(-1.0, 33.0, 0.0, 4.2 - k * 0.45, zb, Zg + (k + 1) * (F0 - Zg) / ns, lit * (0.97 if k % 2 else 1.0),
+              sides="stST")
+    stats["cathedral_windows"] = n_win
+    return F.poly(-1.5, 39.5, -77.0, 4.5)
+
+
+# ------------------------------------------------- Le Rocher's old town ----
+# The lanes of Monaco-Ville, after the 2019 street photos (Mapillary): the
+# pedestrian lanes (Rue Basse, Rue Comte Félix Gastaldi, Rue Émile de Loth,
+# the squares) in small grey setts with a few red ones; the streets cars use
+# in asphalt with a red brick pavement along each house front.
+ROCHER_ZONE = Polygon([(1056030, 6302255), (1056530, 6302255), (1056530, 6302560), (1056030, 6302560)])
+ROCHER_GARDENS = None                  # the Rock's mapped gardens (rocher_gardens_setup)
+SETT, SETT_RED = 12, 13                # GROUND styles: grey setts, Place du Palais's pink-red ones
+ROCHER_SETT_W = 7.0                    # m: the lanes' paving reaches the house fronts
+ROCHER_PAVE_W = 1.3                    # m, brick pavement along the house fronts
+
+
+def rocher_paved(t, p_):
+    """A street of the old town paved in setts though OSM tags it a road
+    (Place de la Mairie, Rue Princesse Marie de Lorraine): no asphalt."""
+    return (t.get("surface") in ("paving_stones", "sett") and len(p_) >= 2
+            and ROCHER_ZONE.contains(Point(*p_[len(p_) // 2])))
+
+
+def rocher_streets(gm, ways, mnt, gz, fps, stats):
+    mntR = Raster(mnt)
+    blds = unary_union([p for p in fps if p.intersects(ROCHER_ZONE)]).buffer(0.03)
+    rp, _ = _road_polys(ways)
+    carriage = unary_union([q for q in rp if q.intersects(ROCHER_ZONE)] or [Polygon()])
+    keep_off = [Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0)]
+    sett_lines, road_lines, squares, palais_sq = [], [], [], []
+    for t, p_, closed in ways:
+        hw = t.get("highway")
+        k = t.get("leisure") or t.get("landuse") or t.get("natural")
+        if closed and len(p_) > 3 and k in ("park", "garden", "grass", "wood", "scrub"):
+            keep_off.append(Polygon(p_).buffer(0))
+        if closed and len(p_) > 3 and t.get("name") == "Place du Palais" and hw == "pedestrian":
+            palais_sq.append(Polygon(p_).buffer(0))
+        if not hw or t.get("tunnel") or t.get("layer", "0") != "0" or hw == "steps" or len(p_) < 2:
+            continue
+        ln = LineString(p_)
+        if not ln.intersects(ROCHER_ZONE):
+            continue
+        if closed and hw == "pedestrian" and t.get("name") != "Place du Palais":
+            squares.append(Polygon(p_).buffer(0))
+        elif hw in ("footway", "pedestrian") or rocher_paved(t, p_):
+            sett_lines.append(ln)
+        elif hw in ("residential", "service", "living_street"):
+            road_lines.append(ln)
+    off = unary_union(keep_off).union(blds)
+    # OSM's lanes run a few metres off BD TOPO's blocks here (some inside
+    # them): a wide buffer, cut to the blocks, finds the real 3 m lanes.
+    sett = unary_union([ln.buffer(ROCHER_SETT_W, cap_style=1) for ln in sett_lines] + squares)
+    sett = sett.intersection(ROCHER_ZONE).difference(off).difference(carriage.buffer(0.05))
+    side = unary_union([ln.buffer(8.0, cap_style=2) for ln in road_lines]).intersection(ROCHER_ZONE)
+    side = side.intersection(blds.buffer(ROCHER_PAVE_W)).difference(off).difference(carriage).difference(sett)
+    gardens = unary_union(keep_off[1:] or [Polygon()])
+    sq = unary_union(palais_sq or [Polygon()]).difference(blds).difference(gardens).difference(carriage)
+    stats["palais_sq_m2"] = round(_slab(gm, sq, mntR, gz, SETT_RED, lift=0.09))
+    stats["rocher_sett_m2"] = round(_slab(gm, sett, mntR, gz, SETT, lift=0.09))
+    stats["rocher_brick_m2"] = round(_slab(gm, side, mntR, gz, PAVER, lift=0.14))
+    return stats["rocher_sett_m2"]
+
+
+# ------------------------------------------- Fort Antoine, the ramparts ----
+FORT = "BATIMENT0000000284089930"
+FORT_C = (1056624.5, 6302672.0)          # the round fort's centre (BD TOPO outline, LiDAR rim)
+FORT_STONE = "#cfc6b4"                   # pale limestone rubble
+
+
+def fort_antoine(m, gm, mntR, stats):
+    """Fort Antoine (1709), the round fort on the Rock's north-east tip,
+    an open-air theatre since 1953: a rubble-stone drum from the road up to
+    the platform (the LiDAR's 22 m floor and 24 m rim), a cordon, a plain
+    parapet, a corbelled sentry box over the sea, stone tiers round the
+    south half of the floor and a low stage on the north."""
+    F = Frame(m, FORT_C, (1.0, 0.0))
+    st = np.array(hexrgb(FORT_STONE), float)
+    floor_ = 22.1
+    th = np.linspace(0, 2 * math.pi, 33)
+    R = 13.0
+    zlow = mntR.sample(FORT_C[0] + (R + 2.0) * np.cos(th), FORT_C[1] + (R + 2.0) * np.sin(th))
+    zb = float(np.nanmin(zlow)) - 0.5 if np.isfinite(zlow).any() else 9.0
+    F.drum(0.0, 0.0, zb, floor_ + 0.6, R, st * 0.97, n=32, style=RUBBLE, uvm=0.45)
+    F.drum(0.0, 0.0, floor_ + 0.6, floor_ + 1.0, R + 0.25, st * 1.04, n=32)          # the cordon
+    F.drum(0.0, 0.0, floor_ + 1.0, floor_ + 2.2, R - 0.1, st, n=32, style=RUBBLE, uvm=0.45)
+    F.drum(0.0, 0.0, floor_ + 2.2, floor_ + 2.4, R, st * 1.05, n=32)                 # coping
+    # The parapet's inner face and its top.
+    pts, _ = F._ring_pts(0.0, 0.0, R - 0.7, 32, 0.0, 2 * math.pi)
+    out, _ = F._ring_pts(0.0, 0.0, R, 32, 0.0, 2 * math.pi)
+    for i in range(32):
+        xm = (th[i] + th[i + 1]) / 2
+        (a0, b0), (a1, b1) = pts[i], pts[i + 1]
+        (c0, d0), (c1, d1) = out[i], out[i + 1]
+        F.quad((a0, b0, floor_), (a1, b1, floor_), (a1, b1, floor_ + 2.4), (a0, b0, floor_ + 2.4), st * 0.95,
+               (-math.cos(xm), -math.sin(xm), 0))
+        F.quad((a0, b0, floor_ + 2.4), (a1, b1, floor_ + 2.4), (c1, d1, floor_ + 2.4), (c0, d0, floor_ + 2.4), st * 1.05,
+               (0, 0, 1))
+    # The floor: a gravel arena.
+    F.cone(0.0, 0.0, floor_, R - 0.7, 0.0, np.array(hexrgb("#cbbfa6")), n=32, kind=PLAIN)
+    # Stone tiers round the south half, a low stage on the north.
+    for k in range(4):
+        r0, r1 = R - 0.7 - (k + 1) * 0.85, R - 0.7 - k * 0.85
+        z = floor_ + (4 - k) * 0.42
+        p0, _ = F._ring_pts(0.0, 0.0, r0, 14, math.pi * 1.05, math.pi * 1.95)
+        p1, th2 = F._ring_pts(0.0, 0.0, r1, 14, math.pi * 1.05, math.pi * 1.95)
+        for i in range(14):
+            xm = (th2[i] + th2[i + 1]) / 2
+            F.quad((*p0[i], z), (*p0[i + 1], z), (*p1[i + 1], z), (*p1[i], z), st * (1.02 - 0.03 * (k % 2)), (0, 0, 1))
+            F.quad((*p0[i], floor_), (*p0[i + 1], floor_), (*p0[i + 1], z), (*p0[i], z), st * 0.88,
+                   (-math.cos(xm), -math.sin(xm), 0))
+    F.box(-4.5, 4.5, 4.0, 8.5, floor_, floor_ + 0.6, np.array(hexrgb("#8a6a4c")))       # the stage
+    # A corbelled sentry box on the parapet, over the sea (east).
+    sc, tc = R - 0.2, 0.0
+    for k in range(4):
+        F.drum(sc, tc, floor_ - 1.6 + k * 0.4, floor_ - 1.2 + k * 0.4, 0.5 + 0.15 * k, st, n=10)
+    F.drum(sc, tc, floor_ + 0.0, floor_ + 3.6, 1.0, st * 1.02, n=12)
+    F.drum(sc, tc, floor_ + 2.2, floor_ + 3.0, 1.03, np.array(hexrgb("#3a3631")), n=12, th0=-0.5, th1=0.5)
+    F.dome(sc, tc, floor_ + 3.6, 1.1, 0.9, st * 1.05, n=12)
+    _ball(m, *F.xy(sc, tc), floor_ + 4.65, 0.14, st, None, 6, 4)
+    stats["fort_antoine"] = 1
+    return F.poly(-R - 1, R + 1, -R - 1, R + 1)
+
+
+def _cannon(m, x, y, z, deg, scale=1.0):
+    """A bronze cannon on its wooden carriage, pointing to compass deg."""
+    a = math.radians(deg)
+    F = Frame(m, (x, y), (math.sin(a), math.cos(a)))
+    wood = np.array(hexrgb("#3d2f25"), float)
+    bronze = np.array(hexrgb("#6b5532"), float)
+    F.box(-0.9 * scale, 0.5 * scale, -0.42 * scale, 0.42 * scale, z, z + 0.55 * scale, wood)
+    for sg in (-1, 1):
+        _cyl(m, *F.xy(0.1 * scale, sg * 0.5 * scale), z, z + 0.04, 0.42 * scale, wood * 0.8, sides=10)
+    for j in range(7):
+        r_ = (0.24 - 0.02 * j) * scale
+        F.box((-1.0 + j * 0.42) * scale, (-0.58 + j * 0.42) * scale, -r_, r_, z + 0.7 * scale - r_, z + 0.7 * scale + r_,
+              bronze)
+
+
+def rocher_ramparts(m, ways, pts, mnt, stats):
+    """The Rock's ramparts: the mapped retaining walls in pale limestone
+    rubble with a parapet on the high side, and the battery of bronze
+    cannons along the west parapet (OpenStreetMap historic=cannon, with
+    their directions)."""
+    mntR = Raster(mnt)
+    zone = ROCHER_ZONE.buffer(60.0)
+    st = np.array(hexrgb(FORT_STONE), float)
+    n_m = 0.0
+    for t, p_, closed in ways:
+        if t.get("barrier") != "retaining_wall" or len(p_) < 2 or not LineString(p_).intersects(zone):
+            continue
+        P = np.asarray(p_, float)
+        for a, b in zip(P[:-1], P[1:]):
+            L = float(np.hypot(*(b - a)))
+            if L < 0.5:
+                continue
+            F = Frame(m, a, b - a)
+            ss = np.linspace(0.0, L, max(2, int(L / 2) + 1))
+            hi = mntR.sample(*np.array([F.xy(s_, 1.6) for s_ in ss]).T)
+            lo = mntR.sample(*np.array([F.xy(s_, -1.6) for s_ in ss]).T)
+            if not (np.isfinite(hi).any() and np.isfinite(lo).any()):
+                continue
+            hi_, lo_ = float(np.nanmax(hi)), float(np.nanmin(lo))
+            side = 1.0
+            if lo_ > hi_ or float(np.nanmedian(lo)) > float(np.nanmedian(hi)):
+                hi_, lo_ = float(np.nanmax(lo)), float(np.nanmin(hi))
+                side = -1.0
+            if hi_ - lo_ < 0.8:
+                continue                                   # no drop: a low garden wall, left to the ground
+            F.box(0.0, L, -0.3, 0.3, lo_ - 0.5, hi_ + 1.0, st, style=RUBBLE, uvm=0.45)
+            F.box(-0.05, L + 0.05, -0.36, 0.36, hi_ + 1.0, hi_ + 1.15, st * 1.06)       # coping
+            n_m += L
+    n_c = 0
+    for (x, y), t in pts:
+        if t.get("historic") == "cannon" and zone.contains(Point(x, y)):
+            z = float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=60.0))
+            try:
+                deg = float(t.get("direction", "0"))
+            except ValueError:
+                deg = 0.0
+            _cannon(m, x, y, z, deg)
+            n_c += 1
+    stats["rampart_m"] = round(n_m)
+    stats["rampart_cannons"] = n_c
+    return round(n_m)
+
+
+def rocher_gardens_setup(ways):
+    near = ROCHER_ZONE.buffer(100.0)
+    g = [Polygon(p_).buffer(0) for t, p_, c in ways
+         if c and len(p_) > 3 and t.get("leisure") in ("garden", "park") and Polygon(p_).buffer(0).intersects(near)]
+    return unary_union(g) if g else None
+
+
+def rocher_gardens(gm, m, ways, pts, mnt, gz, stats):
+    """The Rock's gardens (Jardins de Saint-Martin and the small ones by
+    the Palace): their mapped paths in red brick between the pines, and
+    green benches where OpenStreetMap has them. The trees come from the
+    LiDAR (trees()), the statues from street_features()."""
+    mntR = Raster(mnt)
+    if ROCHER_GARDENS is None:
+        return 0
+    gardens = ROCHER_GARDENS
+    paths = [LineString(p_) for t, p_, c in ways
+             if t.get("highway") in ("footway", "path", "steps", "pedestrian") and not c and len(p_) >= 2
+             and LineString(p_).intersects(gardens)]
+    pv = unary_union([ln.buffer(0.95, cap_style=1) for ln in paths] or [Polygon()]).intersection(gardens)
+    stats["rocher_garden_path_m2"] = round(_slab(gm, pv, mntR, gz, PAVER, lift=0.08, area=1.5))
+    wood, iron = np.array(hexrgb("#33463c")), np.array(hexrgb("#2c2a27"))
+    nb = 0
+    for (x, y), t in pts:
+        if t.get("amenity") == "bench" and gardens.buffer(3).contains(Point(x, y)):
+            z = mntR.sample(np.array([x]), np.array([y]))[0]
+            if not np.isfinite(z):
+                continue
+            # Facing the nearest path.
+            ax = (1.0, 0.0)
+            if paths:
+                q = min(paths, key=lambda ln: ln.distance(Point(x, y)))
+                pp = q.interpolate(q.project(Point(x, y)))
+                d = np.array([pp.x - x, pp.y - y])
+                if np.hypot(*d) > 0.2:
+                    ax = (-d[1], d[0])
+            _box(m, x, y, ax, 1.8, 0.5, z + 0.4, z + 0.47, wood)
+            _box(m, x, y, ax, 1.7, 0.4, z - 0.1, z + 0.4, iron)
+            nb += 1
+    stats["rocher_benches"] = nb
+    return nb
+
+
 def _zone_trees(m, zone, mns, mnt, ortho, fps, kindfn, hmax=24.0, rad_k=0.85, seed=31):
     """Trees where the LiDAR canopy peaks inside zone (buildings near it cut
     out; red awnings and canopies are not trees). kindfn(h) names the kind."""
@@ -8630,6 +9195,11 @@ def rocher_trees(m, mns, mnt, ortho, fps, stats):
     which wants green in it, misses them)."""
     zone = Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0)
     n_ = _zone_trees(m, zone, mns, mnt, ortho, fps, lambda h: "pine" if h > 7 else "broad", seed=47)
+    # The gardens (Saint-Martin's pine wood on the south cliff), from the
+    # canopy too: the generic finder thinned them to a few cypresses.
+    if ROCHER_GARDENS is not None:
+        n_ += _zone_trees(m, ROCHER_GARDENS.difference(zone), mns, mnt, ortho, fps,
+                          lambda h: "pine" if h > 6 else "broad", seed=53)
     stats["rocher_trees"] = n_
     return n_
 
@@ -9730,6 +10300,8 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
             continue
         if t.get("layer", "0") == "1" or is_carpark_way(p_):
             continue                    # (car park entrances: a driveway across the pavement)
+        if rocher_paved(t, p_):
+            continue                    # Le Rocher's paved squares: rocher_streets() lays setts
         W = float(ROAD_W[hw])
         try:
             if t.get("width"):
@@ -10464,9 +11036,10 @@ def main():
     MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
     global PORTIER
     PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
-    global ARMES, CONDA
+    global ARMES, CONDA, ROCHER_GARDENS
     ARMES = armes_setup(ways)
     CONDA = condamine_setup(ways)
+    ROCHER_GARDENS = rocher_gardens_setup(ways)
     mnt_f = np.where(sea, np.nan, mnt)
     global TUNNEL
     TUNNEL = load_tunnel()
@@ -10596,6 +11169,12 @@ def main():
           stats.get("fairmont_roof_trees"), "roof trees")
     print("Place d'Armes…", place_darmes(gm, bm, tm, ways, pts, mns, mnt_f, ortho, ortho_hi, gz, fps, stats), "stalls")
     print("Le Rocher trees…", rocher_trees(tm, mns, mnt_f, ortho, fps, stats))
+    print("Le Rocher ramparts…", rocher_ramparts(bm, ways, pts, mnt_f, stats), "m of wall,",
+          stats.get("rampart_cannons"), "cannons")
+    print("Le Rocher gardens…", rocher_gardens(gm, bm, ways, pts, mnt_f, gz, stats), "benches,",
+          stats.get("rocher_garden_path_m2"), "m2 of paths")
+    print("Le Rocher streets…", rocher_streets(gm, ways, mnt_f, gz, fps, stats), "m2 of setts,",
+          stats.get("rocher_brick_m2"), "m2 of brick pavement")
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,

@@ -210,10 +210,14 @@
             float sc = length(czm_model[0].xyz);
             vec2 wp = fsInput.attributes.positionMC.xz * sc;
             float px = length(fwidth(wp));
-            bool brick = a255 < 9.5;
-            vec3 ref = czm_srgbToLinear(brick ? vec3(0.647, 0.443, 0.373) : vec3(0.827, 0.796, 0.741));
+            // Style 12: Le Rocher's grey setts, small squares in courses;
+            // 13: the pink-red setts of Place du Palais.
+            bool sett = a255 > 11.5;
+            bool rsett = a255 > 12.5;
+            bool brick = a255 < 9.5 || sett;
+            vec3 ref = czm_srgbToLinear(rsett ? vec3(0.62, 0.47, 0.42) : (sett ? vec3(0.58, 0.56, 0.57) : (brick ? vec3(0.647, 0.443, 0.373) : vec3(0.827, 0.796, 0.741))));
             float shade = clamp(dot(mapC, vec3(0.3, 0.59, 0.11)) / dot(ref, vec3(0.3, 0.59, 0.11)), 0.4, 1.1);
-            vec2 bs = brick ? vec2(0.20, 0.10) : vec2(0.60, 0.40);
+            vec2 bs = sett ? vec2(0.22, 0.16) : (brick ? vec2(0.20, 0.10) : vec2(0.60, 0.40));
             vec2 q = wp / bs;
             q.x += 0.5 * step(0.5, fract(q.y * 0.5));
             vec2 cell = floor(q), f = fract(q);
@@ -222,9 +226,11 @@
             float face = box(f, jw, 1.0 - jw, aa);
             float h = hash12(cell);
             vec3 col = ref * (brick ? mix(0.8, 1.14, h) : mix(0.92, 1.06, h));
-            if (brick) col = mix(col, ref * vec3(0.78, 0.86, 0.95), step(0.92, hash12(cell + 7.3)) * 0.6);
+            if (sett) col = mix(col, czm_srgbToLinear(rsett ? vec3(0.66, 0.64, 0.62) : vec3(0.62, 0.45, 0.42)) * mix(0.85, 1.1, h),
+                                step(rsett ? 0.75 : 0.9, hash12(cell + 2.9)) * 0.7);
+            else if (brick) col = mix(col, ref * vec3(0.78, 0.86, 0.95), step(0.92, hash12(cell + 7.3)) * 0.6);
             else col *= 1.0 - 0.06 * vnoise(wp * 3.1 + h * 9.0);
-            vec3 joint = brick ? ref * vec3(0.62, 0.6, 0.6) : ref * 0.72;
+            vec3 joint = sett ? ref * 0.55 : (brick ? ref * vec3(0.62, 0.6, 0.6) : ref * 0.72);
             col = mix(joint, col, face);
             // Far away the pattern turns into its own average.
             float near = 1.0 - smoothstep(brick ? 0.025 : 0.06, brick ? 0.07 : 0.2, px);
@@ -353,6 +359,8 @@
               float frame = box(f, lo - (villa ? 0.07 : 0.035), hi + (villa ? 0.07 : 0.035), aa);
               float shut = box(f, vec2(0.18, 0.2), vec2(0.355, 0.84), aa) + box(f, vec2(0.645, 0.2), vec2(0.82, 0.84), aa);
               vec3 sc = vr < 0.5 ? vec3(0.22, 0.33, 0.24) : (vr < 0.75 ? vec3(0.42, 0.52, 0.52) : vec3(0.55, 0.42, 0.25));
+              // texCoord_1.y: white or cream shutters (Le Rocher's old town).
+              if (fsInput.attributes.texCoord_1.y > 0.5) sc = vr < 0.6 ? vec3(0.86, 0.85, 0.80) : vec3(0.80, 0.76, 0.64);
               sc *= 0.85 + 0.3 * hash12(cell * 1.7);
               float louv = mix(0.94, 0.88 + 0.12 * step(0.5, fract(f.y * 22.0)), fine);
               bool closed = r < 0.2;

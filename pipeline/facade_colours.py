@@ -13,6 +13,8 @@ The result is a small committed cache, pipeline/facade_colours.json
 to refresh it:
 
   MAPILLARY_TOKEN=... python pipeline/facade_colours.py
+  MAPILLARY_TOKEN=... python pipeline/facade_colours.py --condamine   (adds La Condamine)
+  MAPILLARY_TOKEN=... python pipeline/facade_colours.py --rocher      (adds Le Rocher)
 
 Photos are cached in data/raw/filmset/mapillary/ (not committed).
 """
@@ -41,7 +43,7 @@ import build_filmset as bf  # noqa: E402
 
 OUT_JSON = Path(__file__).resolve().parent / "facade_colours.json"
 CACHE = bf.RAW / "mapillary"
-BBOX = (7.4163, 43.7312, 7.4360, 43.7455)
+BBOX = (7.4150, 43.7270, 7.4360, 43.7455)   # the film set, Le Rocher included
 FIELDS = ("id,computed_geometry,computed_rotation,camera_type,camera_parameters,"
           "width,height,captured_at,sequence,thumb_1024_url")
 V_MIN, V_MAX = 0.72, 0.95          # the film set's wall brightness range
@@ -244,6 +246,13 @@ def main():
         streets = shapely.unary_union([LineString(p_).buffer(bf.ROAD_W.get(t.get("highway"), 6.0) / 2 + 1.0)
                                        for t, p_, c in ways if t.get("highway") and len(p_) >= 2
                                        and LineString(p_).intersects(zone)])
+    if "--rocher" in sys.argv:
+        # Le Rocher's old town: every wall on its lanes, added to the rest.
+        zone = bf.ROCHER_ZONE
+        ways, _ = bf.load_osm()
+        streets = shapely.unary_union([LineString(p_).buffer(bf.ROAD_W.get(t.get("highway"), 4.0) / 2 + 1.0)
+                                       for t, p_, c in ways if t.get("highway") and len(p_) >= 2
+                                       and not t.get("tunnel") and LineString(p_).intersects(zone)])
     walls, polys = walls_facing_track(feats, mnt, mns, zone, streets)
     print(len(walls), "walls face the circuit,", len({w[0] for w in walls}), "buildings")
     tree_b = STRtree(polys)
