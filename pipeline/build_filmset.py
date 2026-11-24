@@ -563,6 +563,7 @@ def ground_mesh(mnt, sea):
             Z[inr] = np.minimum(Z[inr], FM["rim_z"] - 0.2)
     Z, Zs = quai_ground(X, Y, Z)
     Z, Zs = sidewalk_ground(X, Y, Z, Zs)
+    Z = rampe_clamp(X, Y, Z)
     land = valid[r, c] > 0.5
     # A lone land node among sea nodes (the end of a jetty, a quay corner)
     # would stand up from the sea floor as a needle: leave it to the sea.
@@ -670,6 +671,7 @@ def _detail_patch(mnt, Z, i0, i1, j0, j1):
         wt *= np.clip((dtr - (TRACK_HALF + 16)) / 6.0, 0.0, 1.0)
     wt = np.where(np.isfinite(Zm) & (Zc > SEA_FLOOR + 1), wt, 0.0)
     Zf = Zc + wt * (np.nan_to_num(Zm, nan=0.0) - Zc)
+    Zf = rampe_clamp(Xf, Yf, Zf)
     P = enu_fast(Xf.ravel(), Yf.ravel(), Zf.ravel())
     gy, gx = np.gradient(Zf, st)
     N = np.column_stack([-gx.ravel(), gy.ravel(), np.ones(Zf.size)])
@@ -743,6 +745,7 @@ def _detail_mask_patch(mnt, Z, M):
     wt = np.clip(ndimage.distance_transform_edt(inside) * st / 4.0 - 0.25, 0.0, 1.0)
     wt = np.where(np.isfinite(Zm) & (Zc > SEA_FLOOR + 1), wt, 0.0)
     Zf = Zc + wt * (np.nan_to_num(Zm, nan=0.0) - Zc)
+    Zf = rampe_clamp(Xf, Yf, Zf)
     P = enu_fast(Xf.ravel(), Yf.ravel(), Zf.ravel())
     gy, gx = np.gradient(Zf, st)
     N = np.column_stack([-gx.ravel(), gy.ravel(), np.ones(Zf.size)])
@@ -1012,6 +1015,10 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         if hw in ("footway", "pedestrian", "path", "steps", "cycleway") and t.get("area") != "yes" \
                 and t.get("tunnel") != "yes" and t.get("layer", "0") not in ("-1", "-2"):
             line(pts, "#cdbb9c" if hw == "steps" else "#e8dcc6", 3.0 if hw == "pedestrian" else 2.0)
+    if RAMPE is not None:
+        # The Rampe Major's bed: grey stone a little wider than the ribbon.
+        for q in to_polys(RAMPE["line"].buffer(RAMPE_W / 2 + 0.5, cap_style=2, join_style=2, mitre_limit=2.0)):
+            poly(np.asarray(q.exterior.coords), "#b3aca0")
     # Jetties and pontoons: pale concrete, as in the photo (their service
     # lanes are not asphalt roads).
     for t, pts, closed in ways:
@@ -1034,9 +1041,6 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         # reads the shade against it and lays the bricks).
         for q in to_polys(ARMES["poly"]):
             poly(np.asarray(q.exterior.coords), ARMES_BRICK)
-        for r in ARMES["rampe"]:
-            for q in to_polys(r.buffer(ARMES_BAND / 2, cap_style=2)):
-                poly(np.asarray(q.exterior.coords), ARMES_BRICK)
     if SW is not None:
         # Pavements along the circuit: paving (what is in their holes,
         # gardens and planters, stays).
@@ -9440,82 +9444,207 @@ def armes_paving(gm, mntR, gz, stats):
     return round(area)
 
 
-def rampe_major(gm, m, ways, mnt, stats):
-    """The Rampe Major, the stepped ramp from Place d'Armes up to the
-    Palace (street photos 2016-2025): long gently sloping treads of red
-    herringbone brick between grey stone edges, each ending in one low
-    stone step (a pas-d'âne), a rubble parapet with a pale rendered coping
-    on the open side, the cliff on the other."""
+RAMPE_W = 3.6                  # the Rampe Major's width, kerb to kerb (constant; the hairpin's legs are ~5 m apart)
+RAMPE = None                   # {"line", "poly"}: the route from Place d'Armes to Place du Palais
+
+
+def rampe_clamp(X, Y, Z):
+    """Ground nodes under the Rampe Major (and 1.2 m either side) kept
+    below its treads, so the ramp is never buried in the slope it climbs;
+    its uphill side gets a retaining wall instead (rampe_major())."""
+    if RAMPE is None or "z" not in RAMPE:
+        return Z
+    from scipy.spatial import cKDTree
+    x0, y0, x1, y1 = RAMPE["line"].buffer(RAMPE_W / 2 + 1.5).bounds
+    sel = (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
+    if not sel.any():
+        return Z
+    d, j = cKDTree(RAMPE["P"]).query(np.column_stack([X[sel], Y[sel]]))
+    near = d < RAMPE_W / 2 + 1.2
+    Z = Z.copy()
+    v = Z[sel]
+    v[near] = np.minimum(v[near], RAMPE["zt"][j[near]] - 0.25)
+    Z[sel] = v
+    return Z
+
+
+def rampe_heights(mnt, ways):
+    """The ramp's centre line resampled every 0.5 m and its height there:
+    LiDAR ground (median round each point), bridged under the gates'
+    vaults, kept climbing."""
+    if RAMPE is None:
+        return
     mntR = Raster(mnt)
-    lines = [LineString(p_) for t, p_, c in ways if t.get("name") == "Rampe Major" and t.get("highway") == "steps"
-             and t.get("tunnel") not in ("yes", "building_passage") and t.get("layer", "0") == "0" and len(p_) >= 2]
-    W = ARMES_BAND
+    ln = RAMPE["line"]
+    L = ln.length
+    n_ = max(4, int(L / 0.5))
+    ss = np.linspace(0.0, L, n_ + 1)
+    P = np.array([ln.interpolate(x).coords[0] for x in ss])
+    off = np.array([[dx, dy] for dx in (-0.8, 0, 0.8) for dy in (-0.8, 0, 0.8)])
+    z = np.array([np.nanmedian(mntR.sample(*(p_[None] + off).T)) for p_ in P])
+    cov = np.zeros(len(P), bool)
+    for t, p_, c in ways:
+        if t.get("name") == "Rampe Major" and (t.get("tunnel") or t.get("covered") == "yes" or t.get("layer", "0") != "0"):
+            cov |= contains_xy(LineString(p_).buffer(0.6), P[:, 0], P[:, 1])
+    z[cov] = np.nan
+    ok = np.isfinite(z)
+    if ok.sum() < 2:
+        return
+    z = np.maximum.accumulate(np.interp(ss, ss[ok], z[ok]))
+    k_ = max(1, int(round(ARMES_BAND / 0.5)))
+    zt = z.copy()
+    for i0 in range(0, len(P) - 1, k_):
+        i1 = min(i0 + k_, len(P) - 1)
+        f = (ss[i0:i1 + 1] - ss[i0]) / max(1e-6, ss[i1] - ss[i0])
+        zt[i0:i1 + 1] = z[i0] + (z[i1] - z[i0]) * 0.35 * f + 0.12
+    RAMPE.update({"ss": ss, "P": P, "z": z, "zt": zt, "cov": cov})
+
+
+def rampe_setup(ways):
+    """The Rampe Major as one route: every OpenStreetMap piece of it
+    (open flights, the passages under the two gates, the last covered
+    flight onto Place du Palais) merged into one line, bottom first."""
+    from shapely.ops import linemerge
+    parts = [LineString(p_) for t, p_, c in ways if t.get("name") == "Rampe Major" and len(p_) >= 2 and not c]
+    if not parts:
+        return None
+    mg = linemerge(unary_union(parts))
+    lines = list(getattr(mg, "geoms", [mg]))
+    ln = max(lines, key=lambda g: g.length)
+    a_ = np.array(ln.coords[0])
+    if np.hypot(*(a_ - np.array(ARMES_C))) > np.hypot(*(np.array(ln.coords[-1]) - np.array(ARMES_C))):
+        ln = LineString(ln.coords[::-1])
+    return {"line": ln, "poly": ln.buffer(RAMPE_W / 2, cap_style=2, join_style=2, mitre_limit=2.0)}
+
+
+def _ribbon_edges(P, W):
+    """Left and right edges of a constant-width ribbon round polyline P,
+    with mitred joints (capped at 2x) so every cross-section is W wide."""
+    d = np.diff(P, axis=0)
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    n_seg = np.column_stack([-d[:, 1], d[:, 0]])
+    N = np.zeros_like(P)
+    N[0], N[-1] = n_seg[0], n_seg[-1]
+    for i in range(1, len(P) - 1):
+        m_ = n_seg[i - 1] + n_seg[i]
+        nm = np.linalg.norm(m_)
+        if nm < 1e-6:
+            N[i] = n_seg[i]
+            continue
+        m_ /= nm
+        N[i] = m_ / max(0.5, float(m_ @ n_seg[i]))
+    return P + N * W / 2, P - N * W / 2
+
+
+def rampe_major(gm, m, ways, mnt, stats):
+    """The Rampe Major, the stepped ramp from Place d'Armes up to Place du
+    Palais (street photos 2016-2025), as one ribbon of constant width
+    along the whole route (OpenStreetMap, bottom to top, through the two
+    gates): long gently sloping treads of red herringbone brick between
+    grey stone edges, each ending in one low stone step (a pas-d'âne), a
+    rubble parapet with a pale coping on the open side."""
+    if RAMPE is None:
+        return 0
+    mntR = Raster(mnt)
+    if "z" not in RAMPE:
+        return 0
+    W = RAMPE_W
+    ss, P, z, cov = RAMPE["ss"], RAMPE["P"], RAMPE["z"], RAMPE["cov"]
+    n_ = len(P) - 1
+    L = float(ss[-1])
+    Lft, Rgt = _ribbon_edges(P, W)
     stone = np.array(hexrgb("#a9a49a"), float)
     rubble = np.array(hexrgb(WALL_RUBBLE), float)
     cope = np.array(hexrgb("#e2ddd2"), float)
-    n_steps, n_par = 0, 0.0
-    for ln in lines:
-        L = ln.length
-        if L < 3:
-            continue
-        nseg = max(1, int(round(L / W)))
-        ss = np.linspace(0.0, L, nseg + 1)
-        pts_ = np.array([ln.interpolate(x).coords[0] for x in ss])
-
-        def zc(x, y):
-            q = np.array([[x + dx, y + dy] for dx in (-1.0, 0.0, 1.0) for dy in (-1.0, 0.0, 1.0)])
-            z = mntR.sample(q[:, 0], q[:, 1])
-            return float(np.nanmedian(z)) if np.isfinite(z).any() else np.nan
-
-        zs = np.array([zc(*p_) for p_ in pts_])
-        if not np.isfinite(zs).all():
-            continue
-        # Keep the flight monotonic (the LiDAR under the trees wobbles).
-        up = zs[-1] >= zs[0]
-        zs = np.maximum.accumulate(zs) if up else np.minimum.accumulate(zs)
-        for i in range(nseg):
-            a, b = pts_[i], pts_[i + 1]
-            d = b - a
-            Ls = float(np.hypot(*d))
-            if Ls < 0.5:
+    # Pas-d'âne: treads of ~4.7 m (the grey bands' period), each climbing
+    # a third of its rise, then a step.
+    k_tread = max(1, int(round(ARMES_BAND / 0.5)))
+    bounds = list(range(0, n_, k_tread)) + [n_]
+    zt = np.empty(len(P))
+    n_steps = 0
+    for i0, i1 in zip(bounds[:-1], bounds[1:]):
+        za, zb = z[i0], z[i1]
+        f = (ss[i0:i1 + 1] - ss[i0]) / max(1e-6, ss[i1] - ss[i0])
+        zt[i0:i1 + 1] = za + (zb - za) * 0.35 * f + 0.12
+        if zb - za > 0.05:
+            n_steps += 1
+    # Tread tops: one strip of quads per tread (the step is the jump
+    # between this tread's end and the next one's start).
+    for i0, i1 in zip(bounds[:-1], bounds[1:]):
+        za_end = z[i0] + (z[i1] - z[i0]) * 0.35 + 0.12
+        idx = np.arange(i0, i1 + 1)
+        zz = z[i0] + (z[i1] - z[i0]) * 0.35 * (ss[idx] - ss[i0]) / max(1e-6, ss[i1] - ss[i0]) + 0.12
+        V = np.concatenate([Lft[idx], Rgt[idx]])
+        Zv = np.concatenate([zz, zz])
+        Pv = enu_fast(V[:, 0], V[:, 1], Zv)
+        uv = np.column_stack([(V[:, 0] - X0) / (X1 - X0), (Y1 - V[:, 1]) / (Y1 - Y0)])
+        k = len(idx)
+        uv2 = np.column_stack([np.concatenate([ss[idx], ss[idx]]), np.concatenate([np.zeros(k), np.full(k, W)]) + (ARMES_BAND - W) / 2])
+        tri = []
+        for j in range(k - 1):
+            tri += [[j, j + 1, k + j + 1], [j, k + j + 1, k + j]]
+        tri = np.array(tri)
+        # Wind upward.
+        a_, b_, c_ = Pv[tri[:, 0]], Pv[tri[:, 1]], Pv[tri[:, 2]]
+        up = np.cross(b_ - a_, c_ - a_)[:, 2] < 0
+        tri[up] = tri[up][:, [0, 2, 1]]
+        gm.add(Pv, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=HERRING, uv2=uv2)
+        # The riser at its top end, up to the next tread's start.
+        if i1 < n_:
+            z_next = z[i1] + 0.12
+            if z_next - za_end > 0.03:
+                A, B = Lft[i1], Rgt[i1]
+                Pq = enu_fast(np.array([A[0], B[0], B[0], A[0]]), np.array([A[1], B[1], B[1], A[1]]),
+                              np.array([za_end, za_end, z_next, z_next]))
+                back = P[max(0, i1 - 1)] - P[i1]
+                w_ = enu_fast(np.array([P[i1][0] + back[0]]), np.array([P[i1][1] + back[1]]), np.array([za_end]))[0] - \
+                    enu_fast(np.array([P[i1][0]]), np.array([P[i1][1]]), np.array([za_end]))[0]
+                _quad(m, Pq[0][None], Pq[1][None], Pq[2][None], Pq[3][None], stone, w_[None])
+    # Kerbs (the grey stone edges) and the side faces down into the ground;
+    # a rubble parapet on whichever side the ground falls away.
+    n_par = 0.0
+    # Uphill walls' tops: the slope 1.8 m out, smoothed along the ramp.
+    wtop = {}
+    for E_, sg in ((Lft, 1.0), (Rgt, -1.0)):
+        o_ = P + (E_ - P) * (1.0 + 1.8 / (W / 2))
+        gu = mntR.sample(o_[:, 0], o_[:, 1])
+        w_ = np.fmax(np.nan_to_num(gu, nan=-99.0) + 0.2, zt + 0.6)
+        w_ = ndimage.maximum_filter1d(w_, 9)
+        wtop[sg] = ndimage.uniform_filter1d(w_, 9)
+    for E_, sg in ((Lft, 1.0), (Rgt, -1.0)):
+        for j in range(len(P) - 1):
+            if cov[j] and cov[j + 1]:
                 continue
-            F = Frame(m, a, d)
-            lo, hi = (zs[i], zs[i + 1]) if up else (zs[i + 1], zs[i])
-            # The tread climbs a third of the rise, then one step.
-            za = zs[i] + 0.12
-            zb = za + (zs[i + 1] - zs[i]) * 0.35
-            z_next = zs[i + 1] + 0.12
-            # Tread top: herringbone brick (the viewer lays it from uv2).
-            corners = [(0.0, -W / 2, za), (Ls, -W / 2, zb), (Ls, W / 2, zb), (0.0, W / 2, za)]
-            P = np.array([F.E(*c)[0] for c in corners])
-            xy_ = np.array([F.xy(c[0], c[1]) for c in corners])
-            uv = np.column_stack([(xy_[:, 0] - X0) / (X1 - X0), (Y1 - xy_[:, 1]) / (Y1 - Y0)])
-            uv2 = np.array([[ss[i] + c[0], c[1] + W / 2] for c in corners])
-            gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=np.array([[0, 1, 2], [0, 2, 3]]),
-                   style=HERRING, uv2=uv2)
-            # The sides of the tread, down into the ground.
-            for sg in (-1, 1):
-                F.quad((0.0, sg * W / 2, za - 0.8), (Ls, sg * W / 2, zb - 0.8), (Ls, sg * W / 2, zb), (0.0, sg * W / 2, za),
-                       stone, (0, sg, 0))
-            # The step at the top end: a grey stone riser and nosing.
-            zr0, zr1 = (zb, z_next) if up else (z_next, zb)
-            if abs(z_next - zb) > 0.03:
-                riser_s = Ls if up else Ls
-                F.box(riser_s - 0.35, riser_s, -W / 2, W / 2, min(zr0, zr1) - 0.05, max(zr0, zr1), stone, top=True,
-                      sides="sS" if True else "")
-                n_steps += 1
-            # Parapet on the open (lower) side.
-            q1 = mntR.sample(*np.array([F.xy(Ls / 2, W / 2 + 2.5)]).T)[0]
-            q2 = mntR.sample(*np.array([F.xy(Ls / 2, -W / 2 - 2.5)]).T)[0]
-            if np.isfinite(q1) and np.isfinite(q2) and abs(q1 - q2) > 1.0:
-                sg = 1.0 if q1 < q2 else -1.0
-                t0, t1 = sorted((sg * W / 2, sg * (W / 2 + 0.45)))
+            a2, b2 = E_[j], E_[j + 1]
+            za, zb = zt[j], zt[j + 1]
+            d_ = b2 - a2
+            Ls = float(np.hypot(*d_))
+            if Ls < 1e-3:
+                continue
+            F = Frame(m, a2, d_)
+            out_ = sg * -1.0                       # Frame's t points right of travel; left edge is out at -t
+            F.quad((0.0, 0.0, za - 0.6), (Ls, 0.0, zb - 0.6), (Ls, 0.0, zb + 0.08), (0.0, 0.0, za + 0.08), stone,
+                   (0, out_, 0))
+            o = P[j] + (E_[j] - P[j]) * (1.0 + 2.5 / (W / 2))
+            gz = mntR.sample(np.array([o[0]]), np.array([o[1]]))[0]
+            if np.isfinite(gz) and gz < min(za, zb) - 1.0:
+                t0, t1 = sorted((0.0, out_ * 0.45))
                 ztop = max(za, zb) + 1.0
                 F.box(0.0, Ls, t0, t1, min(za, zb) - 1.5, ztop, rubble, top=False, style=RUBBLE, uvm=0.45)
                 F.box(-0.02, Ls + 0.02, t0 - 0.05, t1 + 0.05, ztop, ztop + 0.14, cope)
                 n_par += Ls
+            else:
+                # Uphill: a rubble retaining wall holding the slope back
+                # from the ramp (the ground under the ramp was lowered),
+                # its top following the slope smoothly.
+                wa, wb = wtop[sg][j], wtop[sg][j + 1]
+                for tt in (0.0, out_ * 0.5):
+                    F.quad((0.0, tt, za - 0.4), (Ls, tt, zb - 0.4), (Ls, tt, wb), (0.0, tt, wa), rubble,
+                           (0, -out_ if tt == 0.0 else out_, 0), style=RUBBLE, uvm=0.45)
+                F.quad((0.0, 0.0, wa), (Ls, 0.0, wb), (Ls, out_ * 0.5, wb), (0.0, out_ * 0.5, wa), cope, (0, 0, 1))
     stats["rampe_major_steps"] = n_steps
     stats["rampe_major_parapet_m"] = round(n_par)
+    stats["rampe_major_m"] = round(L)
     return n_steps
 
 
@@ -13294,8 +13423,10 @@ def main():
     MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
     global PORTIER
     PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
-    global ARMES, CONDA, ROCHER_GARDENS
+    global ARMES, CONDA, ROCHER_GARDENS, RAMPE
     ARMES = armes_setup(ways)
+    RAMPE = rampe_setup(ways)
+    rampe_heights(mnt, ways)
     CONDA = condamine_setup(ways)
     ROCHER_GARDENS = rocher_gardens_setup(ways)
     mnt_f = np.where(sea, np.nan, mnt)
