@@ -153,13 +153,28 @@
               vec3 p = fsInput.attributes.positionMC;
               vec3 d = material.diffuse;
               float veg = smoothstep(0.01, 0.05, d.g - max(d.r, d.b)) * smoothstep(0.35, 0.65, vnoise(p.xz * 0.21 + p.y * 0.13));
-              float strata = vnoise(vec2(p.y * 1.1 + vnoise(p.xz * 0.12) * 2.5, 0.37));
-              float blotch = vnoise(p.xz * 0.33 + vec2(p.y * 0.27));
-              float crack = smoothstep(0.78, 0.9, vnoise(vec2(dot(p.xz, vec2(0.7, 0.7)) * 1.9, p.y * 0.6)));
-              vec3 lime = czm_srgbToLinear(vec3(0.80, 0.75, 0.65));
-              vec3 rock = lime * mix(0.78, 1.06, blotch) * mix(0.86, 1.04, strata) * (1.0 - 0.35 * crack);
-              rock = mix(rock, rock * vec3(1.06, 0.95, 0.80), smoothstep(0.55, 0.8, vnoise(p.xz * 0.09 + p.y * 0.05)) * 0.6);
-              material.diffuse = mix(d, rock, steep * (1.0 - 0.7 * veg));
+              // Grey-ochre limestone in beds: broad bands of slightly
+              // different tone, thin dark bedding joints every metre or
+              // two, long vertical fractures, rain streaks running down
+              // from the ledges, a few warm ochre patches.
+              float h = dot(p.xz, vec2(0.7071, 0.7071));
+              float k = dot(p.xz, vec2(0.7071, -0.7071));
+              float yb = p.y + vnoise(p.xz * 0.04) * 3.0;
+              float band = vnoise(vec2(yb * 0.16, 0.37)) * 0.6 + vnoise(vec2(yb * 0.5, 2.1)) * 0.4;
+              float bed = smoothstep(0.40, 0.47, abs(fract(yb / 3.4) - 0.5));
+              float bed2 = smoothstep(0.44, 0.49, abs(fract(yb / 1.1 + 0.3) - 0.5));
+              float joint = max(smoothstep(0.80, 0.88, vnoise(vec2(h * 0.13, p.y * 0.018))),
+                                smoothstep(0.82, 0.9, vnoise(vec2(k * 0.13, p.y * 0.018 + 7.0))));
+              float fine = smoothstep(0.84, 0.92, vnoise(vec2(h * 0.6 + k * 0.3, p.y * 0.06)));
+              float streak = smoothstep(0.45, 0.8, vnoise(vec2((h + k) * 0.22, p.y * 0.012)));
+              float blotch = vnoise(p.xz * 0.11 + vec2(p.y * 0.09));
+              vec3 lime = czm_srgbToLinear(vec3(0.75, 0.72, 0.65));
+              vec3 rock = lime * mix(0.80, 1.06, band) * mix(0.88, 1.04, blotch);
+              rock *= 1.0 - 0.30 * bed - 0.12 * bed2;
+              rock *= 1.0 - 0.50 * joint - 0.25 * fine;
+              rock = mix(rock, rock * vec3(0.70, 0.70, 0.72), streak * 0.5);
+              rock = mix(rock, rock * vec3(1.08, 0.95, 0.80), smoothstep(0.6, 0.85, vnoise(p.xz * 0.03 + p.y * 0.03)) * 0.55);
+              material.diffuse = mix(d, rock, steep * (1.0 - 0.35 * veg));
             }
           }
           if (a255 > 10.5 && a255 < 11.5) {
