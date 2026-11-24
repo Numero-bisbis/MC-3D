@@ -23,6 +23,9 @@ in pipeline/facade_colours.json).
   sea        One flat plane the viewer animates.
   Mareterra  The 2024 land extension, absent from the 2021 LiDAR: rebuilt
              from OpenStreetMap (see mareterra_setup and friends).
+  Le Rocher  Monaco-Ville: the generic pipeline, plus the Prince's Palace
+             and the Oceanographic Museum built piece by piece (Frame,
+             palais_princier, musee_oceanographique).
 
 Output: viewer/filmset/monte-carlo.glb (y-up glTF in an east-north-up frame
 centred on Casino square, heights in metres above the ellipsoid minus the
@@ -74,8 +77,9 @@ RAW = ROOT / "data" / "raw" / "filmset"
 OUT = ROOT / "viewer" / "filmset"
 
 # District: Monte-Carlo, Casino square, Port Hercule and the Larvotto edge:
-# the whole Grand Prix circuit. Lambert-93 metres (a square).
-X0, Y0, X1, Y1 = 1055700, 6302500, 1057200, 6304000
+# the whole Grand Prix circuit, plus Le Rocher (Monaco-Ville) to the south.
+# Lambert-93 metres (a square).
+X0, Y0, X1, Y1 = 1055598, 6302050, 1057548, 6304000   # X0: the old west edge minus a multiple of the 3 m ground grid
 RES = 0.5
 ORIGIN = (7.4280, 43.7395)          # Casino square: the model's 0,0
 GEOID_N = 48.9                      # same as viewer/main.js
@@ -89,7 +93,7 @@ WMS = "https://data.geopf.fr/wms-r"
 # ---------------------------------------------------------------- fetch ----
 WD_QUERY = """SELECT ?item ?itemLabel ?coord ?inc ?styleLabel ?floors WHERE {
   SERVICE wikibase:around { ?item wdt:P625 ?coord . bd:serviceParam wikibase:center "Point(7.4282 43.7393)"^^geo:wktLiteral .
-    bd:serviceParam wikibase:radius "0.9" . }
+    bd:serviceParam wikibase:radius "1.4" . }
   OPTIONAL { ?item wdt:P571 ?inc } OPTIONAL { ?item wdt:P149 ?style } OPTIONAL { ?item wdt:P1101 ?floors }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en,fr". } }"""
 
@@ -765,6 +769,9 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         exg = 2 * o[..., 1] - o[..., 0] - o[..., 2]
         veg = (exg > 16) & (o.mean(2) < 170)
         veg = ndimage.binary_opening(veg, iterations=1)
+        # IGN blurs its photo over the Palace and its square into big
+        # blocks: no lawn from there (the trees come from the LiDAR).
+        veg &= ~raster_mask(Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, -105.0, 65.0))
         vi = Image.fromarray((veg * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2))
         vi = ImageChops.multiply(vi.point(lambda v: int(v * 0.85)), keep_green)
         img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#86a65a"))), img, vi)
@@ -779,7 +786,8 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     for t, pts, closed in ways:
         if closed and (t.get("area") == "yes" or t.get("area:highway")) and t.get("highway") in (
                 "pedestrian", "footway", "service") or t.get("place") == "square" and closed:
-            poly(pts, "#dfd9cd")
+            # Place du Palais is laid in dark red (street photos 2019).
+            poly(pts, "#8c5b50" if t.get("name") == "Place du Palais" else "#dfd9cd")
         if closed and t.get("amenity") == "parking" and t.get("parking") != "underground":
             poly(pts, "#9a9690")
     if QA is not None:
@@ -3145,6 +3153,12 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not rest:
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
+            if key in (PALACE, MUSEE):
+                # Le Rocher's two landmarks are built piece by piece.
+                (palais_princier if key == PALACE else musee_oceanographique)(m, None, mntR, stats)
+                footprint.append(poly)
+                stats["landmarks"] = stats.get("landmarks", 0) + 1
+                continue
             if key == HERACLES:
                 # Palais Héraclès: the slab is built on its own; what is
                 # left of the shared outline (the low wing to the north)
@@ -6610,6 +6624,8 @@ def no_tree_zones(ways):
     where the LiDAR sees diving boards, stands, awnings and masts standing
     up, but no trees grow."""
     out = []
+    # Place du Palais: its pines come from rocher_trees().
+    out.append(Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0))
     for tg, pts, closed in ways:
         if not closed or len(pts) < 4:
             continue
@@ -7742,6 +7758,819 @@ def _ball(m, cx, cy, z, r, col, style, nu=10, nv=6):
     m.add(P, nrm, col, PLAIN, idx=t, style=style)
 
 
+# ------------------------------------------------------------- Le Rocher ----
+# Monaco-Ville on its rock. The Prince's Palace and the Oceanographic Museum
+# are built piece by piece, like the Casino: the IGN data cannot carry them
+# alone (IGN blurs its photo over the Palace, and the LiDAR surface there is
+# a simplified model: flat wings, no towers). Their plans come from BD TOPO
+# and that surface (wing roofs, the Cour d'honneur), their faces from street
+# photos on Mapillary (2015-2025): the Palace's front on Place du Palais,
+# the Museum's entrance and its north-east wing on Avenue Saint-Martin.
+# Sides nobody photographed (the Palace's cliff side, the Museum's sea face)
+# follow the same architecture and are noted as such.
+
+class Frame:
+    """A building's own frame: s along a main face, t out of it (toward the
+    viewer standing in front), z height (m NGF). Boxes, glass, arches,
+    columns and battlements in those coordinates."""
+
+    def __init__(self, m, O, u):
+        self.m = m
+        self.O = np.asarray(O, float)
+        u = np.asarray(u, float)
+        self.u = u / np.linalg.norm(u)
+        self.v = np.array([self.u[1], -self.u[0]])      # out of the main face
+
+    def xy(self, s, t):
+        return self.O + s * self.u + t * self.v
+
+    def E(self, s, t, z):
+        s, t, z = np.broadcast_arrays(np.atleast_1d(np.asarray(s, float)), np.atleast_1d(np.asarray(t, float)),
+                                      np.atleast_1d(np.asarray(z, float)))
+        q = self.O[None] + s[:, None] * self.u[None] + t[:, None] * self.v[None]
+        return enu_fast(q[:, 0], q[:, 1], z)
+
+    def want(self, s, t, z, ds, dt, dz):
+        return self.E(s + ds, t + dt, z + dz) - self.E(s, t, z)
+
+    def poly(self, s0, s1, t0, t1):
+        return orient(Polygon([self.xy(s0, t0), self.xy(s1, t0), self.xy(s1, t1), self.xy(s0, t1)]), 1.0)
+
+    def quad(self, a, b, c, d, col, n, style=None, uvm=None):
+        """a..d: (s, t, z) corners; n: (ds, dt, dz) the side it faces. With
+        uvm, texture coordinates in metres (along, up) times uvm."""
+        P = [self.E(*p) for p in (a, b, c, d)]
+        ctr = np.mean([np.array(p, float) for p in (a, b, c, d)], 0)
+        w = self.want(*ctr, *n)
+        col = np.asarray(col, float)
+        if uvm is None and style is None:
+            _quad(self.m, *P, col, w)
+            return
+        A = np.array([a, b, c, d], float)
+        # Along: the horizontal distance from the first corner; up: z.
+        along = np.hypot(A[:, 0] - A[0, 0], A[:, 1] - A[0, 1])
+        k = 1.0 if uvm is None else uvm
+        uv = [np.array([[along[i] * k, A[i, 2] * k]]) for i in range(4)]
+        _quad_uv(self.m, *P, col, w, uv, style=style)
+
+    def box(self, s0, s1, t0, t1, z0, z1, col, top=True, bottom=False, sides="stST", style=None, uvm=None):
+        """sides: which walls to draw: s (at s0), S (s1), t (t0), T (t1)."""
+        s0, s1 = min(s0, s1), max(s0, s1)
+        t0, t1 = min(t0, t1), max(t0, t1)
+        if "s" in sides:
+            self.quad((s0, t0, z0), (s0, t1, z0), (s0, t1, z1), (s0, t0, z1), col, (-1, 0, 0), style, uvm)
+        if "S" in sides:
+            self.quad((s1, t0, z0), (s1, t1, z0), (s1, t1, z1), (s1, t0, z1), col, (1, 0, 0), style, uvm)
+        if "t" in sides:
+            self.quad((s0, t0, z0), (s1, t0, z0), (s1, t0, z1), (s0, t0, z1), col, (0, -1, 0), style, uvm)
+        if "T" in sides:
+            self.quad((s0, t1, z0), (s1, t1, z0), (s1, t1, z1), (s0, t1, z1), col, (0, 1, 0), style, uvm)
+        if top:
+            self.quad((s0, t0, z1), (s1, t0, z1), (s1, t1, z1), (s0, t1, z1), col * 1.02, (0, 0, 1))
+        if bottom:
+            self.quad((s0, t0, z0), (s1, t0, z0), (s1, t1, z0), (s0, t1, z0), col * 0.8, (0, 0, -1))
+
+    # Faces: "+t" (t = const, facing +t), "-t", "+s", "-s". A point on a face:
+    # a = the coordinate along it, the face's own plane coordinate c.
+    def _on(self, face, a, c):
+        return (c, a) if face[1] == "s" else (a, c)
+
+    def _n(self, face):
+        sg = 1.0 if face[0] == "+" else -1.0
+        return (sg, 0, 0) if face[1] == "s" else (0, sg, 0)
+
+    def face_quad(self, face, c, a0, a1, z0, z1, col, out=0.0, style=None, uvm=None):
+        sg = 1.0 if face[0] == "+" else -1.0
+        cc = c + sg * out
+        p = [(*self._on(face, a0, cc), z0), (*self._on(face, a1, cc), z0), (*self._on(face, a1, cc), z1),
+             (*self._on(face, a0, cc), z1)]
+        self.quad(*p, col, self._n(face), style, uvm)
+
+    def slab(self, face, c, a0, a1, z0, z1, depth, col, sides=True):
+        """A block standing proud of a face by `depth` (bands, pilasters,
+        cornices, surrounds): its front, top, bottom and ends."""
+        sg = 1.0 if face[0] == "+" else -1.0
+        if face[1] == "t":
+            self.box(a0, a1, c, c + sg * depth, z0, z1, col, top=True, bottom=True,
+                     sides=("sS" if sides else "") + ("T" if sg > 0 else "t"))
+        else:
+            self.box(c, c + sg * depth, a0, a1, z0, z1, col, top=True, bottom=True,
+                     sides=("tT" if sides else "") + ("S" if sg > 0 else "s"))
+
+    def glass(self, face, c, a0, a1, z0, z1, cell, floor_, col="#5b6a74"):
+        """A window: the viewer's reflective glass, lit at random at night."""
+        uvs = [np.array([[cell + 0.06, floor_ + 0.18]]), np.array([[cell + 0.94, floor_ + 0.18]]),
+               np.array([[cell + 0.94, floor_ + 0.9]]), np.array([[cell + 0.06, floor_ + 0.9]])]
+        sg = 1.0 if face[0] == "+" else -1.0
+        cc = c + sg * 0.03
+        P = [self.E(*self._on(face, a0, cc), z0), self.E(*self._on(face, a1, cc), z0),
+             self.E(*self._on(face, a1, cc), z1), self.E(*self._on(face, a0, cc), z1)]
+        ctr = ((a0 + a1) / 2, cc)
+        _quad_uv(self.m, *P, np.array(hexrgb(col)), self.want(*self._on(face, *ctr), (z0 + z1) / 2, *self._n(face)),
+                 uvs, kind=WALL_GLASS, style=S_GLASS)
+
+    def arch_glass(self, face, c, a, w, zs, cell, floor_, col="#5b6a74", nseg=8, dark=False):
+        """The round head of an arched window (springing at zs), as a fan."""
+        sg = 1.0 if face[0] == "+" else -1.0
+        cc = c + sg * 0.03
+        th = np.linspace(0, math.pi, nseg + 1)
+        r = w / 2
+        ctr = self.E(*self._on(face, a, cc), zs)
+        pts = [self.E(*self._on(face, a + r * math.cos(x), cc), zs + r * math.sin(x)) for x in th]
+        n_ = self.want(*self._on(face, a, cc), zs, *self._n(face))
+        colv = np.array(hexrgb(col), float)
+        for i in range(nseg):
+            A_, B_ = pts[i], pts[i + 1]
+            nn = np.cross(A_ - ctr, B_ - ctr)
+            if (nn * n_).sum() < 0:
+                A_, B_ = B_, A_
+            if dark:
+                self.m.tri(ctr, A_, B_, colv, PLAIN)
+            else:
+                uv = np.array([[[cell + 0.5, floor_ + 0.6], [cell + 0.1, floor_ + 0.85], [cell + 0.9, floor_ + 0.85]]])
+                self.m.tri(ctr, A_, B_, colv, WALL_GLASS, uv=uv, style=S_GLASS)
+
+    def arch_ring(self, face, c, a, w, zs, depth, band, col, nseg=12):
+        """The moulded surround of an arch: a half ring standing proud of
+        the face by depth, with its outer edge returned to the wall."""
+        sg = 1.0 if face[0] == "+" else -1.0
+        r0, r1 = w / 2, w / 2 + band
+        th = np.linspace(0, math.pi, nseg + 1)
+        cf = c + sg * depth
+        n = self._n(face)
+        col = np.asarray(col, float)
+        for i in range(nseg):
+            x0, x1 = th[i], th[i + 1]
+            pin0 = (*self._on(face, a + r0 * math.cos(x0), cf), zs + r0 * math.sin(x0))
+            pin1 = (*self._on(face, a + r0 * math.cos(x1), cf), zs + r0 * math.sin(x1))
+            pout0 = (*self._on(face, a + r1 * math.cos(x0), cf), zs + r1 * math.sin(x0))
+            pout1 = (*self._on(face, a + r1 * math.cos(x1), cf), zs + r1 * math.sin(x1))
+            self.quad(pin0, pin1, pout1, pout0, col * 1.02, n)
+            # The outer return and the inner reveal, back to the wall.
+            for rr, sh in ((r1, 0.9), (r0, 0.82)):
+                q0 = (*self._on(face, a + rr * math.cos(x0), c), zs + rr * math.sin(x0))
+                q1 = (*self._on(face, a + rr * math.cos(x1), c), zs + rr * math.sin(x1))
+                f0 = (*self._on(face, a + rr * math.cos(x0), cf), zs + rr * math.sin(x0))
+                f1 = (*self._on(face, a + rr * math.cos(x1), cf), zs + rr * math.sin(x1))
+                xm = (x0 + x1) / 2
+                dn = (math.cos(xm), math.sin(xm)) if rr == r1 else (-math.cos(xm), -math.sin(xm))
+                nn = (dn[0], 0, dn[1]) if face[1] == "t" else (0, dn[0], dn[1])
+                self.quad(q0, q1, f1, f0, col * sh, nn)
+
+    def window(self, face, c, a, w, z0, z1, cell, floor_, frame=None, arch=False, depth=0.12, band=0.22,
+               sill=True, pediment=False, shutters=None, dark=False):
+        """A window centred at a on a face: glass, a white surround, a sill,
+        an arched head (arch=True: z1 is the springing line), a little
+        pediment, shutters."""
+        if dark:
+            self.face_quad(face, c, a - w / 2, a + w / 2, z0, z1, np.array(hexrgb("#2a2622")), out=0.03)
+        else:
+            self.glass(face, c, a - w / 2, a + w / 2, z0, z1, cell, floor_)
+        if arch:
+            self.arch_glass(face, c, a, w, z1, cell, floor_, dark=dark)
+        if frame is not None:
+            self.slab(face, c, a - w / 2 - band, a - w / 2, z0, z1, depth, frame)
+            self.slab(face, c, a + w / 2, a + w / 2 + band, z0, z1, depth, frame)
+            if arch:
+                self.arch_ring(face, c, a, w, z1, depth, band, frame)
+            else:
+                self.slab(face, c, a - w / 2 - band, a + w / 2 + band, z1, z1 + band, depth, frame)
+            if sill:
+                self.slab(face, c, a - w / 2 - band - 0.08, a + w / 2 + band + 0.08, z0 - 0.14, z0, depth + 0.08, frame)
+            if pediment:
+                zp = (z1 + w / 2 + band) if arch else (z1 + band)
+                self.slab(face, c, a - w / 2 - band - 0.15, a + w / 2 + band + 0.15, zp + 0.05, zp + 0.22, depth + 0.1,
+                          frame)
+                self.slab(face, c, a - w * 0.3, a + w * 0.3, zp + 0.22, zp + 0.42, depth + 0.05, frame)
+        if shutters is not None:
+            for sg in (-1, 1):
+                a0 = a + sg * (w / 2 + band + 0.02)
+                a1 = a0 + sg * w / 2
+                self.face_quad(face, c, min(a0, a1), max(a0, a1), z0, z1 + (w / 2 if arch else 0.0) * 0.6,
+                               shutters, out=0.05)
+
+    def column(self, s, t, z0, z1, r, col, sides=12, capital=None):
+        x, y = self.xy(s, t)
+        _cyl(self.m, x, y, z0, z1, r, col, sides)
+        cap = col if capital is None else capital
+        p = self.xy(s, t)
+        _box(self.m, p[0], p[1], self.u, 2.5 * r, 2.5 * r, z1 - 0.05, z1 + 0.35 * r * 2, cap)
+        _box(self.m, p[0], p[1], self.u, 2.4 * r, 2.4 * r, z0, z0 + 0.4 * r, cap)
+
+    def battlements(self, s0, s1, t0, t1, z, h, col, merlon=1.0, gap=0.7, th=0.45, corbel=None):
+        """A parapet with merlons round a rectangle (top of a tower or a
+        wall), optionally on a corbelled machicolation band."""
+        for (a0, a1, c, face) in ((s0, s1, t0, "-t"), (s0, s1, t1, "+t"), (t0, t1, s0, "-s"), (t0, t1, s1, "+s")):
+            if c is None:
+                continue
+            L = a1 - a0
+            n = max(1, int(round((L + gap) / (merlon + gap))))
+            pitch = (L + gap) / n
+            sg = 1.0 if face[0] == "+" else -1.0
+            o = (corbel or 0.0)
+            # Parapet wall, the merlons on it.
+            if face[1] == "t":
+                self.box(a0 - (o if True else 0), a1 + o, c - sg * th + sg * o, c + sg * o, z, z + h * 0.45, col)
+            else:
+                self.box(c - sg * th + sg * o, c + sg * o, a0 - o, a1 + o, z, z + h * 0.45, col)
+            for k in range(n):
+                b0 = a0 - o + k * pitch * (L + 2 * o) / L
+                b1 = b0 + merlon
+                if face[1] == "t":
+                    self.box(b0, min(b1, a1 + o), c - sg * th + sg * o, c + sg * o, z + h * 0.45, z + h, col)
+                else:
+                    self.box(c - sg * th + sg * o, c + sg * o, b0, min(b1, a1 + o), z + h * 0.45, z + h, col)
+            if corbel:
+                # Corbels: small brackets under the overhang.
+                nc = max(1, int(L / 0.9))
+                for k in range(nc):
+                    a_ = a0 + (k + 0.5) * L / nc
+                    if face[1] == "t":
+                        self.box(a_ - 0.2, a_ + 0.2, c, c + sg * o, z - 1.1, z, col * 0.95)
+                    else:
+                        self.box(c, c + sg * o, a_ - 0.2, a_ + 0.2, z - 1.1, z, col * 0.95)
+
+    def hip_roof(self, s0, s1, t0, t1, z, col, overhang=0.5, pitch=19):
+        poly = self.poly(s0 - overhang, s1 + overhang, t0 - overhang, t1 + overhang)
+        slope = math.tan(math.radians(pitch))
+        t = skeleton_roof(poly, z, slope, 99 / slope, dt=0.4)
+        if t is None:
+            return
+        v, zz, tri = t
+        P = enu_fast(v[:, 0], v[:, 1], zz)
+        self.m.tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], np.asarray(col, float), ROOF_TILE)
+        # Soffit under the overhang.
+        self.box(s0 - overhang, s1 + overhang, t0 - overhang, t1 + overhang, z - 0.18, z, col * 0.0 + np.array(hexrgb("#e8e0cc")),
+                 top=False, bottom=True)
+
+    def balustrade(self, face, c, a0, a1, z, col, h=1.0, depth=0.32, plinth=0.18, step=0.3):
+        """A balustrade on a face's edge (c: the plane its front sits on)."""
+        sg = 1.0 if face[0] == "+" else -1.0
+        cb = c - sg * depth
+        self.slab(face, cb, a0, a1, z, z + plinth, depth, col)
+        nb = max(1, int((a1 - a0) / step))
+        for k in range(nb):
+            a = a0 + (k + 0.5) * (a1 - a0) / nb
+            self.slab(face, cb + sg * depth * 0.25, a - 0.07, a + 0.07, z + plinth, z + h - 0.14, depth * 0.5, col * 1.02)
+        self.slab(face, cb - sg * 0.02, a0 - 0.02, a1 + 0.02, z + h - 0.14, z + h, depth + 0.04, col)
+
+
+def _cyl(m, x, y, z0, z1, r, col, sides=10):
+    """A thin round shaft (columns, bollards, masts): _column without the
+    wall builder's 30 cm shortest edge."""
+    a = np.linspace(0, 2 * math.pi, sides + 1)
+    ring = [(x + r * math.cos(t), y + r * math.sin(t)) for t in a[:-1]]
+    add_walls(m, orient(Polygon(ring), 1.0), z0, z1, z0, 100, col, PLAIN, min_edge=0.005)
+
+
+def _ground_min(F, mntR, s0, s1, t0, t1, n=6):
+    ss, tt = np.meshgrid(np.linspace(s0, s1, n), np.linspace(t0, t1, n))
+    p = F.O[None] + ss.ravel()[:, None] * F.u[None] + tt.ravel()[:, None] * F.v[None]
+    z = mntR.sample(p[:, 0], p[:, 1])
+    return float(np.nanmin(z)) if np.isfinite(z).any() else None
+
+
+# --------------------------------------------------- the Prince's Palace ----
+PALACE = "BATIMENT0000000074079000"
+PALACE_O = (1056035.4, 6302411.0)          # where the square front meets its step (BD TOPO corner)
+PALACE_U = (31.9, 35.9)                    # along the front on Place du Palais, south-west to north-east
+PALACE_WALL = "#efe3c6"                    # pale buttery ochre render (street photos)
+PALACE_TRIM = "#f8f3e7"                    # white window surrounds, bands, balustrades
+PALACE_MARBLE = "#f4f2ec"                  # the main gate's white marble
+PALACE_GREY = "#bcb9b0"                    # Tour Sainte-Marie's grey stone
+PALACE_ROOF = "#ae6a52"                    # terracotta
+
+
+def palais_princier(m, gm, mntR, stats):
+    """The Prince's Palace, in a frame on its front: s along Place du
+    Palais from the step in the front (0) to the north (+), t out onto the
+    square, z m NGF. Plan from BD TOPO and the LiDAR roofs (the court is
+    s 0..23, t -22..-63); the front from the 2019 Mapillary photos."""
+    F = Frame(m, PALACE_O, PALACE_U)
+    zq = mntR.sample(np.array([F.xy(13.5, 6.0)[0]]), np.array([F.xy(13.5, 6.0)[1]]))[0]
+    Z = float(zq) if np.isfinite(zq) else 62.0          # the square
+    wall = np.array(hexrgb(PALACE_WALL), float)
+    trim = np.array(hexrgb(PALACE_TRIM), float)
+    marble = np.array(hexrgb(PALACE_MARBLE), float)
+    grey = np.array(hexrgb(PALACE_GREY), float)
+    roof = np.array(hexrgb(PALACE_ROOF), float)
+    court_wall = np.array(hexrgb("#ecd3a4"), float)     # the court's frescoed ochre
+    dark = np.array(hexrgb("#2c2824"), float)
+    n_win = 0
+
+    def gmin(s0, s1, t0, t1):
+        g = _ground_min(F, mntR, s0, s1, t0, t1)
+        return min(Z - 0.5, g - 0.5) if g is not None else Z - 0.5
+
+    def wing(s0, s1, t0, t1, eave, faces, rows=None, bay=3.6, roof_=True, arch_top=False, colw=None):
+        """A plain wing: walls from the ground (it drops to the cliffs on
+        the outside), a cornice, a hipped tiled roof, rows of windows with
+        white surrounds on the listed faces."""
+        nonlocal n_win
+        cw = wall if colw is None else colw
+        zb = gmin(s0, s1, t0, t1)
+        F.box(s0, s1, t0, t1, zb, Z + eave, cw, top=not roof_)
+        for face in ("+t", "-t", "+s", "-s"):
+            c = {"+t": t1, "-t": t0, "+s": s1, "-s": s0}[face]
+            a0, a1 = (s0, s1) if face[1] == "t" else (t0, t1)
+            F.slab(face, c, a0 - 0.15, a1 + 0.15, Z + eave - 0.7, Z + eave, 0.3, trim)   # cornice
+            if face not in faces:
+                continue
+            # Floors: the palace storeys above the square, more down the cliff.
+            g = _ground_min(F, mntR, *((a0, a1, c, c) if face[1] == "t" else (c, c, a0, a1)))
+            g = Z if g is None else g
+            zs = rows if rows is not None else [z for z in np.arange(Z + eave - 4.2, g + 1.5, -4.0)]
+            nb = max(1, int(round((a1 - a0) / bay)))
+            for i, z_ in enumerate(zs):
+                for k in range(nb):
+                    a = a0 + (k + 0.5) * (a1 - a0) / nb
+                    gz = _ground_min(F, mntR, *((a, a, c, c) if face[1] == "t" else (c, c, a, a)), n=2)
+                    if gz is not None and z_ < gz + 0.8:
+                        continue
+                    F.window(face, c, a, 1.25, z_, z_ + 2.1, k, i + 1, frame=trim, arch=arch_top and i == 0,
+                             shutters=None)
+                    n_win += 1
+        if roof_:
+            F.hip_roof(s0, s1, t0, t1, Z + eave, roof, overhang=0.45)
+
+    # -- The front on the square ------------------------------------------
+    # Gate block (7 bays) and loggia block (5 bays + one), on a plinth that
+    # runs on to the south as the terrace wall with its balustrade.
+    PL = 6.3                                    # plinth (ground floor) height
+    GB = (0.0, 27.0)                            # gate block
+    LG = (27.0, 45.6)                           # the loggias
+    TL = (45.6, 48.0)                           # one narrow bay before the grey tower
+    zf = gmin(0, 48, -21, 0)
+    F.box(0.0, 48.0, -21.0, 0.0, zf, Z + PL, wall, top=False)
+    F.box(GB[0], GB[1], -21.0, 0.0, Z + PL, Z + 16.4, wall, top=False)
+    F.box(LG[0], TL[1], -21.0, 0.0, Z + PL, Z + 19.4, wall, top=False)
+    # Plinth: small square windows with little pediments, every bay.
+    for a0, a1, nb in ((GB[0], GB[1], 7), (LG[0], LG[1], 5)):
+        for k in range(nb):
+            a = a0 + (k + 0.5) * (a1 - a0) / nb
+            if a0 == GB[0] and k == 3:
+                continue                         # the gate
+            F.window("+t", 0.0, a, 0.95, Z + 2.5, Z + 3.85, k, 0, frame=trim, pediment=True)
+            n_win += 1
+    F.slab("+t", 0.0, -52.0, 48.0, Z - 0.3, Z + 0.45, 0.18, wall * 0.93)                 # base course
+    F.slab("+t", 0.0, -0.2, 48.0, Z + PL - 0.35, Z + PL, 0.28, trim)                     # band under the terrace
+    F.balustrade("+t", 0.0, 0.0, 12.0, Z + PL, trim, h=0.95)
+    F.balustrade("+t", 0.0, 15.0, LG[0], Z + PL, trim, h=0.95)
+    F.balustrade("+t", 0.0, LG[0], TL[1], Z + PL, trim, h=0.95)
+    # Gate block: square windows, then the piano nobile's tall arched windows
+    # each on its own little balustrade, then the cornice.
+    for k in range(7):
+        a = GB[0] + (k + 0.5) * (GB[1] - GB[0]) / 7
+        if k != 3:
+            F.window("+t", 0.0, a, 1.25, Z + 7.55, Z + 9.2, k, 1, frame=trim)
+        F.balustrade("+t", 0.0, a - 1.05, a + 1.05, Z + 10.0, trim, h=0.75, depth=0.25)
+        F.window("+t", 0.0, a, 1.5, Z + 10.75, Z + 13.25, k, 2, frame=trim, arch=True, band=0.26)
+        F.slab("+t", 0.0, a - 1.85, a - 1.65, Z + 7.2, Z + 15.4, 0.12, trim)              # pilaster strips
+        n_win += 2
+    F.slab("+t", 0.0, GB[1] - 0.2, GB[1] + 0.2, Z + 7.2, Z + 15.4, 0.12, trim)
+    F.slab("+t", 0.0, GB[0] - 0.3, GB[1], Z + 15.4, Z + 16.4, 0.4, trim)                 # cornice
+    F.slab("+t", 0.0, GB[0] - 0.3, GB[1], Z + 15.0, Z + 15.4, 0.22, trim)
+    # Loggia block: two tiers of arches (the lower three open, a balustrade in
+    # each), a row of small windows above, a deeper cornice.
+    for k in range(5):
+        a = LG[0] + (k + 0.5) * (LG[1] - LG[0]) / 5
+        bw = (LG[1] - LG[0]) / 5
+        F.slab("+t", 0.0, a - bw / 2, a - bw / 2 + 0.55, Z + 7.0, Z + 17.6, 0.18, trim)  # piers
+        for tier, (z0, zs, w) in enumerate(((Z + 7.6, Z + 9.9, 2.55), (Z + 12.0, Z + 14.7, 2.75))):
+            open_ = tier == 0 and k >= 2
+            if open_:
+                # An open arch: dark loggia behind, a balustrade across it.
+                F.window("+t", 0.0, a, w, z0, zs, k, 2 + tier, frame=trim, arch=True, band=0.28, sill=False, dark=True)
+                F.balustrade("+t", 0.25, a - w / 2, a + w / 2, z0, trim, h=0.9, depth=0.25)
+            else:
+                F.window("+t", 0.0, a, w, z0, zs, k, 2 + tier, frame=trim, arch=True, band=0.28)
+            n_win += 1
+        F.balustrade("+t", 0.0, a - bw / 2 + 0.3, a + bw / 2 - 0.3, Z + 11.2, trim, h=0.75, depth=0.25)
+        F.window("+t", 0.0, a, 1.0, Z + 17.0, Z + 18.1, k, 4, frame=trim)
+    for i_, z_ in enumerate((Z + 7.8, Z + 12.2, Z + 17.0)):
+        F.window("+t", 0.0, (TL[0] + TL[1]) / 2, 1.05, z_, z_ + (2.6 if i_ < 2 else 1.1), 0, 2 + i_, frame=trim)
+    F.slab("+t", 0.0, LG[0], TL[1] + 0.3, Z + 18.5, Z + 19.4, 0.4, trim)
+    F.slab("+t", 0.0, LG[0], TL[1], Z + 11.0, Z + 11.25, 0.2, trim)
+    # The main gate: white marble, rusticated, a round arch, the arms on top
+    # under a broken pediment; red-roofed sentry boxes either side.
+    gc = (GB[0] + GB[1]) / 2
+    F.box(gc - 2.9, gc + 2.9, -0.2, 0.55, Z, Z + 7.0, marble)
+    for zb_ in np.arange(Z + 0.6, Z + 6.5, 0.62):
+        F.box(gc - 2.95, gc - 2.05, 0.0, 0.62, zb_, zb_ + 0.48, marble * 0.97, top=False)
+        F.box(gc + 2.05, gc + 2.95, 0.0, 0.62, zb_, zb_ + 0.48, marble * 0.97, top=False)
+    F.window("+t", 0.56, gc, 3.0, Z, Z + 3.9, 0, 0, frame=marble, arch=True, band=0.42, sill=False, dark=True,
+             depth=0.16)
+    F.box(gc - 3.1, gc + 3.1, -0.2, 0.75, Z + 7.0, Z + 7.45, marble)                     # entablature
+    F.box(gc - 1.35, gc + 1.35, 0.1, 0.7, Z + 7.45, Z + 9.5, marble)                      # the arms' cartouche
+    F.box(gc - 0.75, gc + 0.75, 0.2, 0.82, Z + 9.5, Z + 10.3, marble)                     # the crown
+    for sg in (-1, 1):
+        F.box(gc + sg * 1.6, gc + sg * 3.1, -0.1, 0.72, Z + 7.45, Z + 7.95, marble)       # broken pediment ends
+        F.box(gc + sg * 1.45, gc + sg * 1.9, -0.1, 0.72, Z + 7.95, Z + 8.5, marble)
+    # The arms: a red and white lozengy shield under a gilt crown.
+    red_, white_ = np.array(hexrgb("#c42a35")), np.array(hexrgb("#f7f3ee"))
+    for i in range(4):
+        for j in range(3):
+            F.face_quad("+t", 0.7, gc - 0.6 + j * 0.4, gc - 0.2 + j * 0.4, Z + 7.85 + i * 0.3, Z + 8.15 + i * 0.3,
+                        red_ if (i + j) % 2 else white_, out=0.02)
+    F.box(gc - 0.45, gc + 0.45, 0.7, 0.86, Z + 9.1, Z + 9.45, np.array(hexrgb("#c9a548")))
+    for d in (-0.35, 0.0, 0.35):
+        F.box(gc + d - 0.08, gc + d + 0.08, 0.7, 0.86, Z + 9.45, Z + 9.75, np.array(hexrgb("#c9a548")))
+    for sg in (-1, 1):
+        sc = gc + sg * 5.0
+        F.box(sc - 0.65, sc + 0.65, 1.0, 2.3, Z, Z + 2.35, np.array(hexrgb("#f4f1ea")))
+        F.face_quad("+t", 2.3, sc - 0.42, sc + 0.42, Z + 0.3, Z + 2.0, dark, out=0.01)
+        for z_, w_ in ((Z + 2.35, 0.8), (Z + 2.6, 0.55), (Z + 2.85, 0.3)):
+            F.box(sc - w_, sc + w_, 1.65 - w_ * 0.9, 1.65 + w_ * 0.9, z_, z_ + 0.25, np.array(hexrgb("#c0372f")))
+    stats["palace_gate"] = round(gc, 1)
+
+    # -- South: the set-back block, its tower, the terrace wall -------------
+    wing(-21.0, 0.0, -21.0, -9.6, 14.6, ("+t",), rows=[Z + 10.9], arch_top=True)
+    F.box(-52.0, 0.0, -1.6, 0.0, gmin(-52, 0, -1.6, 0), Z + PL, wall)                     # terrace wall
+    F.slab("+t", 0.0, -52.0, 0.0, Z + PL - 0.35, Z + PL, 0.25, trim)
+    F.balustrade("+t", 0.0, -52.0, 0.0, Z + PL, trim, h=0.95)
+    F.box(-21.0, 0.0, -9.6, -1.6, Z + PL - 0.3, Z + PL, np.array(hexrgb("#c9b9a0")))     # the terrace's paving
+    for k in range(11):
+        a = -50.0 + k * 4.6
+        F.window("+t", 0.0, a + 2.3, 0.9, Z + 2.6, Z + 3.8, k, 0, frame=trim, pediment=True)
+    # Ramparts' arched door at the south end (photo: an arch with an awning).
+    F.window("+t", 0.0, -44.0, 2.6, Z, Z + 2.6, 0, 0, frame=trim, arch=True, dark=True, sill=False)
+    # The south tower (cream, crenellated, above the set-back block).
+    F.box(-23.5, -15.0, -15.5, -7.0, gmin(-23.5, -15, -15.5, -7), Z + 20.2, wall)
+    F.battlements(-23.5, -15.0, -15.5, -7.0, Z + 20.2, 1.6, wall, merlon=1.05, gap=0.75)
+    F.slab("+t", -7.0, -23.5, -15.0, Z + 19.6, Z + 20.2, 0.15, trim)
+    for z_ in (Z + 15.8,):
+        F.window("+t", -7.0, -19.25, 0.9, z_, z_ + 1.6, 0, 5, frame=trim)
+    # The tower behind the gate block (seen over its roof, crenellated).
+    F.box(21.0, 28.5, -19.5, -12.0, Z + 16.0, Z + 22.6, wall)
+    F.battlements(21.0, 28.5, -19.5, -12.0, Z + 22.6, 1.6, wall, merlon=1.05, gap=0.75)
+    F.window("+t", -12.0, 24.75, 0.9, Z + 18.6, Z + 20.2, 0, 5, frame=trim)
+
+    # -- North: Tour Sainte-Marie, the grey curtain wall, the clock tower ---
+    zg = gmin(48, 66, -16, 9)
+    st = (48.0, 58.0, -15.0, -3.0)
+    F.box(*st, zg, Z + 23.2, grey, style=RUBBLE, uvm=0.55)
+    F.battlements(*st, Z + 23.2, 2.0, grey, merlon=1.1, gap=0.65, corbel=0.45)
+    for zb_ in (Z + 7.0, Z + 15.0):
+        F.slab("+t", st[3], st[0] - 0.05, st[1] + 0.05, zb_, zb_ + 0.35, 0.12, grey * 1.05)
+    F.window("+t", st[3], 53.0, 0.9, Z + 17.2, Z + 19.0, 0, 5, frame=grey * 1.06, arch=True)
+    F.window("+t", st[3], 53.0, 1.1, Z + 9.0, Z + 11.0, 0, 3, frame=grey * 1.06, arch=True)
+    # Flag mast on top.
+    p = F.xy(53.0, -9.0)
+    _cyl(m, p[0], p[1], Z + 25.2, Z + 37.0, 0.09, np.array(hexrgb("#e9e9e4")), sides=6)
+    F.box(52.95, 53.05, -9.0, -6.6, Z + 35.2, Z + 36.8, np.array(hexrgb("#d3202e")), top=False, sides="tT")
+    F.box(52.95, 53.05, -9.0, -6.6, Z + 35.2, Z + 36.0, np.array(hexrgb("#f7f5f2")), top=False, sides="tT")
+    # Curtain wall forward of the tower, to the clock tower.
+    cw_ = (48.0, 66.0, -3.0, 3.5)
+    F.box(*cw_, zg, Z + 13.5, grey, style=RUBBLE, uvm=0.55)
+    F.battlements(*cw_, Z + 13.5, 1.6, grey, merlon=1.0, gap=0.7, corbel=0.35)
+    for k, a in enumerate((50.5, 54.5)):
+        F.window("+t", cw_[3], a, 1.0, Z + 7.0, Z + 8.8, k, 2, frame=grey * 1.06, arch=True)
+    F.window("+t", cw_[3], 59.5, 1.4, Z + 0.0, Z + 2.6, 0, 0, frame=grey * 1.06, arch=True, dark=True, sill=False)
+    ct = (62.5, 68.5, 3.5, 9.5)
+    F.box(*ct, zg, Z + 22.0, grey, style=RUBBLE, uvm=0.55)
+    F.battlements(*ct, Z + 22.0, 1.7, grey, merlon=0.95, gap=0.6, corbel=0.4)
+    # The clock: a white dial with a dark ring and hands, facing the square.
+    cx_, cz_ = 65.5, Z + 18.4
+    th = np.linspace(0, 2 * math.pi, 17)
+    for r_, col_, out_ in ((0.95, np.array(hexrgb("#2b2b2b")), 0.04), (0.82, np.array(hexrgb("#f5f2ea")), 0.06)):
+        P = [F.E(cx_ + r_ * math.cos(a), ct[3] + out_, cz_ + r_ * math.sin(a)) for a in th]
+        ctr = F.E(cx_, ct[3] + out_, cz_)
+        for i in range(16):
+            A_, B_ = P[i], P[i + 1]
+            if (np.cross(A_ - ctr, B_ - ctr) * F.want(cx_, ct[3], cz_, 0, 1, 0)).sum() < 0:
+                A_, B_ = B_, A_
+            m.tri(ctr, A_, B_, col_, PLAIN)
+    F.box(cx_ - 0.04, cx_ + 0.04, ct[3] + 0.06, ct[3] + 0.09, cz_, cz_ + 0.6, np.array(hexrgb("#1c1c1c")), top=False)
+    F.box(cx_, cx_ + 0.45, ct[3] + 0.06, ct[3] + 0.09, cz_ - 0.04, cz_ + 0.04, np.array(hexrgb("#1c1c1c")), top=False)
+    F.window("+t", ct[3], 65.5, 0.7, Z + 12.0, Z + 13.6, 0, 4, frame=grey * 1.06, arch=True)
+    F.window("+s", ct[1], 6.5, 0.7, Z + 12.0, Z + 13.6, 0, 4, frame=grey * 1.06, arch=True)
+    # Low grey wing behind (ramparts side): a terrace with battlements.
+    wing(58.0, 80.0, -30.0, -3.0, 8.0, ("+s",), rows=[Z + 3.0])
+
+    # -- The wings round the Cour d'honneur and behind ---------------------
+    wing(-27.0, 0.0, -63.0, -21.0, 17.0, ("-s", "+s"))
+    wing(-50.0, -27.0, -21.0, -1.6, 15.5, ("-s",))
+    wing(-48.0, -33.0, -90.0, -21.0, 14.0, ("-s", "-t"))
+    wing(-33.0, 25.0, -92.0, -63.0, 17.0, ("-t", "+t"))
+    wing(23.0, 37.0, -63.0, -21.0, 17.5, ("-s", "+s"))
+    wing(37.0, 58.0, -62.0, -15.0, 8.0, ("+s", "-t"), rows=[Z + 3.4], roof_=False)
+    F.balustrade("+s", 58.0, -62.0, -15.0, Z + 8.0, trim, h=0.9)
+    wing(25.0, 45.0, -92.0, -62.0, 11.0, ("+s", "-t"))
+    # The front block's roof, the court face of the front wing.
+    F.hip_roof(GB[0], GB[1], -21.0, 0.0, Z + 16.4, roof)
+    F.hip_roof(LG[0], TL[1], -21.0, 0.0, Z + 19.4, roof)
+    # Chimneys along the front roofs (photo).
+    for a in (3.0, 11.0, 19.5, 30.0, 40.0):
+        zt_ = Z + (19.2 if a < 27 else 22.0)
+        F.box(a - 0.32, a + 0.32, -3.0, -2.4, Z + 16.0, zt_, wall)
+        F.box(a - 0.4, a + 0.4, -3.08, -2.32, zt_, zt_ + 0.2, trim)
+    # The back tower (LiDAR: a high point in the back wing).
+    F.box(-8.5, -0.5, -86.0, -78.0, Z + 17.0, Z + 23.0, wall)
+    F.battlements(-8.5, -0.5, -86.0, -78.0, Z + 23.0, 1.5, wall, merlon=1.0, gap=0.7)
+
+    # -- Cour d'honneur -----------------------------------------------------
+    CS, CT = (0.0, 23.0), (-63.0, -21.0)
+    ss_, tt_ = np.meshgrid(np.linspace(CS[0], CS[1], 24), np.linspace(CT[0], CT[1], 40))
+    pp_ = F.O[None] + ss_.ravel()[:, None] * F.u[None] + tt_.ravel()[:, None] * F.v[None]
+    zin = mntR.sample(pp_[:, 0], pp_[:, 1])
+    # The court's floor (LiDAR 64 m), over the terrain model's guess there.
+    zc = max(Z + 2.0, float(np.nanmax(zin)) + 0.12 if np.isfinite(zin).any() else Z + 2.0)
+    F.box(CS[0], CS[1], CT[0], CT[1], zc - 0.4, zc, np.array(hexrgb("#d6cebd")), sides="")
+    # Pebble mosaic: a grid of darker bands and a star in the middle.
+    pc = np.array(hexrgb("#9f968a"), float)
+    for a in np.linspace(CS[0] + 2.3, CS[1] - 2.3, 5):
+        F.box(a - 0.18, a + 0.18, CT[0] + 2, CT[1] - 2, zc, zc + 0.02, pc, sides="")
+    for b in np.linspace(CT[0] + 3, CT[1] - 3, 8):
+        F.box(CS[0] + 2, CS[1] - 2, b - 0.18, b + 0.18, zc, zc + 0.02, pc, sides="")
+    # Court faces of the wings round it: frescoed ochre, two rows of windows.
+    for face, c, a0, a1 in (("+s", 0.0, -63.0, -21.0), ("-s", 23.0, -63.0, -21.0), ("-t", -21.0, 0.0, 23.0)):
+        F.face_quad(face, c, a0, a1, zc, Z + 16.5, court_wall, out=0.02)
+        nb = int(round((a1 - a0) / 3.8))
+        for k in range(nb):
+            a = a0 + (k + 0.5) * (a1 - a0) / nb
+            if face == "-t" and abs(a - gc) < 2.0:
+                F.window(face, c, a, 3.0, zc, zc + 2.8, 0, 0, frame=marble, arch=True, dark=True, sill=False)
+                continue
+            for i, z_ in enumerate((zc + 1.2, zc + 6.2, zc + 10.6)):
+                F.window(face, c, a, 1.2, z_, z_ + 2.2, k, i, frame=trim, arch=(i == 1))
+                n_win += 1
+            # Painted panels between the windows (the frescoes).
+            F.face_quad(face, c, a + 0.95, a + 1.7, zc + 5.4, zc + 9.4, np.array(hexrgb("#c99d68")), out=0.04)
+    # The back of the court: the Galerie d'Hercule, two tiers of open arches,
+    # and in front the double horseshoe staircase in white Carrara marble.
+    gb = -63.0
+    F.face_quad("+t", gb, 0.0, 23.0, zc, Z + 17.0, court_wall, out=0.02)
+    for k in range(5):
+        a = 2.3 + k * 4.6
+        F.window("+t", gb, a, 3.0, zc, zc + 3.2, k, 0, frame=trim, arch=True, dark=True, sill=False)
+        F.window("+t", gb, a, 3.0, zc + 6.0, zc + 9.2, k, 1, frame=trim, arch=True, dark=True, sill=False)
+        F.balustrade("+t", gb + 0.3, a - 1.5, a + 1.5, zc + 6.0, trim, h=0.9, depth=0.25)
+        F.slab("+t", gb, a + 1.85, a + 2.75, zc, Z + 15.5, 0.2, trim)
+    F.slab("+t", gb, 0.0, 23.0, zc + 5.5, zc + 6.0, 0.6, trim)
+    F.window("+t", gb, 11.5, 1.2, zc + 11.6, zc + 13.6, 0, 3, frame=trim)
+    # Staircase: two quarter-turn flights from the court floor meeting at a
+    # landing in front of the gallery's middle arch.
+    cx, land_t, top = 11.5, gb + 3.2, zc + 6.0
+    F.box(cx - 2.2, cx + 2.2, gb, land_t, zc, top, marble)
+    F.balustrade("+t", land_t, cx - 2.2, cx + 2.2, top, marble, h=0.9, depth=0.25)
+    for sg in (-1, 1):
+        n_ = 28
+        R0 = 6.4
+        for k in range(n_):
+            th = math.pi / 2 * (k + 0.5) / n_
+            # A quarter circle from the landing's side (top) round to the
+            # court floor, its foot turned toward the gate.
+            a = cx + sg * (2.2 + R0 * math.sin(th))
+            b = land_t + R0 * (1 - math.cos(th))
+            tan = sg * math.cos(th) * F.u + math.sin(th) * F.v
+            p = F.xy(a, b)
+            zt = top - (top - zc) * (k + 1) / n_ + 0.18
+            _box(m, p[0], p[1], tan, R0 * math.pi / 2 / n_ + 0.08, 1.7, zc, zt, marble * (0.97 + 0.03 * (k % 2)))
+        stats["palace_stair_steps"] = 2 * n_
+    stats["palace"] = {"square": round(Z, 2), "court": round(zc, 2), "windows": n_win}
+
+    # -- On the square: the guard's cobbled enclosure, cannons --------------
+    cob = np.array(hexrgb("#8d8a84"), float)
+    F.box(gc - 9.0, gc + 9.0, 9.0, 21.0, Z - 0.2, Z + 0.06, cob, sides="stST")
+    bol = np.array(hexrgb("#33463c"), float)
+    for a in np.arange(gc - 9.0, gc + 9.01, 2.25):
+        for b in (9.0, 21.0):
+            p = F.xy(a, b)
+            _cyl(m, p[0], p[1], Z, Z + 0.95, 0.13, bol, sides=8)
+            _ball(m, p[0], p[1], Z + 1.0, 0.11, bol, None, 6, 4)
+    for b in np.arange(11.25, 21.0, 2.25):
+        for a in (gc - 9.0, gc + 9.0):
+            p = F.xy(a, b)
+            _cyl(m, p[0], p[1], Z, Z + 0.95, 0.13, bol, sides=8)
+    for a, b0, b1 in ((gc - 9.0, 9.0, 21.0), (gc + 9.0, 9.0, 21.0)):
+        F.box(a - 0.03, a + 0.03, b0, b1, Z + 0.62, Z + 0.68, bol * 0.6, top=False, sides="sS")
+    for b in (9.0, 21.0):
+        F.box(gc - 9.0, gc + 9.0, b - 0.03, b + 0.03, Z + 0.62, Z + 0.68, bol * 0.6, top=False, sides="tT")
+    bronze = np.array(hexrgb("#6b5532"), float)
+    wood = np.array(hexrgb("#3d2f25"), float)
+    for k, a in enumerate((22.0, 30.0, 37.5, 44.0)):
+        p = F.xy(a, 4.2)
+        F.box(a - 0.45, a + 0.45, 3.3, 5.1, Z, Z + 0.75, wood)
+        # Barrel: pointing out across the square.
+        for j in range(6):
+            r_ = 0.24 - 0.02 * j
+            F.box(a - r_, a + r_, 3.2 + j * 0.45, 3.65 + j * 0.45, Z + 0.85 - r_, Z + 0.85 + r_, bronze)
+        # Cannonballs: a small pyramid beside it.
+        q = F.xy(a + 1.4, 4.2)
+        for lv, nb in enumerate((3, 2, 1)):
+            for i in range(nb):
+                for j in range(nb):
+                    off = (i - (nb - 1) / 2) * 0.24
+                    off2 = (j - (nb - 1) / 2) * 0.24
+                    pp = q + F.u * off + F.v * off2
+                    _ball(m, pp[0], pp[1], Z + 0.12 + lv * 0.19, 0.12, np.array(hexrgb("#2e2e2c")), None, 6, 4)
+    stats["palace_cannons"] = 4
+    return F
+
+
+# ------------------------------------------------- the Oceanographic Museum ----
+MUSEE = "BATIMENT0000000074078955"
+MUSEE_O = (1056417.9, 6302352.8)          # the sea face's south-west corner (BD TOPO)
+MUSEE_U = (74.3, 68.7)                    # along the sea face, south-west to north-east
+MUSEE_STONE = "#eae6dc"                   # pale La Turbie limestone (photos)
+MUSEE_L = 101.2
+
+
+def musee_oceanographique(m, gm, mntR, stats):
+    """The Oceanographic Museum (1910), in a frame on its sea face: s from
+    the south-west end (0) to the north-east (101 m), t out to sea (the
+    street face is at t = -19, the entrance pavilion reaches t = -33),
+    z m NGF. Street side from the 2015 and 2019 Mapillary photos; the sea
+    face (no street photos) after the same order: rusticated base in the
+    cliff, tall arches between paired columns, the frieze, a balustrade."""
+    F = Frame(m, MUSEE_O, MUSEE_U)
+    L = MUSEE_L
+    zs_ = mntR.sample(np.array([F.xy(50.5, -38.0)[0]]), np.array([F.xy(50.5, -38.0)[1]]))[0]
+    Z = float(zs_) if np.isfinite(zs_) else 54.0          # Avenue Saint-Martin, in front of the steps
+    st = np.array(hexrgb(MUSEE_STONE), float)
+    lit = st * 1.03
+    shade = st * 0.93
+    dark = np.array(hexrgb("#2a2724"), float)
+    TOP = Z + 23.6                                         # cornice (LiDAR roof 78-79)
+    BODY = (-19.0, 0.0)
+    CP = (36.2, 65.3)                                      # the central pavilion
+    n_win = 0
+
+    def ground(s, t):
+        g = _ground_min(F, mntR, s, s, t, t, n=2)
+        return Z if g is None else g
+
+    # The body, down to the rock on the sea side.
+    zrock = min(Z - 1, _ground_min(F, mntR, 0, L, 0.5, 3.0) or Z) - 0.5
+    F.box(0.0, L, BODY[0], BODY[1], zrock, TOP, st, top=True)
+    # -- Sea face ------------------------------------------------------------
+    # Rusticated base: the rock-cut storeys, in big coursed blocks.
+    F.face_quad("+t", 0.0, 0.0, L, zrock, Z - 3.0, st * 0.96, out=0.05, style=RUBBLE, uvm=0.45)
+    for zb_ in np.arange(Z - 3.0, Z + 3.0, 0.9):
+        F.slab("+t", 0.0, 0.0, L, zb_, zb_ + 0.55, 0.12, lit)                             # banded storey
+    nb = 13
+    for k in range(nb):
+        a = (k + 0.5) * L / nb
+        g = ground(a, 2.0)
+        for i, z_ in enumerate(np.arange(Z - 9.0, g + 3.0, -6.0)):
+            F.window("+t", 0.0, a, 1.6, z_, z_ + 2.4, k, i, frame=lit, arch=True, band=0.3)
+            n_win += 1
+        F.window("+t", 0.0, a, 1.9, Z - 1.6, Z + 1.4, k, 5, frame=lit, arch=True, band=0.3)
+    # Main order: tall arched windows between paired columns.
+    zc0, zc1 = Z + 4.2, Z + 18.4
+    F.slab("+t", 0.0, -0.2, L + 0.2, Z + 3.6, Z + 4.2, 0.55, lit)                        # string course
+    bays = [(k + 0.5) * L / nb for k in range(nb)]
+    for k, a in enumerate(bays):
+        if CP[0] < a < CP[1]:
+            continue
+        F.balustrade("+t", 0.0, a - 1.6, a + 1.6, Z + 4.2, lit, h=0.95, depth=0.35)
+        F.window("+t", 0.0, a, 2.6, Z + 5.2, Z + 14.0, k, 6, frame=lit, arch=True, band=0.32, sill=False)
+        n_win += 1
+    for k in range(nb + 1):
+        a = k * L / nb
+        if CP[0] - 0.5 < a < CP[1] + 0.5:
+            continue
+        for d in (-0.55, 0.55):
+            F.column(a + d, 0.55, zc0, zc1, 0.36, lit)
+    # Frieze (the research ships' names), cornice, balustrade.
+    F.slab("+t", 0.0, -0.3, L + 0.3, zc1, zc1 + 0.6, 0.75, lit)
+    F.slab("+t", 0.0, -0.3, L + 0.3, zc1 + 0.6, zc1 + 2.4, 0.55, st)
+    rnd = rng_for(MUSEE)
+    for k, a in enumerate(bays):
+        if CP[0] < a < CP[1]:
+            continue
+        for j in range(int(rnd.integers(6, 10))):
+            x = a - 2.2 + j * 0.5
+            F.slab("+t", 0.55, x, x + 0.32, zc1 + 1.15, zc1 + 1.75, 0.03, np.array(hexrgb("#b9b2a2")))
+    F.slab("+t", 0.0, -0.5, L + 0.5, zc1 + 2.4, TOP, 1.1, lit)                         # cornice
+    F.balustrade("+t", 1.0, 0.0, L, TOP, lit, h=1.1)
+    # Central pavilion on the sea: three great arches, a higher attic.
+    F.box(CP[0], CP[1], 0.0, 1.8, zrock, Z + 28.5, st, top=True)
+    F.face_quad("+t", 1.8, CP[0], CP[1], zrock, Z - 3.0, st * 0.96, out=0.02, style=RUBBLE, uvm=0.45)
+    w3 = (CP[1] - CP[0]) / 3
+    for k in range(3):
+        a = CP[0] + (k + 0.5) * w3
+        F.window("+t", 1.8, a, 5.2, Z + 4.6, Z + 15.0, k, 6, frame=lit, arch=True, band=0.45)
+        F.balustrade("+t", 1.8, a - 2.6, a + 2.6, Z + 4.0, lit, h=1.0, depth=0.4)
+        F.window("+t", 1.8, a, 2.2, Z - 1.6, Z + 1.6, k, 5, frame=lit, arch=True, band=0.3)
+        n_win += 2
+    for a in (CP[0] + 0.6, CP[0] + w3, CP[0] + 2 * w3, CP[1] - 0.6):
+        for d in (-0.6, 0.6):
+            F.column(a + d, 2.35, Z + 4.2, Z + 20.6, 0.45, lit)
+    F.slab("+t", 1.8, CP[0] - 0.3, CP[1] + 0.3, Z + 20.6, Z + 23.8, 0.7, lit)
+    F.slab("+t", 1.8, CP[0] - 0.5, CP[1] + 0.5, Z + 23.8, Z + 24.8, 1.0, lit)
+    F.balustrade("+t", 2.8, CP[0], CP[1], Z + 28.5, lit, h=1.1)
+
+    # -- Street face ---------------------------------------------------------
+    sf = BODY[0]
+    for zb_ in np.arange(Z + 0.4, Z + 6.6, 0.95):
+        F.slab("-t", sf, 0.0, L, zb_, zb_ + 0.55, 0.14, lit)                             # banded base
+    F.slab("-t", sf, -0.3, L + 0.3, Z + 6.6, Z + 7.3, 0.4, lit)
+    nbs = 5
+    for side, (a0, a1) in (("w", (6.5, CP[0])), ("e", (CP[1], L - 6.5))):
+        for k in range(nbs):
+            a = a0 + (k + 0.5) * (a1 - a0) / nbs
+            F.window("-t", sf, a, 1.4, Z + 2.0, Z + 4.2, k, 1, frame=lit)                 # basement grilles
+            F.window("-t", sf, a, 2.6, Z + 8.0, Z + 15.0, k, 2, frame=lit, arch=True, band=0.32)
+            F.balustrade("-t", sf, a - 1.5, a + 1.5, Z + 7.3, lit, h=0.85, depth=0.3)
+            n_win += 2
+        for k in range(nbs + 1):
+            a = a0 + k * (a1 - a0) / nbs
+            for d in (-0.5, 0.5):
+                F.column(a + d, sf - 0.55, Z + 7.3, Z + 19.0, 0.34, lit)
+    F.slab("-t", sf, -0.3, L + 0.3, Z + 19.0, Z + 21.6, 0.6, st)
+    for a0, a1 in ((7.0, CP[0] - 1.0), (CP[1] + 1.0, L - 7.0)):
+        for j in range(int((a1 - a0) / 0.55)):
+            x = a0 + j * 0.55
+            if rnd.random() < 0.8:
+                F.slab("-t", sf - 0.6, x, x + 0.34, Z + 19.9, Z + 20.6, 0.03, np.array(hexrgb("#b9b2a2")))
+    F.slab("-t", sf, -0.5, L + 0.5, Z + 21.6, TOP, 1.0, lit)
+    F.balustrade("-t", sf - 1.0, 0.0, L, TOP, lit, h=1.1)
+    # Corner pavilions with small domes and ball finials (NE corner, photo
+    # 2019; the SW one alike).
+    for a0, a1 in ((0.0, 6.5), (L - 6.5, L)):
+        F.box(a0, a1, sf - 1.2, sf + 1.0, Z, TOP + 1.2, st)
+        for zb_ in np.arange(Z + 0.4, Z + 6.6, 0.95):
+            F.slab("-t", sf - 1.2, a0, a1, zb_, zb_ + 0.55, 0.14, lit)
+        F.window("-t", sf - 1.2, (a0 + a1) / 2, 2.0, Z + 9.0, Z + 15.0, 0, 2, frame=lit, arch=True, band=0.35)
+        F.balustrade("-t", sf - 1.2, a0 + 0.4, a1 - 0.4, Z + 7.3, lit, h=0.85)
+        F.slab("-t", sf - 1.2, a0 - 0.3, a1 + 0.3, TOP + 1.2, TOP + 1.9, 0.6, lit)
+        c = F.xy((a0 + a1) / 2, sf - 0.1)
+        dome_cap(m, c, F.u, F.v, 2.6, TOP + 1.9, 3.4, st * 0.98, lit)
+        _ball(m, c[0], c[1], TOP + 6.0, 0.55, lit, None, 10, 6)
+        n_win += 1
+    # Entrance pavilion: steps, the rusticated arch, the great window between
+    # paired giant columns, sculpture groups, the inscription, the pediment.
+    pf = -33.0
+    ZT = Z + 27.4
+    F.box(CP[0], CP[1], pf, sf, Z - 0.5, ZT, st)
+    F.box(CP[0], CP[1], sf, 0.0, TOP, Z + 28.5, st)                                   # the hall's high roof
+    for zb_ in np.arange(Z + 2.0, Z + 12.5, 1.05):
+        F.slab("-t", pf, CP[0], CP[1], zb_, zb_ + 0.62, 0.25, lit)                       # carved bands
+        F.slab("-s", CP[0], pf, sf, zb_, zb_ + 0.62, 0.25, lit)
+        F.slab("+s", CP[1], pf, sf, zb_, zb_ + 0.62, 0.25, lit)
+        F.slab("-t", pf - 0.25, CP[0], CP[1], zb_ + 0.2, zb_ + 0.42, 0.06, shade)
+    mid = (CP[0] + CP[1]) / 2
+    F.slab("-t", pf, mid - 4.6, mid + 4.6, Z + 1.5, Z + 12.6, 0.4, st)                   # the portal's frame
+    F.window("-t", pf - 0.4, mid, 3.6, Z + 2.6, Z + 7.6, 0, 0, frame=lit, arch=True, band=0.55, sill=False,
+             dark=True, depth=0.25)
+    F.slab("-t", pf - 0.4, mid - 0.9, mid + 0.9, Z + 9.0, Z + 10.6, 0.35, lit)          # the arms over the arch
+    for k in range(9):                                                                   # steps
+        d = 0.42 * (9 - k)
+        F.box(mid - 8.0 - d * 0.6, mid + 8.0 + d * 0.6, pf - d, pf, Z - 0.4, Z + 0.3 + k * 0.25, st * (0.98 + 0.01 * (k % 2)))
+    F.slab("-t", pf, CP[0] - 0.3, CP[1] + 0.3, Z + 12.6, Z + 13.4, 0.6, lit)
+    for face, c in (("-s", CP[0]), ("+s", CP[1])):
+        F.slab(face, c, pf, sf, Z + 12.6, Z + 13.4, 0.6, lit)
+        F.window(face, c, (pf + sf) / 2, 2.4, Z + 14.4, Z + 20.0, 0, 3, frame=lit, arch=True, band=0.4)
+        for d in (pf + 1.2, sf - 1.2):
+            F.column(c + (-0.7 if face[0] == "-" else 0.7), d, Z + 13.4, Z + 23.6, 0.42, lit)
+        F.slab(face, c, pf, sf, Z + 23.6, ZT, 0.8, lit)
+    F.balustrade("-t", pf - 0.6, mid - 4.5, mid + 4.5, Z + 13.4, lit, h=1.0)
+    F.window("-t", pf, mid, 4.6, Z + 13.6, Z + 20.0, 0, 3, frame=lit, arch=True, band=0.5, sill=False)
+    for sg in (-1, 1):
+        for d in (5.2, 6.7):
+            F.column(mid + sg * d, pf - 0.7, Z + 13.4, Z + 23.6, 0.48, lit)
+        # Sculpture groups either side (rough masses of figures).
+        for j in range(5):
+            a = mid + sg * (9.0 + j * 0.7)
+            F.box(a - 0.5, a + 0.5, pf - 1.2 + 0.1 * j, pf, Z + 15.5 + 0.2 * j, Z + 19.8 - 0.55 * j, lit * (0.96 + 0.02 * j))
+        F.box(mid + sg * 9.0 - 2.2, mid + sg * 9.0 + 3.6, pf - 1.4, pf, Z + 13.4, Z + 15.5, lit)
+    F.slab("-t", pf, CP[0] - 0.3, CP[1] + 0.3, Z + 23.6, Z + 24.4, 0.9, lit)             # entablature
+    F.slab("-t", pf - 0.6, mid - 9.0, mid + 9.0, Z + 24.4, Z + 25.6, 0.3, st)            # the inscription band
+    for j in range(22):
+        x = mid - 7.6 + j * 0.7
+        F.slab("-t", pf - 0.9, x, x + 0.42, Z + 24.7, Z + 25.3, 0.03, np.array(hexrgb("#9d9584")))
+    F.slab("-t", pf - 0.6, CP[0], CP[1], Z + 25.6, ZT, 0.9, lit)                         # cornice
+    # Pediment: a low triangle over the middle.
+    for k in range(8):
+        w_ = 8.5 * (1 - k / 8)
+        F.box(mid - w_, mid + w_, pf - 1.2, pf + 2.0, ZT + k * 0.3, ZT + (k + 1) * 0.3, lit, top=(k == 7))
+    F.balustrade("-t", pf - 0.2, CP[0], mid - 9.0, ZT, lit, h=1.1)
+    F.balustrade("-t", pf - 0.2, mid + 9.0, CP[1], ZT, lit, h=1.1)
+    # Roof terrace: pale paving with a skylight over the great hall.
+    F.box(4.0, L - 4.0, BODY[0] + 3.0, -3.0, TOP, TOP + 0.08, np.array(hexrgb("#d8d1c3")), sides="")
+    F.box(CP[0] + 4, CP[1] - 4, -15.0, -4.0, Z + 28.5, Z + 29.6, np.array(hexrgb("#9aa9ad")), style=ROOF_GLASS)
+    # The yellow submarine on the pavement north-east of the entrance (2019).
+    yel = np.array(hexrgb("#f1c21b"), float)
+    sa, sb_, tt = 76.0, 81.5, -27.0
+    nseg = 16
+    for j in range(nseg):
+        s0 = sa + j * (sb_ - sa) / nseg
+        r_ = 0.95 * math.sin(math.pi * (j + 0.5) / nseg) ** 0.45
+        p = F.xy(s0 + (sb_ - sa) / nseg / 2, tt)
+        # Three overlapping boxes per slice: a rounded hull.
+        _box(m, p[0], p[1], F.u, (sb_ - sa) / nseg + 0.02, 2 * r_, Z + 1.2 - r_ * 0.42, Z + 1.2 + r_ * 0.42, yel)
+        _box(m, p[0], p[1], F.u, (sb_ - sa) / nseg + 0.02, 2 * r_ * 0.42, Z + 1.2 - r_, Z + 1.2 + r_, yel)
+        _box(m, p[0], p[1], F.u, (sb_ - sa) / nseg + 0.02, 2 * r_ * 0.78, Z + 1.2 - r_ * 0.78, Z + 1.2 + r_ * 0.78, yel)
+    for j, a in enumerate((77.2, 78.0, 78.8, 79.6, 80.4)):
+        p = F.xy(a, tt - 0.97)
+        _ball(m, p[0], p[1], Z + 1.35, 0.17, np.array(hexrgb("#3d4a52")), None, 8, 5)        # portholes
+    F.box(78.0, 79.4, tt - 0.55, tt + 0.55, Z + 2.0, Z + 3.0, yel)
+    F.box(77.0, 80.5, tt - 0.6, tt + 0.6, Z, Z + 0.35, np.array(hexrgb("#55534e")))
+    stats["musee"] = {"street": round(Z, 2), "rock": round(zrock, 2), "windows": n_win}
+    return F
+
+
 # ------------------------------------------------------------ Place d'Armes ----
 # The market square of La Condamine at the foot of the Rocher, rebuilt from
 # the IGN 20 cm photo, the LiDAR, OpenStreetMap and street photos on
@@ -8014,6 +8843,16 @@ def _zone_trees(m, zone, mns, mnt, ortho, fps, kindfn, hmax=24.0, rad_k=0.85, se
         kind = kindfn(h)
         add_tree(m, x, y, z, min(h, hmax), rad * (0.9 if kind == "pine" else rad_k), kind, rnd)
         n_ += 1
+    return n_
+
+
+def rocher_trees(m, mns, mnt, ortho, fps, stats):
+    """The umbrella pines on Place du Palais and the trees round it, from
+    the LiDAR canopy (the photo is blurred there, so the generic finder,
+    which wants green in it, misses them)."""
+    zone = Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0)
+    n_ = _zone_trees(m, zone, mns, mnt, ortho, fps, lambda h: "pine" if h > 7 else "broad", seed=47)
+    stats["rocher_trees"] = n_
     return n_
 
 
@@ -9980,6 +10819,7 @@ def main():
     print("Fairmont…", fairmont(gm, bm, tm, mns, mnt_f, sea, stats), "balconies,", stats.get("fairmont_columns"), "columns,",
           stats.get("fairmont_roof_trees"), "roof trees")
     print("Place d'Armes…", place_darmes(gm, bm, tm, ways, pts, mns, mnt_f, ortho, ortho_hi, gz, fps, stats), "stalls")
+    print("Le Rocher trees…", rocher_trees(tm, mns, mnt_f, ortho, fps, stats))
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
