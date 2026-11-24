@@ -230,6 +230,24 @@
    "levels": 3,
    "bay": 5.0,
    "balconies": "none"
+  },
+  "BATIMENT0000000074074334": {
+   "style": "modern",
+   "colour": "#ece5d6",
+   "seen": "Fairmont Monte-Carlo (Mapillary 2018 and 2025 from the hairpin and the tunnel): cream concrete, a continuous balcony with a white front on every floor (built by fairmont()), roof garden",
+   "balconies": "none"
+  },
+  "BATIMENT0000000074070366": {
+   "style": "modern",
+   "colour": "#ece5d6",
+   "seen": "Fairmont, north wing by the Portier: same cream walls and glass",
+   "balconies": "none"
+  },
+  "BATIMENT0000000074070395": {
+   "style": "modern",
+   "colour": "#ece5d6",
+   "seen": "Fairmont, low wing at the Portier tunnel mouth",
+   "balconies": "none"
   }
  }
 }

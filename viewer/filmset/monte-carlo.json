@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3553246,
+ "triangles": 3617461,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -61,18 +61,18 @@
  "roof_plants": 55,
  "levels": 1361,
  "towers": 8,
- "trees": 1381,
+ "trees": 1377,
  "yachts": 593,
  "real_floors": 730,
  "styles": [
-  255,
+  254,
   214,
   7,
   322,
   221,
-  82,
+  80,
   1,
-  73,
+  76,
   184
  ],
  "balconies": 1094,
@@ -95,9 +95,9 @@
   15.8,
   20.7
  ],
- "photo_facade_colours": 50,
- "photo_facade_types": 37,
- "photo_roofs": 1314,
+ "photo_facade_colours": 53,
+ "photo_facade_types": 40,
+ "photo_roofs": 1308,
  "photo_lean": [
   0.04000000000000037,
   -0.009999999999999676
@@ -147,6 +147,10 @@
  "quai_wall_m": 548,
  "quai_steps": 2,
  "quai_pines": 36,
+ "fairmont_roof_trees": 19,
+ "fairmont_balconies": 204,
+ "fairmont_blocks": 882,
+ "fairmont_columns": 39,
  "armes_paved_m2": 2785,
  "armes_trees": 21,
  "armes_kiosks": 3,
@@ -161,8 +165,8 @@
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
  "track_clear": false,
- "roof_kit": 3259,
- "roof_texels_per_m": 4.54,
+ "roof_kit": 3537,
+ "roof_texels_per_m": 4.73,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
