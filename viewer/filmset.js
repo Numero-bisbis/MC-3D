@@ -216,6 +216,100 @@
             col *= mix(0.92, 1.05, vnoise(g * 0.45)) * mix(0.96, 1.03, vnoise(g * 2.2));
             material.diffuse = col * shade;
             material.roughness = 0.88;
+          } else if (a255 > 13.5 || (a255 > 4.5 && a255 < 7.5)) {
+            // Parks and gardens (build_filmset.py parks()): 14 lawn, 15
+            // path (grit or asphalt), 5 paved path, 7 shrub bed, 6 flower
+            // bed. The vertex colour is the photo's colour there; the map
+            // under them is plain grey (#9a9a9a), so it gives just the
+            // shade. Drawn in world metres, so they stay crisp up close.
+            float sc = length(czm_model[0].xyz);
+            vec2 wp = fsInput.attributes.positionMC.xz * sc;
+            float px = length(fwidth(wp));
+            vec3 vc = c.rgb;
+            vec3 base = czm_srgbToLinear(vc);
+            float grey = 0.3231;
+            float shade = clamp(dot(mapC, vec3(0.3, 0.59, 0.11)) / max(dot(vc * grey, vec3(0.3, 0.59, 0.11)), 0.01), 0.35, 1.12);
+            vec3 col = base;
+            // (The greens are set bright in the build; a touch quieter
+            // here so lawns read as real turf, not paint.)
+            if (a255 > 13.5 && a255 < 14.5 || a255 > 5.5 && a255 < 7.5) {
+              float lw = dot(col, vec3(0.3, 0.59, 0.11));
+              col = mix(vec3(lw), col, 0.74) * 0.86;
+            }
+            if (a255 > 13.5 && a255 < 14.5) {
+              // Lawn: broad patches (a little drier here and there), mown
+              // stripes, clumps and tufts, then single blades close up.
+              float n1 = vnoise(wp * 0.11), n2 = vnoise(wp * 0.37 + 3.7);
+              col *= mix(0.88, 1.08, n1 * 0.6 + n2 * 0.4);
+              col = mix(col, col * vec3(1.16, 1.06, 0.72), smoothstep(0.62, 0.86, vnoise(wp * 0.07 + 9.1)) * 0.55);
+              float fadeM = 1.0 - smoothstep(0.08, 0.35, px);
+              float stripe = smoothstep(0.35, 0.65, abs(fract(dot(wp, vec2(0.8, 0.6)) / 3.0) - 0.5) * 2.0);
+              col *= 1.0 + (stripe - 0.5) * 0.09 * fadeM;
+              float fadeC = 1.0 - smoothstep(0.05, 0.22, px);
+              float clump = vnoise(wp * 2.1) * 0.55 + vnoise(wp * 5.3 + 1.3) * 0.45;
+              col *= mix(1.0, mix(0.8, 1.1, clump), fadeC);
+              float clover = smoothstep(0.78, 0.9, vnoise(wp * 1.3 + 7.0)) * fadeC;
+              col = mix(col, col * vec3(0.86, 1.04, 0.92), clover * 0.5);
+              float fadeB = 1.0 - smoothstep(0.012, 0.045, px);
+              if (fadeB > 0.0) {
+                vec2 bq = wp * vec2(26.0, 9.0);
+                float bl = hash12(floor(bq + vec2(0.0, floor(bq.x) * 0.37)));
+                float tip = fract(bq.y + hash12(floor(bq) + 0.5));
+                float b2 = mix(0.78, 1.16, bl) * mix(0.92, 1.06, tip);
+                col *= mix(1.0, b2, fadeB);
+                col = mix(col, col * vec3(1.18, 1.1, 0.7), step(0.985, hash12(floor(wp * 14.0) + 2.0)) * fadeB * 0.6);
+              }
+              material.roughness = 0.96;
+            } else if (a255 > 14.5) {
+              // Path: fine grit or old asphalt, with darker wear down the
+              // middle and pale pebbles close up.
+              float fadeC = 1.0 - smoothstep(0.04, 0.18, px);
+              col *= mix(0.92, 1.05, vnoise(wp * 0.6)) * mix(1.0, mix(0.9, 1.08, vnoise(wp * 4.0)), fadeC);
+              float fadeB = 1.0 - smoothstep(0.008, 0.03, px);
+              if (fadeB > 0.0) {
+                float pb = hash12(floor(wp * 40.0));
+                col *= mix(1.0, mix(0.82, 1.15, pb), fadeB);
+              }
+              material.roughness = 0.93;
+            } else if (a255 < 5.5) {
+              // Paved path: square slabs (40 cm) in courses, fine joints.
+              vec2 q = wp / 0.4;
+              q.x += 0.5 * step(0.5, fract(q.y * 0.5));
+              vec2 cell = floor(q), f = fract(q);
+              vec2 aa = max(fwidth(q) * 1.2, vec2(0.001));
+              float face = box(f, vec2(0.025), vec2(0.975), aa);
+              float h = hash12(cell);
+              vec3 slab = col * mix(0.92, 1.06, h);
+              slab = mix(col * 0.72, slab, face);
+              float near = 1.0 - smoothstep(0.05, 0.16, px);
+              col = mix(col * 0.97, slab, near);
+              col *= mix(0.93, 1.04, vnoise(wp * 0.5));
+              material.roughness = 0.9;
+            } else {
+              // Shrub and flower beds: leafy mounds with dark soil in the
+              // gaps; in flower beds (6) blooms in patches of one colour.
+              float m = vnoise(wp * 1.5) * 0.6 + vnoise(wp * 4.2 + 2.0) * 0.4;
+              float leaf = smoothstep(0.3, 0.55, m);
+              vec3 soil = czm_srgbToLinear(vec3(0.36, 0.29, 0.22));
+              float fadeC = 1.0 - smoothstep(0.05, 0.2, px);
+              vec3 lv = col * mix(0.7, 1.2, smoothstep(0.35, 0.85, m));
+              float fadeB = 1.0 - smoothstep(0.01, 0.04, px);
+              lv *= mix(1.0, mix(0.75, 1.2, hash12(floor(wp * 16.0))), fadeB);
+              col = mix(col, mix(soil, lv, leaf), fadeC);
+              col *= mix(0.9, 1.05, vnoise(wp * 0.3));
+              if (a255 < 6.5) {
+                // Patches of one colour with soft, irregular edges.
+                float k = vnoise(wp * 0.45 + 5.0) * 0.7 + vnoise(wp * 1.3) * 0.3;
+                k = fract(k * 2.7);
+                vec3 fl = k < 0.3 ? vec3(0.62, 0.05, 0.1) : (k < 0.55 ? vec3(0.85, 0.35, 0.55) : (k < 0.75 ? vec3(0.9, 0.9, 0.85) : vec3(0.95, 0.75, 0.1)));
+                float bloom = step(0.55, hash12(floor(wp * 9.0) + 1.7)) * smoothstep(0.35, 0.6, m);
+                // Far away a bed is a wash of its flowers' colour.
+                float far = 1.0 - fadeB;
+                col = mix(col, fl, mix(bloom * 0.85, 0.22 * leaf, far));
+              }
+              material.roughness = 0.97;
+            }
+            material.diffuse = col * shade;
           } else if (a255 > 8.5) {
             // Pavements along the circuit (style 9 red brick pavers, 10
             // pale stone slabs): laid brick by brick in world metres, so
