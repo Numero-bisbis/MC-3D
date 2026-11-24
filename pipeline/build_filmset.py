@@ -1082,6 +1082,17 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
                 race_pool(d, xy, pts, px)
             else:
                 poly(pts, "#3e98a8")
+    # Under the park slabs: plain grey, so the map only gives them shade
+    # (the viewer draws their grass, grit and beds; see parks()).
+    if PARKS is not None and not PARKS["slabs"].is_empty:
+        pk_ = Image.new("L", img.size, 0)
+        dp_ = ImageDraw.Draw(pk_)
+        for q in to_polys(PARKS["slabs"]):
+            dp_.polygon(xy(np.asarray(q.exterior.coords)), fill=255)
+            for h in q.interiors:
+                dp_.polygon(xy(np.asarray(h.coords)), fill=0)
+        img.paste(tuple(hexrgb(PARK_GREY)), (0, 0) + img.size, pk_)
+        d = ImageDraw.Draw(img)
     # Soft shade at the foot of buildings (baked ambient occlusion).
     bm = Image.fromarray((bmask * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
     ao = bm.filter(ImageFilter.GaussianBlur(int(4.5 * px)))
@@ -11667,7 +11678,8 @@ def fairmont_paint(arr, px, ways, ortho_hi):
     if ortho_hi is not None:
         hi_ = np.asarray(ortho_hi.resize((S, S), Image.BILINEAR) if ortho_hi.size != (S, S) else ortho_hi).astype(np.float32)
     for t, pts, closed in ways:
-        if closed and len(pts) > 3 and t.get("name") in CASINO_GARDENS:
+        if closed and len(pts) > 3 and t.get("name") in CASINO_GARDENS and not (
+                PARKS is not None and t.get("name") in PARKS["names"]):     # (laid by parks() now)
             g = Polygon(pts).buffer(0).difference(FM["fair"].buffer(0.5))
             arr = _paint_garden(arr, px, ways, hi_, g, "#d2c8b2", "#82a456", paths=True, shade_lawn=True)
     arr = _paint_garden(arr, px, ways, hi_, FM["garden"], FAIR_PAVING, FAIR_LAWN)
@@ -12342,6 +12354,379 @@ def podium_walls(gm, m, stats):
     return n_
 
 
+# ---------------------------------------------------------------- parks ----
+# Parks and gardens all over the set: until now each was a flat OSM green
+# with the 50 cm photo's green and the LiDAR canopy blurred over it (soft
+# dark blots where the trees' shade fell), and Fontvieille's big park, an
+# OSM multipolygon relation, was not even read. Now every mapped park and
+# garden is sorted, from the 20 cm photo, the LiDAR heights and OSM, into
+# lawns, paths, shrub beds and flower beds, each laid as its own slab with
+# crisp edges and drawn by the viewer in world metres (blades and mown
+# stripes on the lawns, grit on the paths, leafy mounds in the beds,
+# flowers in the beds OSM maps), so they stay sharp up close. Each slab's
+# vertex colour is the photo's own colour there (its chroma only, so the
+# photo's tree shadows do not come back as blots); the ground map under
+# the slabs is a plain grey that carries just the baked shade.
+PARK_LAWN, PARK_PATH, PARK_BED, PARK_FLOWERS, PARK_PAVED = 14, 15, 7, 6, 5   # GROUND styles
+PARK_LAWN_C, PARK_BED_C = "#8db455", "#5f8a3c"   # lawn and leaf greens (sRGB)
+PARK_GREY = "#9a9a9a"                  # ground map under the park slabs (shade only)
+PARK_RES = 0.25                        # m, sorting grid
+PARK_KINDS = ("park", "garden")
+PARK_SKIP = ("Esplanade Rainier III", "Square Théodore Gastaud", "Jardin de l'Unesco")
+PARKS = None                           # {"slabs": union of the slabs, "names": [...]}
+
+
+def park_relations():
+    """leisure=park/garden multipolygon relations (Fontvieille's park) as
+    (tags, polygon)."""
+    root = ET.parse(RAW / "osm.xml").getroot()
+    rels = []
+    for rel in root.findall("relation"):
+        t = {k.get("k"): k.get("v") for k in rel.findall("tag")}
+        if t.get("type") == "multipolygon" and t.get("leisure") in PARK_KINDS:
+            rels.append((t, [(m.get("ref"), m.get("role")) for m in rel.findall("member") if m.get("type") == "way"]))
+    if not rels:
+        return []
+    need = {r for _, ms in rels for r, _ in ms}
+    wnodes = {w.get("id"): [nd.get("ref") for nd in w.findall("nd")] for w in root.findall("way") if w.get("id") in need}
+    nids = {n for v in wnodes.values() for n in v}
+    ll = {n.get("id"): (float(n.get("lon")), float(n.get("lat"))) for n in root.findall("node") if n.get("id") in nids}
+    tl = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    out = []
+    for t, ms in rels:
+        rings = {"outer": [], "inner": []}
+        for ref, role in ms:
+            p_ = [ll[n] for n in wnodes.get(ref, []) if n in ll]
+            if len(p_) >= 2:
+                x, y = tl.transform(*np.array(p_).T)
+                rings["inner" if role == "inner" else "outer"].append(LineString(np.column_stack([x, y])))
+        outer = unary_union(list(shapely.ops.polygonize(unary_union(rings["outer"])))) if rings["outer"] else Polygon()
+        inner = unary_union(list(shapely.ops.polygonize(unary_union(rings["inner"])))) if rings["inner"] else Polygon()
+        g = outer.difference(inner).buffer(0)
+        if not g.is_empty:
+            out.append((t, g))
+    return out
+
+
+def _runs_to_poly(mask, x0, y1, res):
+    """Raster cells (mask True) as polygons, from row runs (fast)."""
+    boxes = []
+    for r in range(mask.shape[0]):
+        row = mask[r]
+        if not row.any():
+            continue
+        d = np.diff(np.concatenate([[0], row.astype(np.int8), [0]]))
+        st, en = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+        yt, yb = y1 - r * res, y1 - (r + 1) * res
+        boxes += [box(x0 + a * res, yb, x0 + b * res, yt) for a, b in zip(st, en)]
+    if not boxes:
+        return Polygon()
+    return unary_union(boxes)
+
+
+def _taken_mask(gm, x0, y1, nx, ny, res):
+    """Where other passes already laid ground slabs (any GROUND style but
+    the plain map's 8), on the park grid: rasterised from their map uv."""
+    img = Image.new("L", (nx, ny), 0)
+    d = ImageDraw.Draw(img)
+    off = 0
+    for P, C, UV, I in zip(gm.p, gm.c, gm.uv, gm.i):
+        n = len(P)
+        a = int(C[0, 3]) if n else 8
+        if n and a // 16 == 0 and a % 16 != 8 and len(I):
+            c_ = (X0 + UV[:, 0] * (X1 - X0) - x0) / res
+            r_ = (y1 - (Y1 - UV[:, 1] * (Y1 - Y0))) / res
+            if not (c_.max() < 0 or r_.max() < 0 or c_.min() > nx or r_.min() > ny):
+                for k in (I - off).reshape(-1, 3):
+                    d.polygon([(c_[j], r_[j]) for j in k], fill=255)
+        off += n
+    return np.asarray(img) > 0
+
+
+def parks_setup(ways, fps):
+    """The parks and gardens to rebuild, as (name, polygon)."""
+    cands = []
+    for t, p_, c in ways:
+        if c and len(p_) > 3 and t.get("leisure") in PARK_KINDS:
+            cands.append((t, Polygon(p_).buffer(0)))
+    cands += park_relations()
+    blds = unary_union(fps) if fps else Polygon()
+    out = []
+    for t, g in cands:
+        nm = t.get("name", "")
+        if nm in PARK_SKIP or g.area < 60:
+            continue
+        g = g.difference(PECHE_DECK.buffer(1.0))          # the Pêcheurs garden has its own layout
+        if g.area < 60:
+            continue
+        if FM is not None:
+            g = g.difference(FM["garden"].buffer(0.5))    # the Fairmont's roof garden has its own
+            if g.area < 60:
+                continue
+        if g.intersection(blds).area > 0.5 * g.area:
+            continue                                     # other roof gardens
+        out.append((nm, g))
+    return out
+
+
+def _park_colour(o, sel, sig_px, fallback, sat=1.25, lum_to=None):
+    """Per-cell colour field from the photo over the cells `sel`: the
+    photo's chroma, blurred over that class only (normalised), at a fixed
+    brightness, so shade and dark trees do not print through."""
+    o = o.astype(np.float32)
+    lum = o.mean(-1, keepdims=True)
+    chroma = o / np.maximum(lum, 8.0)
+    w = sel.astype(np.float32)
+    ws = ndimage.gaussian_filter(w, sig_px) + 1e-4
+    ch = np.stack([ndimage.gaussian_filter(chroma[..., k] * w, sig_px) / ws for k in range(3)], -1)
+    if sel.sum() > 20:
+        med = np.median(chroma[sel], 0)
+        lm = float(np.median(lum[sel])) if lum_to is None else lum_to
+    else:
+        f = np.array(fallback, np.float32)
+        med, lm = f / f.mean(), f.mean()
+    ch = np.where((ws > 0.05)[..., None], ch, med[None, None])
+    ch = 1.0 + (ch - 1.0) * sat
+    return np.clip(ch * lm, 0, 255), med, lm
+
+
+def parks(gm, bm, ways, pts, mnt, mns, ortho_hi, gz, fps, stats):
+    """Lay every park's lawns, paths and beds (see the note above)."""
+    global PARKS
+    PARKS = {"slabs": Polygon(), "names": []}
+    if ortho_hi is None:
+        return 0
+    found = parks_setup(ways, fps)
+    if not found:
+        return 0
+    mntR = Raster(mnt)
+    k_ = ortho_hi.size[0] / (X1 - X0)                        # photo px per metre
+    blds = unary_union([p.buffer(0.3, join_style=2) for p in fps])
+    # What is not park ground: water, pools, fountains, roads, the track.
+    wet = [Polygon(p_).buffer(0) for t, p_, c in ways if c and len(p_) > 3 and (
+        t.get("natural") == "water" or t.get("leisure") == "swimming_pool" or t.get("amenity") == "fountain"
+        or t.get("water"))]
+    roads = []
+    for t, p_, c in ways:
+        hw = t.get("highway")
+        if hw in ROAD_W and hw != "service" and not c and t.get("tunnel") is None and not t.get("bridge"):
+            roads.append(LineString(p_).buffer(ROAD_W[hw] / 2 + 1.0))
+    if TRACK is not None:
+        roads.append(TRACK["line"].buffer(TRACK_HALF + 3.0))
+    if SW is not None:
+        roads.append(SW["poly"])
+    hard = unary_union(wet + roads + [blds])
+    # Paths from OSM, by width and surface.
+    PW = {"path": 1.4, "footway": 2.2, "cycleway": 2.5, "pedestrian": 4.0, "steps": 2.4, "track": 3.0,
+          "service": 3.5, "bridleway": 2.5}
+    PAVED = ("paving_stones", "concrete", "concrete:plates", "concrete:tiles", "sett", "paved", "stone",
+             "unhewn_cobblestone", "cobblestone", "tiles", "marble")
+    LOOSE = ("gravel", "fine_gravel", "compacted", "ground", "dirt", "unpaved", "sand", "pebblestone", "earth")
+    lines = []
+    for t, p_, c in ways:
+        hw = t.get("highway")
+        if hw in PW and t.get("tunnel") is None and t.get("layer", "0") not in ("-1", "-2") and not t.get("bridge"):
+            try:
+                w = float(t.get("width", "").split()[0])
+            except (ValueError, IndexError):
+                w = PW[hw]
+            w = float(np.clip(w, 1.0, 6.0))
+            s = t.get("surface", "")
+            sk = "paved" if s in PAVED or hw == "steps" else ("asphalt" if s == "asphalt" else ("loose" if s in LOOSE else ""))
+            g = Polygon(p_).buffer(0) if (c and t.get("area") == "yes") else LineString(p_).buffer(w / 2, cap_style=1)
+            lines.append((g, sk))
+    flowerbeds = [Polygon(p_).buffer(0) for t, p_, c in ways if c and len(p_) > 3 and t.get("landuse") == "flowerbed"]
+    gy_, gx_ = np.gradient(np.nan_to_num(mnt, nan=0.0), RES)
+    slope = np.hypot(gx_, gy_)
+    chm = np.nan_to_num(mns - mnt, nan=0.0)
+    R = PARK_RES
+    cnt = {k: 0.0 for k in ("lawn", "path", "bed", "flowers", "paved")}
+    slab_all = []
+    done = Polygon()
+    for nm, g0 in sorted(found, key=lambda t: -t[1].area):
+        g = g0.difference(done)
+        done = done.union(g0)
+        g = g.difference(hard)
+        if g.is_empty or g.area < 40:
+            continue
+        bx0, by0, bx1, by1 = g.bounds
+        bx0, by0 = math.floor(bx0) - 1, math.floor(by0) - 1
+        bx1, by1 = math.ceil(bx1) + 1, math.ceil(by1) + 1
+        nx, ny = int((bx1 - bx0) / R), int((by1 - by0) / R)
+        cx = bx0 + (np.arange(nx) + 0.5) * R
+        cy = by1 - (np.arange(ny) + 0.5) * R
+        CX, CY = np.meshgrid(cx, cy)
+        inside = contains_xy(g, CX, CY)
+        if inside.sum() < 200:
+            continue
+        # Photo, LiDAR on the grid.
+        pa0, pb0 = int((bx0 - X0) * k_), int((Y1 - by1) * k_)
+        pa1, pb1 = int(math.ceil((bx1 - X0) * k_)) + 1, int(math.ceil((Y1 - by0) * k_)) + 1
+        ph = np.asarray(ortho_hi.crop((pa0, pb0, pa1, pb1))).astype(np.float32)
+        fi = (CX - X0) * k_ - pa0 - 0.5
+        fj = (Y1 - CY) * k_ - pb0 - 0.5
+        o = np.stack([ndimage.map_coordinates(ph[..., k], [fj, fi], order=1, mode="nearest") for k in range(3)], -1)
+        ri = np.clip(((Y1 - CY) / RES).astype(int), 0, mnt.shape[0] - 1)
+        ci = np.clip(((CX - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
+        h = chm[ri, ci]
+        sl = slope[ri, ci]
+        exg = 2 * o[..., 1] - o[..., 0] - o[..., 2]
+        lum = o.mean(-1)
+        veg = (exg > 6) & (o[..., 1] >= o[..., 0])
+        dark = lum < 70                                  # deep shade or a tree crown: unknown
+        pale = (lum > 135) & (exg < 8) & (h < 0.6) & ~veg
+        taken = _taken_mask(gm, bx0, by1, nx, ny, R)
+        # OSM paths and flower beds, kept as vectors (smooth edges).
+        pk = {1: [], 2: [], 3: [], 0: []}                # 1 paved, 2 asphalt, 3 loose, 0 unknown
+        for lg, sk in lines:
+            if lg.intersects(g):
+                pk[{"paved": 1, "asphalt": 2, "loose": 3}.get(sk, 0)].append(lg.intersection(g))
+        pk = {k: unary_union(v) if v else Polygon() for k, v in pk.items()}
+        osm_paths = unary_union(list(pk.values()))
+        fbv = unary_union([q.intersection(g) for q in flowerbeds if q.intersects(g)] or [Polygon()])
+        # Classes from the photo and LiDAR: 1 lawn, 2 path, 3 bed.
+        cl = np.ones(inside.shape, np.int8)
+        cl[pale] = 2
+        cl[veg & (h > 0.35) & (h < 3.0)] = 3                # shrubs and hedges
+        unknown = (h >= 3.0) | dark                      # under the trees
+        # Unknown cells take the class of the nearest known one (a lawn
+        # runs on under a tree; a bed under a hedge of trees).
+        known = inside & ~unknown
+        if known.any():
+            _, (ir, ic) = ndimage.distance_transform_edt(~known, return_indices=True)
+            cl = np.where(unknown, cl[ir, ic], cl)
+        # A wood (the tree cover nearly closed over a big patch) is a bed of
+        # undergrowth, not lawn.
+        cover = ndimage.uniform_filter((h >= 3.0).astype(np.float32), size=int(6 / R))
+        cl[(cover > 0.85) & (cl == 1)] = 3
+        # Smooth the classes (soft vote over ~0.5 m), so their edges are
+        # curves, not the grid's steps.
+        vote = np.stack([ndimage.gaussian_filter((cl == c_).astype(np.float32), 2.0) for c_ in (1, 2, 3)])
+        cl = (np.argmax(vote, 0) + 1).astype(np.int8)
+        none = (sl > 0.8) | taken                        # cliffs and rockeries keep the rock shader
+        none = ndimage.binary_opening(none, iterations=2)
+
+        # (Overlays on a 1 cm grid: the raster outlines are full of nearly
+        # coincident edges that make plain GEOS overlays fail.)
+        G_ = 0.01
+        def A(x):                                         # polygons only (overlays drop slivers to lines)
+            ps = [q for q in shapely.get_parts(x) if q.geom_type == "Polygon" and not q.is_empty] if not x.is_empty else []
+            for q in list(shapely.get_parts(x)) if not x.is_empty else []:
+                if q.geom_type in ("MultiPolygon", "GeometryCollection"):
+                    ps += to_polys(q)
+            return MultiPolygon(ps) if ps else Polygon()
+        D = lambda x, y: A(shapely.difference(A(x), A(y), grid_size=G_))
+        I = lambda x, y: A(shapely.intersection(A(x), A(y), grid_size=G_))
+        U = lambda x, y: A(shapely.union(A(x), A(y), grid_size=G_))
+        P_ = lambda x: A(shapely.set_precision(A(x).buffer(0), G_))
+        gg = P_(g)
+        osm_p = P_(osm_paths)
+        fbv = P_(fbv)
+
+        def vec(mk):
+            if mk.sum() * R * R < 1.0:
+                return Polygon()
+            q = _runs_to_poly(mk, bx0, by1, R).simplify(0.3)
+            q = q.buffer(0.35).buffer(-0.7).buffer(0.35)
+            return I(P_(q), gg)
+        none_v = D(vec(none), osm_p)
+        avail = D(gg, none_v)
+        pieces = {}
+        pieces["osm_paths"] = I(osm_p, avail)
+        pieces["flowers"] = D(I(fbv, avail), osm_p)
+        taken_v = U(pieces["osm_paths"], pieces["flowers"])
+        pieces["pale"] = D(I(vec(cl == 2), avail), taken_v)
+        taken_v = U(taken_v, pieces["pale"])
+        pieces["bed"] = D(I(vec(cl == 3), avail), taken_v)
+        taken_v = U(taken_v, pieces["bed"])
+        pieces["lawn"] = D(avail, taken_v)
+        for k in pk:
+            pk[k] = P_(pk[k])
+        # Colours: the photo's greens are dull and hazy: it gives only the
+        # variation (drier, bluer patches) around a set lawn and leaf green.
+        def _around(f, ref, k=0.7):
+            r_ = np.array(hexrgb(ref), np.float32)
+            v_ = f / np.maximum(np.median(f.reshape(-1, 3), 0), 1.0)[None, None]
+            return np.clip(r_[None, None] * np.clip(v_, 0.75, 1.3) ** k, 0, 255)
+        lawn_c, _, _ = _park_colour(o, (cl == 1) & veg & ~dark, 1.5 / R, hexrgb(PARK_LAWN_C), sat=1.2)
+        lawn_c = _around(lawn_c, PARK_LAWN_C)
+        bed_c, _, _ = _park_colour(o, (cl == 3) & veg & ~dark, 1.5 / R, hexrgb(PARK_BED_C), sat=1.2)
+        bed_c = _around(bed_c, PARK_BED_C)
+        path_c, _, _ = _park_colour(o, pale, 2.0 / R, hexrgb("#d8cdb8"), sat=0.8, lum_to=196.0)
+        path_c = np.clip(path_c, 120, 238)
+        flat = lambda hx: np.broadcast_to(np.array(hexrgb(hx), np.float32), path_c.shape)
+        jobs = [(pieces["lawn"], PARK_LAWN, lawn_c, "lawn"), (pieces["bed"], PARK_BED, bed_c, "bed"),
+                (pieces["flowers"], PARK_FLOWERS, bed_c, "flowers"), (pieces["pale"], PARK_PATH, path_c, "path"),
+                (I(pk[1], pieces["osm_paths"]), PARK_PAVED, path_c, "paved"),
+                (D(I(pk[2], pieces["osm_paths"]), pk[1]), PARK_PATH, flat("#8d8c88"), "path"),
+                (D(D(I(pk[3], pieces["osm_paths"]), pk[1]), pk[2]), PARK_PATH,
+                 path_c * 0.4 + flat("#d6c49e") * 0.6, "path"),
+                (D(D(D(I(pk[0], pieces["osm_paths"]), pk[1]), pk[2]), pk[3]), PARK_PATH, path_c, "path")]
+        for poly, sty, cf, key in jobs:
+            if poly.is_empty:
+                continue
+            a_ = _park_slab(gm, poly, mntR, gz, sty, cf, bx0, by1, R)
+            cnt[key] += a_
+            if a_ > 0:
+                slab_all.append(poly)
+        PARKS["names"].append(nm or "(unnamed)")
+    PARKS["slabs"] = unary_union(slab_all) if slab_all else Polygon()
+    for k, v in cnt.items():
+        stats[f"park_{k}_m2"] = round(v)
+    stats["parks"] = len(PARKS["names"])
+    print("parks:", ", ".join(n for n in PARKS["names"] if n != "(unnamed)"))
+    return len(PARKS["names"])
+
+
+def _safe_pieces(poly, depth=0):
+    """Polygons Triangle can take: valid, no vertex used twice (rings that
+    touch at a corner); shrunk a little more each try until they are."""
+    out = []
+    for q in to_polys(poly):
+        q = shapely.set_precision(q, 0.01)
+        if q.is_empty or q.geom_type != "Polygon" or q.area < 0.6:
+            continue
+        vv = np.concatenate([np.asarray(r.coords)[:-1] for r in [q.exterior, *q.interiors]])
+        ok = q.is_valid and len(np.unique(np.round(vv * 100).astype(np.int64), axis=0)) == len(vv)
+        if ok:
+            out.append(q)
+        elif depth < 3:
+            out += _safe_pieces(q.buffer(-0.04 * (depth + 1), join_style=2).buffer(0), depth + 1)
+    return out
+
+
+def _park_slab(gm, poly, mntR, gz, style, cf, bx0, by1, R, lift=0.08, area=2.5):
+    """A ground slab like _slab, with a colour per vertex from the field cf."""
+    n_ = 0.0
+    # (Raster outlines touch themselves at corners; Triangle crashes on
+    # that, so the pieces are pulled apart a little first.)
+    poly = poly.buffer(-0.03, join_style=2).buffer(0.03, join_style=2).simplify(0.06)
+    for q in _safe_pieces(poly):
+        tr = triangulate(orient(q, 1.0), area=area)
+        if tr is None:
+            continue
+        v, tri = tr
+        z = mntR.sample(v[:, 0], v[:, 1])
+        if gz is not None:
+            fi, fj = (v[:, 0] - X0) / GRID, (Y1 - v[:, 1]) / GRID
+            z = np.fmax(z, ndimage.map_coordinates(gz, [fj, fi], order=1, mode="nearest"))
+        if not np.isfinite(z).any():
+            continue
+        z = np.where(np.isfinite(z), z, np.nanmedian(z))
+        zt = z[tri]
+        tri = tri[(zt.max(1) - zt.min(1)) < 2.5]
+        if not len(tri):
+            continue
+        ci = np.clip(((v[:, 0] - bx0) / R).astype(int), 0, cf.shape[1] - 1)
+        ri = np.clip(((by1 - v[:, 1]) / R).astype(int), 0, cf.shape[0] - 1)
+        col = cf[ri, ci]
+        P = enu_fast(v[:, 0], v[:, 1], z + lift)
+        uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+        gm.add(P, [0.0, 0.0, 1.0], col, GROUND, uv=uv, idx=tri, style=style)
+        n_ += q.area
+    return n_
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="download the inputs first")
@@ -12536,6 +12921,7 @@ def main():
     print("Pêcheurs garden…", peche_terrace(gm, bm, mnt_f, gz, stats), "m of sea wall,",
           stats.get("peche_walk_m2"), "m2 of walk")
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
+    print("parks…", parks(gm, bm, ways, pts, mnt_f, mns, ortho_hi, gz, fps, stats), "parks and gardens")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
