@@ -832,6 +832,16 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
                 dm2.polygon(xy(np.asarray(h.coords)), fill=0)
         img.paste(tuple(hexrgb(SW_PALE)), (0, 0) + img.size, ImageChops.multiply(mk_, mk2))
         d = ImageDraw.Draw(img)
+    if CONDA is not None:
+        # La Condamine's pedestrian streets in pale limestone with their
+        # dark sett strip, Square Gastaud in its salmon paving.
+        for q in to_polys(CONDA["ped_poly"]):
+            poly(np.asarray(q.exterior.coords), SW_PALE)
+        for t, ln in CONDA["ped"]:
+            line(np.asarray(ln.coords), CONDA_SETT, 1.8)
+        if CONDA["park"] is not None:
+            for q in to_polys(CONDA["park"]):
+                poly(np.asarray(q.exterior.coords), GASTAUD_PAVING)
     # Dashed centre lines on the larger roads.
     for t, pts in roads:
         if t["highway"] not in ("primary", "secondary", "tertiary", "trunk"):
@@ -4547,6 +4557,8 @@ def sidewalks_setup(ways, mnt, sea, feats):
         return None
     t = TRACK
     corridor = t["line"].buffer(SW_REACH)
+    if CONDA is not None:
+        corridor = corridor.union(CONDA["zone"])   # every street of La Condamine
     rp, rpts = _road_polys(ways)
     track_poly = t["line"].buffer(TRACK_HALF + 0.35)
     roads = unary_union([q for q in rp if q.intersects(corridor)] + [track_poly])
@@ -4590,6 +4602,12 @@ def sidewalks_setup(ways, mnt, sea, feats):
         other.append(QA["poly"].buffer(0.3))
     if MT is not None:
         other.append(MT["zone"])
+    if ARMES is not None:
+        other.append(ARMES["poly"].buffer(0.3))
+    if CONDA is not None:
+        other.append(CONDA["ped_poly"])
+        if CONDA["park"] is not None:
+            other.append(CONDA["park"])
     if TUNNEL is not None:
         other.append(TUNNEL["ground"].buffer(6))
         other.append(TUNNEL["approach"])
@@ -6313,8 +6331,10 @@ def add_tree(m, x, y, z, h, r, kind, rnd):
         lean = rnd.normal(0, 0.04, 2) * h
         fork = np.array([lean[0], lean[1], tz + (h - tz) * 0.2])
         limb([0, 0, 0], fork, max(0.2, r * 0.11), max(0.14, r * 0.07), bark)
-        base_g = np.array(hexrgb(rnd.choice(["#5c7a3c", "#66813f", "#56733a", "#6d8446", "#5b7547",
-                                             "#748450", "#61803f"])))
+        pal_ = {"olive": ["#8b9a70", "#82936a", "#94a27a"],       # silvery grey-green
+                "orange": ["#2f5a2b", "#365f2f", "#2c5428"]}.get(kind, [
+            "#5c7a3c", "#66813f", "#56733a", "#6d8446", "#5b7547", "#748450", "#61803f"])
+        base_g = np.array(hexrgb(rnd.choice(pal_)))
         base_g = base_g * (0.9 + 0.15 * rnd.random())
         rz = (h - tz) / 2
         cz = tz + rz
@@ -6331,6 +6351,13 @@ def add_tree(m, x, y, z, h, r, kind, rnd):
             rr_ = r * rnd.uniform(0.5, 0.66)
             clump(c_, np.array([rr_, rr_, rz * rnd.uniform(0.55, 0.7)]), base_g * (0.94 + 0.12 * rnd.random()))
         clump([lean[0], lean[1], cz + rz * 0.35], np.array([r * 0.58, r * 0.58, rz * 0.6]), base_g * 1.05)
+        if kind == "orange":
+            # Bitter oranges on the street trees of La Condamine.
+            for _ in range(10):
+                a_, e_ = rnd.uniform(0, 2 * math.pi), rnd.uniform(-0.4, 0.8)
+                _ball(m, x + lean[0] + math.cos(a_) * math.cos(e_) * r * 0.95,
+                      y + lean[1] + math.sin(a_) * math.cos(e_) * r * 0.95,
+                      z + cz + math.sin(e_) * rz * 0.95, 0.09, np.array(hexrgb("#e8871e")), None, nu=6, nv=4)
 
 
 def no_tree_zones(ways):
@@ -6353,6 +6380,12 @@ def no_tree_zones(ways):
         out.append(QA["poly"].buffer(3.0))         # quai_albert() plants its own pines
     if ARMES is not None:
         out.append(ARMES["zone"])                  # armes_trees() plants the square's own
+    if CONDA is not None:                          # condamine() plants these
+        if CONDA["park"] is not None:
+            out.append(CONDA["park"].buffer(1.0))
+        out += [ln.buffer(CONDA_PED_W) for t, ln in CONDA["ped"] if t.get("name") in ORANGE_STREETS]
+        out += [LineString(p).intersection(CONDA["zone"]).buffer(9.0) for t, p, c in ways
+                if t.get("name") == "Rue Grimaldi" and t.get("highway") in ROAD_W and len(p) >= 2]
     al = allee_line(ways)
     if al is not None and al.length > 30:
         # The Allée François Blanc is open paving from the square down to
@@ -7474,6 +7507,7 @@ def _ball(m, cx, cy, z, r, col, style, nu=10, nv=6):
 # Palace, is laid in the same brick and grey stone.
 ARMES_NAME = "Place d'Armes"
 ARMES = None                  # {"poly", "zone", "o", "u", "v", "rampe"}
+CONDA = None                  # {"zone", "park", "ped", "ped_poly"}
 ARMES_BAND = 4.7              # m between the grey stone bands (the photo's period)
 ARMES_PHASE = (0.0, -7.6)     # where a band crosses, m along / across the grid from the square's middle
 ARMES_C = (1055944.0, 6302584.0)
@@ -7489,6 +7523,16 @@ ARMES_IRON = "#3a2a22"        # the lamps and bollards: dark brown cast iron
 ARMES_KIOSK = "#4b3125"       # varnished dark wood
 ARMES_KIOSK_ROOF = "#6e4430"  # the barrel roofs, brown
 ARMES_CANOPY = "#c3312d"      # the market stalls' red canopies
+
+
+# La Condamine, the district between the Rocher, the port and Sainte-Dévote
+# (metres east / north of ARMES_C): its streets get the pavements, kerbs
+# and street trees the circuit has, and its walls their photo colours.
+CONDAMINE = [(-130, -40), (60, -40), (250, 40), (250, 520), (-130, 520)]
+
+
+def condamine_zone():
+    return Polygon([(ARMES_C[0] + e, ARMES_C[1] + n) for e, n in CONDAMINE])
 
 
 def armes_setup(ways):
@@ -7691,12 +7735,12 @@ def armes_paving(gm, mntR, gz, stats):
     return round(area)
 
 
-def armes_trees(m, mns, mnt, ortho, fps, stats):
-    """The square's trees where the LiDAR has them (the generic tree finder
-    wants green in the photo and missed the tall dark pines): tall ones are
-    the pines along the road and by the market hall, low ones small leafy
-    trees. The market's red canopies are not trees."""
-    zone = ARMES["zone"].difference(unary_union([p for p in fps if p.distance(ARMES["poly"]) < 15] or [Polygon()]))
+def _zone_trees(m, zone, mns, mnt, ortho, fps, kindfn, hmax=24.0, rad_k=0.85, seed=31):
+    """Trees where the LiDAR canopy peaks inside zone (buildings near it cut
+    out; red awnings and canopies are not trees). kindfn(h) names the kind."""
+    zone = zone.difference(unary_union([p for p in fps if p.distance(zone) < 15] or [Polygon()]))
+    if zone.is_empty:
+        return 0
     x0, y0, x1, y1 = zone.bounds
     c0, c1 = int((x0 - X0) / RES), int((x1 - X0) / RES)
     r0, r1 = int((Y1 - y1) / RES), int((Y1 - y0) / RES)
@@ -7708,7 +7752,7 @@ def armes_trees(m, mns, mnt, ortho, fps, stats):
     inz = contains_xy(zone, gx, gy)
     sm = ndimage.gaussian_filter(np.where(inz & ~red, chm, 0), 1.5)
     mx = ndimage.maximum_filter(sm, size=9)
-    rnd = np.random.default_rng(31)
+    rnd = np.random.default_rng(seed)
     n_ = 0
     for r, c in np.argwhere((sm == mx) & (sm > 3.2) & inz):
         h = float(min(chm[max(0, r - 2):r + 3, max(0, c - 2):c + 3].max(), 24))
@@ -7718,9 +7762,18 @@ def armes_trees(m, mns, mnt, ortho, fps, stats):
         z = float(mnt[r0 + r, c0 + c])
         if not np.isfinite(z):
             continue
-        kind = "pine" if h > 11 else "broad"
-        add_tree(m, x, y, z, h, rad * (0.9 if kind == "pine" else 0.85), kind, rnd)
+        kind = kindfn(h)
+        add_tree(m, x, y, z, min(h, hmax), rad * (0.9 if kind == "pine" else rad_k), kind, rnd)
         n_ += 1
+    return n_
+
+
+def armes_trees(m, mns, mnt, ortho, fps, stats):
+    """The square's trees where the LiDAR has them (the generic tree finder
+    wants green in the photo and missed the tall dark pines): tall ones are
+    the pines along the road and by the market hall, low ones small leafy
+    trees. The market's red canopies are not trees."""
+    n_ = _zone_trees(m, ARMES["zone"], mns, mnt, ortho, fps, lambda h: "pine" if h > 11 else "broad")
     stats["armes_trees"] = n_
     return n_
 
@@ -7946,6 +7999,193 @@ def place_darmes(gm, m, tm, ways, pts, mns, mnt, ortho, ortho_hi, gz, fps, stats
     armes_paving(gm, mntR, gz, stats)
     armes_trees(tm, mns, mnt, ortho, fps, stats)
     return armes_furniture(m, ways, pts, mntR, ortho_hi, stats)
+
+
+# La Condamine beyond the square. Square Théodore Gastaud (1923, redone in
+# 2000 over a car park): salmon paving, the white "romantic" bandstand in
+# the middle (the white octagon in the 20 cm photo, 5 m high in the LiDAR),
+# olive trees pruned "Tuscan" style (Visit Monaco), the bronze "Le lion et
+# la Sirène". The pedestrian streets (Rue Princesse Caroline, Rue de Millo,
+# Rue Langlé, Rue Louis Notari...): pale limestone slabs with a strip of
+# dark setts down the middle and bitter-orange trees in stone pits (street
+# photos 2021). Rue Grimaldi: orange trees along both kerbs (2019).
+GASTAUD_NAME = "Square Théodore Gastaud"
+GASTAUD_BANDSTAND = (69.3, 149.6)          # m from ARMES_C
+GASTAUD_PAVING = "#c99178"
+CONDA_PED_W = 7.0                          # m either side of a pedestrian street's line (walls clip it)
+CONDA_SETT = "#6e5a52"
+ORANGE_STREETS = ("Rue Grimaldi", "Rue Princesse Caroline")
+
+
+def condamine_setup(ways):
+    """The park and the pedestrian streets (their outline before the
+    buildings are cut out), for the pavements to leave alone."""
+    zone = condamine_zone()
+    park = None
+    for t, p, c in ways:
+        if c and t.get("name") == GASTAUD_NAME and len(p) > 3:
+            park = Polygon(p).buffer(0)
+    ped = [(t, LineString(p)) for t, p, c in ways
+           if t.get("highway") == "pedestrian" and not c and t.get("area") != "yes" and len(p) >= 2
+           and LineString(p).intersects(zone)]
+    pp = unary_union([ln.buffer(CONDA_PED_W, cap_style=2) for _, ln in ped]) if ped else Polygon()
+    rp, _ = _road_polys(ways)
+    pp = pp.difference(unary_union([q for q in rp if q.intersects(zone)] or [Polygon()]))
+    return {"zone": zone, "park": park, "ped": ped, "ped_poly": pp}
+
+
+def _slab(gm, poly, mntR, gz, style, lift=0.08, area=3):
+    n_ = 0.0
+    for q in to_polys(poly):
+        q = shapely.set_precision(q.simplify(0.05), 0.01)
+        if q.is_empty or q.geom_type != "Polygon" or q.area < 1 or not q.is_valid:
+            continue
+        tr = triangulate(orient(q, 1.0), area=area)
+        if tr is None:
+            continue
+        v, tri = tr
+        z = mntR.sample(v[:, 0], v[:, 1])
+        if gz is not None:
+            fi, fj = (v[:, 0] - X0) / GRID, (Y1 - v[:, 1]) / GRID
+            z = np.fmax(z, ndimage.map_coordinates(gz, [fj, fi], order=1, mode="nearest"))
+        if not np.isfinite(z).any():
+            continue
+        z = np.where(np.isfinite(z), z, np.nanmedian(z))
+        zt = z[tri]
+        tri = tri[(zt.max(1) - zt.min(1)) < 2.0]
+        P = enu_fast(v[:, 0], v[:, 1], z + lift)
+        uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=style)
+        n_ += q.area
+    return n_
+
+
+def bandstand(m, c, z, stats):
+    """An octagonal bandstand: a stone base with steps, eight slim white
+    cast-iron columns, a railing, a frieze and a white zinc roof rising to
+    a finial."""
+    R, base_h, col_h = 4.2, 1.0, 2.9
+    stone = np.array(hexrgb("#e6dccb"))
+    white = np.array(hexrgb("#f2f0ea"))
+    ang = np.linspace(0, 2 * math.pi, 9)[:-1] + math.pi / 8
+    ring = lambda r_: Polygon([(c[0] + r_ * math.cos(a), c[1] + r_ * math.sin(a)) for a in ang])
+    add_walls(m, orient(ring(R), 1.0), z - 0.3, z + base_h, z, 10, stone, PLAIN)
+    add_roof(m, orient(ring(R), 1.0), z + base_h, stone * 1.03, False)
+    zt = z + base_h
+    for a in ang:
+        q = (c[0] + (R - 0.3) * math.cos(a), c[1] + (R - 0.3) * math.sin(a))
+        _box(m, q[0], q[1], (math.cos(a), math.sin(a)), 0.16, 0.16, zt, zt + col_h, white)
+    pr = np.asarray(ring(R - 0.3).exterior.coords)
+    A, B = pr[:-1], pr[1:]
+    sel = np.arange(len(A)) != 0                 # the way in, facing east
+    railing(m, A[sel], B[sel], np.full(sel.sum(), zt), "#f2f0ea", h=0.9)
+    fr = orient(ring(R + 0.15), 1.0)
+    add_walls(m, fr, zt + col_h - 0.5, zt + col_h, zt, 10, white, PLAIN)
+    add_roof(m, orient(ring(R + 0.15).difference(ring(R - 0.2)), 1.0), zt + col_h, white * 0.95, False)
+    # Roof: an octagonal bell, flaring at the eaves, to a lantern and finial.
+    prof = [(R + 0.6, zt + col_h - 0.15), (R * 0.7, zt + col_h + 0.55), (R * 0.35, zt + col_h + 1.2),
+            (0.5, zt + col_h + 1.55)]
+    for (r0, z0), (r1, z1) in zip(prof[:-1], prof[1:]):
+        p0 = np.array([(c[0] + r0 * math.cos(a), c[1] + r0 * math.sin(a)) for a in ang])
+        p1 = np.array([(c[0] + r1 * math.cos(a), c[1] + r1 * math.sin(a)) for a in ang])
+        j = np.arange(8); jn = (j + 1) % 8
+        E0 = enu_fast(p0[:, 0], p0[:, 1], np.full(8, z0))
+        E1 = enu_fast(p1[:, 0], p1[:, 1], np.full(8, z1))
+        for sg in (1.0, -1.0):
+            _quad(m, E0[j], E0[jn], E1[jn], E1[j], np.array(hexrgb("#e9eaea")) * (1.0 if sg > 0 else 0.7),
+                  np.tile([0.0, 0.0, sg], (8, 1)))
+    _box(m, c[0], c[1], (1.0, 0.0), 0.7, 0.7, zt + col_h + 1.55, zt + col_h + 2.1, white)
+    _ball(m, c[0], c[1], zt + col_h + 2.3, 0.18, np.array(hexrgb("#c9a548")), 6)
+    # Steps up on the east side.
+    for k in range(4):
+        q = (c[0] + R + 0.25 + 0.3 * (3 - k), c[1])
+        _box(m, q[0], q[1], (1.0, 0.0), 0.32, 2.2, z - 0.3, z + base_h * (k + 1) / 4, stone)
+    stats["bandstands"] = stats.get("bandstands", 0) + 1
+
+
+def condamine(gm, m, tm, ways, pts, mns, mnt, ortho, gz, fps, stats):
+    if CONDA is None:
+        return 0
+    mntR = Raster(mnt)
+    blds = unary_union([p for p in fps if p.intersects(CONDA["zone"].buffer(20))])
+    rp, _ = _road_polys(ways)
+    roads = unary_union([q for q in rp if q.intersects(CONDA["zone"])])
+    rnd = np.random.default_rng(57)
+    # Pedestrian streets: limestone slabs, a sett strip down the middle.
+    ped = CONDA["ped_poly"].difference(blds.buffer(0.05)).difference(roads)
+    if ARMES is not None:
+        ped = ped.difference(ARMES["poly"].buffer(0.3))
+    if CONDA["park"] is not None:
+        ped = ped.difference(CONDA["park"])
+    stats["conda_ped_m2"] = round(_slab(gm, ped, mntR, gz, SLAB))
+    sett = unary_union([ln.buffer(0.9, cap_style=2) for _, ln in CONDA["ped"]]).intersection(ped.buffer(-1.5))
+    stats["conda_sett_m2"] = round(_slab(gm, sett, mntR, gz, None, lift=0.1))
+    # Square Gastaud.
+    n_ = 0
+    if CONDA["park"] is not None:
+        park = CONDA["park"]
+        stats["gastaud_m2"] = round(_slab(gm, park.difference(blds), mntR, gz, None))
+        c = np.array(ARMES_C) + GASTAUD_BANDSTAND
+        zc = float(np.nan_to_num(mntR.sample(np.array([c[0]]), np.array([c[1]]))[0], nan=6.9))
+        bandstand(m, c, zc, stats)
+        # Olive trees where the LiDAR has the square's trees, round the
+        # bandstand (not on it).
+        stats["gastaud_olives"] = _zone_trees(tm, park.buffer(1.0).difference(Point(*c).buffer(6.0)), mns, mnt, ortho,
+                                              fps, lambda h: "olive", hmax=7.0, rad_k=0.8)
+        for (x, y), t in pts:
+            if t.get("name") == "Le lion et la Sirène" and park.buffer(5).contains(Point(x, y)):
+                z = float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=zc))
+                _box(m, x, y, (1.0, 0.0), 1.6, 1.0, z - 0.2, z + 1.1, np.array(hexrgb("#d9d0bf")))
+                _box(m, x, y, (1.0, 0.0), 1.3, 0.6, z + 1.1, z + 2.0, np.array(hexrgb("#5a4a36")), style=6)
+                _ball(m, x + 0.35, y, z + 2.2, 0.35, np.array(hexrgb("#5a4a36")), 6)
+                stats["gastaud_statue"] = 1
+        # Benches round the paths, from the map.
+        for (x, y), t in pts:
+            if t.get("amenity") == "bench" and park.buffer(2).contains(Point(x, y)):
+                z = float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=zc))
+                _box(m, x, y, (1.0, 0.0), 1.8, 0.5, z + 0.4, z + 0.47, np.array(hexrgb("#6b4a32")))
+                _box(m, x, y, (1.0, 0.0), 1.7, 0.4, z - 0.1, z + 0.4, np.array(hexrgb("#2c2a27")))
+    # Bitter-orange street trees: in the pedestrian streets (one row, 3 m
+    # off the middle, either side in turn) and along Rue Grimaldi's kerbs.
+    avoid = blds.buffer(2.2).union(roads.buffer(0.6) if not roads.is_empty else Polygon())
+    if ARMES is not None:
+        avoid = avoid.union(ARMES["zone"])
+    if CONDA["park"] is not None:
+        avoid = avoid.union(CONDA["park"].buffer(2))
+    placed = []
+    for (x, y), t in pts:
+        if t.get("natural") == "tree" and CONDA["zone"].contains(Point(x, y)):
+            placed.append((x, y))
+    lines = [(ln, 3.0, True) for t, ln in CONDA["ped"] if t.get("name") in ORANGE_STREETS]
+    for t, p, c in ways:
+        if t.get("name") == "Rue Grimaldi" and t.get("highway") in ROAD_W and not t.get("tunnel") and len(p) >= 2:
+            ln = LineString(p).intersection(CONDA["zone"])
+            for l_ in getattr(ln, "geoms", [ln]):
+                if l_.length > 10:
+                    lines.append((l_, ROAD_W[t["highway"]] / 2 + 0.9, False))
+                    lines.append((l_, -(ROAD_W[t["highway"]] / 2 + 0.9), False))
+    n_o = 0
+    for ln, off, alt in lines:
+        for k, s_ in enumerate(np.arange(4.0, ln.length - 3.0, 9.0)):
+            a = np.array(ln.interpolate(s_).coords[0])
+            b = np.array(ln.interpolate(min(ln.length, s_ + 0.5)).coords[0])
+            d = b - a
+            if np.hypot(*d) < 1e-6:
+                continue
+            nrm = np.array([-d[1], d[0]]) / np.hypot(*d)
+            q = a + nrm * (off if not alt or k % 2 == 0 else -off)
+            if avoid.contains(Point(*q)) or (placed and min(np.hypot(px_ - q[0], py_ - q[1]) for px_, py_ in placed) < 5):
+                continue
+            if not off_track(q[0], q[1], 2.0):
+                continue
+            z = float(mntR.sample(np.array([q[0]]), np.array([q[1]]))[0])
+            if not np.isfinite(z):
+                continue
+            add_tree(tm, q[0], q[1], z, rnd.uniform(4.0, 5.2), rnd.uniform(1.3, 1.7), "orange", rnd)
+            placed.append(tuple(q))
+            n_o += 1
+    stats["conda_orange_trees"] = n_o
+    return n_o
 
 
 def street_features(m, ways, pts, mnt, stats):
@@ -8958,8 +9198,9 @@ def main():
     MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
     global PORTIER
     PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
-    global ARMES
+    global ARMES, CONDA
     ARMES = armes_setup(ways)
+    CONDA = condamine_setup(ways)
     mnt_f = np.where(sea, np.nan, mnt)
     global TUNNEL
     TUNNEL = load_tunnel()
@@ -9084,6 +9325,7 @@ def main():
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     print("Quai Albert 1er…", quai_albert(gm, bm, tm, ways, pts, Raster(mnt_f), stats, fps), "pines")
     print("Place d'Armes…", place_darmes(gm, bm, tm, ways, pts, mns, mnt_f, ortho, ortho_hi, gz, fps, stats), "stalls")
+    print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
