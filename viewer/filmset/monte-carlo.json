@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6423331,
+ "triangles": 6428911,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -55,28 +55,28 @@
    ]
   ]
  },
- "buildings": 2911,
+ "buildings": 2910,
  "dropped": 61,
- "rooftop": 128,
+ "rooftop": 127,
  "roof_plants": 106,
- "levels": 2915,
+ "levels": 2912,
  "towers": 10,
  "trees": 3749,
  "yachts": 942,
- "real_floors": 1339,
+ "real_floors": 1337,
  "styles": [
-  566,
+  565,
   274,
   7,
   664,
-  646,
+  644,
   134,
   2,
   185,
   433
  ],
- "balconies": 1094,
- "shop_buildings": 227,
+ "balconies": 1079,
+ "shop_buildings": 225,
  "prison": {
   "roof": 48.6,
   "windows": 46
@@ -85,6 +85,18 @@
  "verandas": 3,
  "hdp": 1,
  "casino_halls": 6,
+ "heracles_wings": {
+  "south": {
+   "base": 3.59,
+   "top": 25.49,
+   "loggias": 18
+  },
+  "north": {
+   "base": 3.56,
+   "top": 22.71,
+   "loggias": 40
+  }
+ },
  "heracles_awnings": 138,
  "heracles": {
   "base": 3.92,
@@ -121,9 +133,9 @@
   15.8,
   20.7
  ],
- "photo_facade_colours": 58,
- "photo_facade_types": 40,
- "photo_roofs": 2863,
+ "photo_facade_colours": 56,
+ "photo_facade_types": 38,
+ "photo_roofs": 2860,
  "photo_lean": [
   0.010000000000000342,
   -0.019999999999999685
@@ -151,7 +163,7 @@
  "road_m": 82249,
  "kerb_m": 62953,
  "lamps": 1849,
- "spectators": 5592,
+ "spectators": 5638,
  "sidewalk_m2": 56844,
  "kerb_stone_m": 13052,
  "kerb_red_white_m": 821,
@@ -205,7 +217,7 @@
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
  "track_clear": true,
- "roof_kit": 3933,
+ "roof_kit": 3935,
  "roof_texels_per_m": 3.22,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
