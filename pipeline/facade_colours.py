@@ -89,9 +89,10 @@ def list_images(token):
     return list(out.values())
 
 
-def walls_facing_track(feats, mnt, mns):
+def walls_facing_track(feats, mnt, mns, zone=None, streets=None):
     """(cleabs, a, b, outward normal, ground, top) for each wall of 6 m or more
-    that faces the circuit within 40 m."""
+    that faces the circuit within 40 m (or, given a zone and the streets'
+    outline, each wall in the zone that faces a street)."""
     tl = bf.Raster(mnt)
     ts = bf.Raster(mns)
     walls, polys = [], []
@@ -107,7 +108,10 @@ def walls_facing_track(feats, mnt, mns):
                 continue
             if bf.TUNNEL is not None and poly.intersects(bf.TUNNEL["bld"]):
                 continue                    # over the tunnel: photos there show its ceiling
-            if float(bf.track_dist(poly.centroid.x, poly.centroid.y)[0]) > 90:
+            if zone is not None:
+                if not zone.intersects(poly):
+                    continue
+            elif float(bf.track_dist(poly.centroid.x, poly.centroid.y)[0]) > 90:
                 continue
             poly = orient(poly.simplify(0.35), 1.0)
             ring = np.asarray(poly.exterior.coords)[:, :2]
@@ -118,9 +122,13 @@ def walls_facing_track(feats, mnt, mns):
                 u = (b - a) / L
                 out = np.array([u[1], -u[0]])
                 mid = (a + b) / 2
-                d_mid = float(bf.track_dist(*(mid + out * 2.0))[0])
-                if d_mid > 40 or float(bf.track_dist(*(mid + out * 8))[0]) > d_mid + 1:
-                    continue
+                if zone is not None:
+                    if streets.distance(shapely.Point(*(mid + out * 2.5))) > 3.0:
+                        continue
+                else:
+                    d_mid = float(bf.track_dist(*(mid + out * 2.0))[0])
+                    if d_mid > 40 or float(bf.track_dist(*(mid + out * 8))[0]) > d_mid + 1:
+                        continue
                 # Where the wall starts: the higher of the ground just outside
                 # and just inside it, so a building on a cliff or retaining
                 # wall is sampled above the rock, not on it.
@@ -227,7 +235,16 @@ def main():
     bf.TRACK = bf.load_track()
     bf.TUNNEL = bf.load_tunnel()
     feats = json.load(open(bf.RAW / "bdtopo.json"))["features"]
-    walls, polys = walls_facing_track(feats, mnt, mns)
+    zone = streets = None
+    if "--condamine" in sys.argv:
+        # La Condamine: every wall on a street in the district, added to the
+        # circuit's (which keep their colour).
+        zone = bf.condamine_zone()
+        ways, _ = bf.load_osm()
+        streets = shapely.unary_union([LineString(p_).buffer(bf.ROAD_W.get(t.get("highway"), 6.0) / 2 + 1.0)
+                                       for t, p_, c in ways if t.get("highway") and len(p_) >= 2
+                                       and LineString(p_).intersects(zone)])
+    walls, polys = walls_facing_track(feats, mnt, mns, zone, streets)
     print(len(walls), "walls face the circuit,", len({w[0] for w in walls}), "buildings")
     tree_b = STRtree(polys)
 
@@ -360,6 +377,9 @@ def main():
         rgb = np.array(colorsys.hsv_to_rgb(h, s, V)) * 255
         result[cl] = {"colour": to_hex(rgb), "photos": len(ss)}
     print(len(result), "buildings coloured of", len({w[0] for w in walls}))
+    if zone is not None:
+        old = json.load(open(OUT_JSON))["buildings"] if OUT_JSON.exists() else {}
+        result = {**result, **old}
     OUT_JSON.write_text(json.dumps({
         "source": "Mapillary contributors (CC-BY-SA 4.0)",
         "method": "median wall colour 4-12 m up, sky/trees/windows dropped; brightness mapped to V 0.72-0.95",
