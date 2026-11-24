@@ -1027,6 +1027,8 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             poly(np.asarray(q.exterior.coords), QA_ASPHALT)
         for q in to_polys(QA["walk"]):
             poly(np.asarray(q.exterior.coords), QA_WALK)
+    # The breakwater's abutment: asphalt, walks and the Solarium's decks.
+    digue_paint(poly, line)
     if ARMES is not None:
         # Place d'Armes and the Rampe Major in their brick red (the viewer
         # reads the shade against it and lays the bricks).
@@ -3388,6 +3390,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not STADE_DONE:
                     STADE_DONE.append(1)
                     footprint.append(stade_louis_ii(m, mns, mntR, photo, STADE_POLY, stats))
+                continue
+            if key in DIGUE_PARTS:
+                # The breakwater's terminal and raised walk: digue() builds
+                # the whole thing (main), the mask takes its plan once.
+                if not DIGUE_DONE:
+                    DIGUE_DONE.append(1)
+                    footprint.append(digue_footprint())
                 continue
             if key == CHAPITEAU:
                 footprint.append(chapiteau(m, mntR, stats))
@@ -6910,6 +6919,7 @@ def no_tree_zones(ways):
         out += [crowd_free(a, b, TRACK_HALF + 10.0) for a, b in CROWD_ZONES]
     if QA is not None:
         out.append(QA["poly"].buffer(3.0))         # quai_albert() plants its own pines
+    out.append(digue_zone())                       # digue() plants the abutment's walk
     if FM is not None:
         out += [c.buffer(1.0) for c in FM["courts"]]
     if TUNNEL is not None and "open_ground" in TUNNEL:
@@ -12453,6 +12463,174 @@ def chapiteau(m, mntR, stats):
     return Polygon(pts)
 
 
+# ------------------------------------------------------------- the Digue ----
+# Port Hercule's semi-floating breakwater (2002, 352 m by 28 m), moored by a
+# giant ball joint to its abutment at the foot of Fort Antoine, and that
+# abutment's platform: a car park, a tree-lined walk and the Solarium's
+# sunbathing decks stepping down to the sea. The LiDAR terrain model has no
+# ground on the floating part (it is "sea"), so BD TOPO's two outlines on it
+# (the cruise terminal, the raised walk) came out as blocks standing in the
+# water, and the abutment was painted like sand with lawns (the photo's tents
+# and the canopy finder). Built here from the IGN 20 cm photo (2023), the
+# LiDAR surface model's levels (2021: harbour deck 3.0-3.1 m, raised walk
+# 8.8 m by the terminal and 7.1 m beyond, terminal roof 14.1 m) and Mapillary
+# photos taken from Fort Antoine and the abutment (2017-2021): a long pale
+# concrete deck with a dark asphalt lane on the harbour side, a high pale
+# walk along the sea side behind a parapet, the terminal's red-brown block
+# over the lane, a scalloped lower walk at the sea's edge and the head's
+# low white building with the port light.
+# Frame: s along the breakwater from the abutment (m), t across, out to sea
+# (south-east) positive; the harbour face is at t = DIGUE_HARBOUR.
+DIGUE_O = (1056645.46, 6302662.51)
+DIGUE_U = (280.54, 382.80)
+DIGUE_PARTS = ("BATIMENT0000002009026510", "BATIMENT0000002009010575",
+               "BATIMENT0000000074074333", "BATIMENT0000002009009578")
+DIGUE_DONE = []
+DIGUE_ROOT, DIGUE_END = 126.0, 474.6     # s: the floating deck's start (the ball joint) and the head
+DIGUE_HARBOUR = -28.5                    # t of the harbour face (the sea face is t = 0)
+DIGUE_DECK = 3.1                         # m NGF: the lane, the quay edge and the lower sea walk
+DIGUE_WALK_HI = 8.8                      # the raised walk from the root to the terminal's end
+DIGUE_WALK_LO = 7.1                      # ... and beyond, toward the head
+DIGUE_STEP_S = 330.0                     # s where the raised walk steps down
+DIGUE_TERMINAL = (215.0, 322.0, -22.0, -8.0, 14.1)
+DIGUE_CONCRETE = "#d7d2c7"               # the deck's pale concrete
+DIGUE_WALL = "#c9c3b6"                   # its faces
+DIGUE_ASPHALT = "#5f6266"
+DIGUE_TERMINAL_COL = "#a9533f"           # red-brown cladding (Mapillary 2017)
+DIGUE_TERMINAL_ROOF = "#8e5446"
+# The abutment, in the same frame: (s0, s1, t0, t1) boxes of what the photo
+# shows. Levels from the LiDAR terrain model.
+DIGUE_SOLARIUM = [(8.0, 140.0, 0.5, 5.5, 4.0), (8.0, 140.0, 5.5, 10.5, 3.0), (8.0, 140.0, 10.5, 14.0, 1.6)]
+DIGUE_PAINT = [
+    ((22.0, 140.0, -95.0, -11.0), "#6d6f72"),      # the car park, the boat yard and the Quai Rainier loop's asphalt
+    ((30.0, 140.0, -11.0, -3.0), "#c9c5bc"),       # the pale walk where the tents stand in summer
+    ((5.0, 140.0, -3.0, 0.5), "#8c5d4e"),          # the red-brown walk under the trees
+    ((20.0, 40.0, -20.0, -9.0), "#9b6a58"),        # the terrace with round planters under the Fort
+    ((8.0, 140.0, 0.5, 14.5), "#e2dccf"),          # the Solarium's decks
+]
+DIGUE_BAYS = [((-30.5, -25.5), (60.0, 100.0)), ((-25.5, -20.5), (60.0, 100.0))]
+
+
+def digue_frame(m=None):
+    return Frame(m, DIGUE_O, DIGUE_U)
+
+
+def digue_zone():
+    """The breakwater and the abutment's decks (no LiDAR trees, no lawn)."""
+    F = digue_frame()
+    return unary_union([F.poly(DIGUE_ROOT - 2.0, DIGUE_END + 1.0, DIGUE_HARBOUR - 0.5, 0.5),
+                        F.poly(26.0, 142.0, -11.0, 15.0)])
+
+
+def digue_paint(poly, line):
+    """The abutment's ground map (paint_ground's poly and line helpers)."""
+    F = digue_frame()
+    for (s0, s1, t0, t1), col in DIGUE_PAINT:
+        poly(np.asarray(F.poly(s0, s1, t0, t1).exterior.coords), col)
+    # The car park's bays: white lines across two rows (20 cm photo).
+    for (t0, t1), (sa, sb) in DIGUE_BAYS:
+        for s in np.arange(sa, sb + 0.1, 2.5):
+            line([F.xy(s, t0), F.xy(s, t1)], "#c4c3be", 0.15)
+    # The decks' step edges, a darker line each.
+    for s0, s1, t0, t1, z in DIGUE_SOLARIUM[1:]:
+        line([F.xy(s0, t0), F.xy(s1, t0)], "#b9b2a4", 0.35)
+
+
+def digue(m, tm, mntR, stats):
+    F = digue_frame(m)
+    C = lambda h: np.array(hexrgb(h), float)
+    conc, wall, asph = C(DIGUE_CONCRETE), C(DIGUE_WALL), C(DIGUE_ASPHALT)
+    r0, r1, th, d = DIGUE_ROOT, DIGUE_END, DIGUE_HARBOUR, DIGUE_DECK
+    ts0, ts1, tt0, tt1, troof = DIGUE_TERMINAL
+    bottom = -2.0
+    # The hull: plain concrete faces into the water, a darker wet band at
+    # the waterline, and the deck. The lane is asphalt between a pale quay
+    # edge (with bollards) and the raised walk's wall.
+    F.box(r0, r1, th, 0.0, bottom, d, wall, top=False, sides="tTS")
+    F.box(r0, r1, th - 0.02, 0.02, 0.2, 1.1, wall * 0.72, top=False, sides="tTS")
+    F.box(r0, r1, th, th + 1.6, d, d + 0.06, conc)                                  # quay edge
+    F.box(r0, r1, th + 1.6, -12.0, d, d + 0.03, asph)                               # the lane
+    for s in np.arange(r0 + 6.0, r1 - 4.0, 12.0):
+        _cyl(m, *F.xy(s, th + 0.5), d, d + 0.55, 0.22, C("#2f3133"), sides=8)       # bollards
+    # A white dashed line down the lane.
+    for s in np.arange(r0 + 4.0, r1 - 12.0, 9.0):
+        F.box(s, s + 4.5, -19.9, -19.75, d + 0.03, d + 0.05, C("#e4e2dc"), sides="")
+    # The raised walk along the sea side: 8.8 m from the root to the
+    # terminal's end, then 7.1 m toward the head behind a lower sea walk
+    # (3.1 m) with its scalloped edge (the wave chambers' curved tops).
+    lo_t0 = -4.5
+    hi = [(r0 + 14.0, ts0, -12.0, 0.0), (ts0, ts1, tt1, 0.0), (ts1, DIGUE_STEP_S, -14.0, 0.0)]
+    for s0, s1, t0, t1 in hi:
+        F.box(s0, s1, t0, t1, d, DIGUE_WALK_HI, conc, sides="stT" if s0 == r0 + 14.0 else "tT")
+    F.box(DIGUE_STEP_S, 440.0, -12.0, lo_t0, d, DIGUE_WALK_LO, conc, sides="tTS")
+    F.box(DIGUE_STEP_S, DIGUE_STEP_S + 0.01, -14.0, lo_t0, DIGUE_WALK_LO, DIGUE_WALK_HI, conc, top=False, sides="S")
+    F.box(DIGUE_STEP_S, r1, lo_t0, 0.0, d, d + 0.05, conc * 0.98)                    # the lower sea walk
+    for s in np.arange(DIGUE_STEP_S + 4.0, r1 - 6.0, 7.4):
+        F.drum(s, 0.0, d, d + 0.55, 3.1, conc * 0.93, n=10, th0=math.pi, th1=2 * math.pi)
+        F.cone(s, 0.0, d + 0.55, 3.1, 0.25, conc * 0.97, n=10, th0=math.pi, th1=2 * math.pi, kind=PLAIN)
+    # Steps: from the raised walk down to the lower one by the terminal's
+    # end, and at the root from the abutment's walk (4 m) up to the deck.
+    _stairs(m, F.xy(DIGUE_STEP_S + 0.5, -2.2), F.xy(DIGUE_STEP_S + 9.0, -2.2), DIGUE_WALK_HI, d, 3.6, conc, wall)
+    _stairs(m, F.xy(r0 + 14.0, -6.0), F.xy(r0 - 4.0, -6.0), DIGUE_WALK_HI, 4.0, 9.0, conc, wall)
+    # Parapets: a pale wall on the sea edge of the high walk, white
+    # railings along its harbour side and round the lower walk.
+    F.box(r0 + 14.0, DIGUE_STEP_S, -0.6, 0.0, DIGUE_WALK_HI, DIGUE_WALK_HI + 1.1, conc * 1.02)
+    for s0, s1, t_, z in ((r0 + 14.0, ts0, -12.0, DIGUE_WALK_HI), (ts1, DIGUE_STEP_S, -14.0, DIGUE_WALK_HI),
+                          (DIGUE_STEP_S, 440.0, -12.0, DIGUE_WALK_LO), (DIGUE_STEP_S + 9.0, 440.0, lo_t0, DIGUE_WALK_LO)):
+        railing(m, np.array([F.xy(s0, t_ + 0.1)]), np.array([F.xy(s1, t_ + 0.1)]), z, STREET_RAIL)
+    # Lamps along the high walk.
+    for s in np.arange(r0 + 22.0, 440.0, 24.0):
+        t_ = -1.2 if s < DIGUE_STEP_S else -5.5
+        z = DIGUE_WALK_HI if s < DIGUE_STEP_S else DIGUE_WALK_LO
+        _cyl(m, *F.xy(s, t_), z, z + 4.2, 0.07, C("#3a3d3f"), sides=6)
+        F.box(s - 0.3, s + 0.3, t_ - 0.2, t_ + 0.2, z + 4.1, z + 4.35, C("#3a3d3f"))
+    # The cruise terminal: a long block over the lane, red-brown cladding
+    # with a band of glass on each floor, a flat brown roof.
+    col = C(DIGUE_TERMINAL_COL)
+    tpoly = F.poly(ts0, ts1, tt0, tt1)
+    add_walls(m, tpoly, d, troof - 0.9, d, 3.6, col, WALL_NEW, style=S_RIBBON)
+    F.box(ts0 - 0.3, ts1 + 0.3, tt0 - 0.3, tt1 + 0.3, troof - 0.9, troof, col * 0.9)
+    add_roof(m, tpoly, troof, C(DIGUE_TERMINAL_ROOF), False)
+    for s in np.arange(ts0 + 8.0, ts1 - 6.0, 18.0):
+        F.box(s, s + 6.0, tt0 + 3.0, tt0 + 7.0, troof, troof + 1.6, C("#b9b5ad"))      # roof plant
+    # The head: a pale platform round a low white building and the port's
+    # light, a white tower with a red lantern (the harbour's red side).
+    F.box(440.0, r1, th + 1.6, lo_t0, d, d + 0.35, conc)
+    add_walls(m, F.poly(452.0, 469.0, -24.0, -9.0), d + 0.35, d + 6.6, d + 0.35, 3.1, C("#efeeea"), WALL_NEW,
+              style=S_MODERN)
+    F.box(451.5, 469.5, -24.5, -8.5, d + 6.6, d + 7.0, C("#dcdad3"))
+    F.box(466.0, 467.0, -22.0, -21.0, d + 7.0, d + 13.0, C("#9a9c9e"))                 # the mast
+    F.drum(r1 - 2.6, th + 2.6, d + 0.35, d + 9.0, 1.1, C("#f4f2ee"), n=10)
+    F.drum(r1 - 2.6, th + 2.6, d + 9.0, d + 10.6, 0.8, C("#c3352c"), n=10)
+    F.cone(r1 - 2.6, th + 2.6, d + 10.6, 1.0, 0.8, C("#7c2a24"), n=10, kind=PLAIN)
+    # The root: the deck runs onto the abutment over a short ramp (the car
+    # park is at 2 m), and the abutment's sea edge steps down in the
+    # Solarium's three sunbathing decks.
+    F.box(r0 - 8.0, r0, th + 1.6, -12.0, 1.9, 2.0, asph, sides="")
+    F.quad((r0 - 8.0, th + 1.6, 2.03), (r0, th + 1.6, d + 0.03), (r0, -12.0, d + 0.03), (r0 - 8.0, -12.0, 2.03), asph,
+           (0, 0, 1))
+    deck = C("#e2dccf")
+    for s0, s1, t0, t1, z in DIGUE_SOLARIUM:
+        F.box(s0, s1, t0, t1, -1.0, z + 0.06, deck, sides="tTS")
+    # The red-brown walk's row of small trees (the 20 cm photo).
+    rnd = rng_for("digue-trees")
+    nt = 0
+    for s in np.arange(9.0, 136.0, 8.5):
+        x, y = F.xy(s + rnd.uniform(-1, 1), -1.4)
+        z = float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=4.0))
+        add_tree(tm, x, y, z, rnd.uniform(4.5, 6.0), rnd.uniform(1.6, 2.2), "broad", rnd)
+        nt += 1
+    stats["digue_m"] = round(r1 - r0, 1)
+    stats["digue_trees"] = nt
+    return nt
+
+
+def digue_footprint():
+    """The breakwater's plan, for the building mask (no trees or lawn on it)."""
+    F = digue_frame()
+    return orient(F.poly(DIGUE_ROOT, DIGUE_END, DIGUE_HARBOUR, 0.0), 1.0)
+
+
 # The Centre Commercial de Fontvieille (Carrefour and its mall): a podium
 # from the streets up to its roof, the Esplanade Rainier III and the
 # Jardin de l'Unesco, which the LiDAR terrain model takes for ground (19 m
@@ -13265,6 +13443,7 @@ def main():
           stats.get("rocher_brick_m2"), "m2 of brick pavement")
     print("Pêcheurs garden…", peche_terrace(gm, bm, mnt_f, gz, stats), "m of sea wall,",
           stats.get("peche_walk_m2"), "m2 of walk")
+    print("Digue…", digue(bm, tm, Raster(mnt_f), stats), "trees,", stats.get("digue_m"), "m of breakwater")
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
