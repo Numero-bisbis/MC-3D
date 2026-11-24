@@ -29,7 +29,7 @@
    43.7455063
   ]
  ],
- "triangles": 4313641,
+ "triangles": 4454245,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -55,18 +55,18 @@
    ]
   ]
  },
- "buildings": 1676,
+ "buildings": 1674,
  "dropped": 16,
  "rooftop": 101,
  "roof_plants": 67,
- "levels": 1680,
- "towers": 11,
- "trees": 1817,
+ "levels": 1675,
+ "towers": 10,
+ "trees": 1736,
  "yachts": 779,
  "real_floors": 838,
  "styles": [
   354,
-  241,
+  239,
   7,
   371,
   307,
@@ -79,7 +79,7 @@
  "balconies": 1094,
  "verandas": 3,
  "hdp": 1,
- "landmarks": 5,
+ "landmarks": 7,
  "casino_halls": 6,
  "heracles_awnings": 138,
  "heracles": {
@@ -94,6 +94,7 @@
   "rock": 18.5,
   "windows": 76
  },
+ "cathedral_windows": 71,
  "palace_gate": 13.5,
  "palace_stair_steps": 56,
  "palace": {
@@ -102,15 +103,16 @@
   "windows": 641
  },
  "palace_cannons": 4,
+ "fort_antoine": 1,
  "mareterra_slabs": 139,
  "forum_tiers": [
   12.4,
   15.8,
   20.7
  ],
- "photo_facade_colours": 53,
+ "photo_facade_colours": 58,
  "photo_facade_types": 40,
- "photo_roofs": 1616,
+ "photo_roofs": 1610,
  "photo_lean": [
   0.02000000000000035,
   -0.019999999999999685
@@ -134,8 +136,8 @@
   "pavilions": 5
  },
  "tunnel_portals": 3,
- "road_m": 58100,
- "kerb_m": 40797,
+ "road_m": 57809,
+ "kerb_m": 40669,
  "lamps": 1249,
  "spectators": 5592,
  "sidewalk_m2": 56894,
@@ -171,7 +173,14 @@
  "armes_stalls": 32,
  "armes_lamps": 14,
  "armes_bollards": 53,
- "rocher_trees": 48,
+ "rocher_trees": 295,
+ "rampart_m": 1115,
+ "rampart_cannons": 16,
+ "rocher_garden_path_m2": 2943,
+ "rocher_benches": 27,
+ "palais_sq_m2": 3236,
+ "rocher_sett_m2": 27467,
+ "rocher_brick_m2": 754,
  "conda_ped_m2": 7747,
  "conda_sett_m2": 1742,
  "gastaud_m2": 1153,
@@ -180,8 +189,8 @@
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
  "track_clear": true,
- "roof_kit": 3552,
- "roof_texels_per_m": 4.08,
+ "roof_kit": 3586,
+ "roof_texels_per_m": 4.09,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
