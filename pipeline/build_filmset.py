@@ -2658,6 +2658,112 @@ def facade_depth(m, poly, base, H, fh, style, col, rnd, balconies=None, depth=No
 # surface shows a nave about 9 m to the ridge, gable on to the square, and a
 # bell tower about 16 m tall near the east corner of the front. The outline's
 # main body (the rest, up the slope, is the presbytery): four corners, L93.
+# Rond-Point du Portier (Avenue Princesse Grace / Boulevard Louis II), under
+# the Boulevard du Larvotto viaduct. Rebuilt with Mareterra after the 2021
+# LiDAR and the IGN photo, which both show a building site here: humps of
+# earth and smudges of dirt that the film set turned into lumpy lawns, and
+# the circuit's red brick pavements spread over the island. As it stands
+# (Mapillary 2025, BD TOPO 2024, OpenStreetMap): pale stone paving round
+# the roundabout, and on the island, east of the viaduct, Neuehouse, a
+# low building of two glazed storeys between thick travertine slabs that
+# overhang them, on slender pale columns.
+PORTIER = None
+PORTIER_NAME = "Rond-Point du Portier"
+PORTIER_PAVING = (217, 210, 196)
+NEUEHOUSE = "BATIMENT0000002476006808"
+TRAVERTINE = "#e8dfcc"
+
+
+def portier_setup(ways, mnt, mns, ortho, sea):
+    """The roundabout and a margin round it: smooth ground, no surface
+    humps (so no stray trees or baked shadows), paving in the photo."""
+    from shapely.ops import polygonize
+    ring = [LineString(p_) for t, p_, c in ways
+            if t.get("name") == PORTIER_NAME and t.get("junction") == "roundabout" and len(p_) > 1]
+    # (All its pieces, the one that dips under Neuehouse included, so the
+    # ring closes.)
+    if not ring:
+        return None
+    polys = list(polygonize(unary_union(ring)))
+    if not polys:
+        return None
+    inner = max(polys, key=lambda q: q.area)
+    zone = inner.buffer(14.0)
+    # Not the buildings round it, nor the viaduct (its deck height comes
+    # from the surface model) and its piers.
+    from shapely.geometry import shape as _shape
+    bridges = [LineString(p_).buffer(7.5) for t, p_, c in ways
+               if t.get("bridge") and t.get("layer", "0") != "0" and len(p_) > 1]
+    keep_out = list(bridges)
+    for f in json.load(open(RAW / "bdtopo.json"))["features"]:
+        if f["properties"].get("cleabs") == NEUEHOUSE:
+            continue
+        g = shapely.force_2d(_shape(f["geometry"])).buffer(0)
+        if g.intersects(zone):
+            keep_out.append(g.buffer(1.5))
+    zone = zone.difference(unary_union(keep_out))
+    zone = unary_union([q for q in to_polys(zone) if q.area > 40])
+    zm = raster_mask(zone) & ~sea & np.isfinite(mnt)
+    z = ndimage.median_filter(np.nan_to_num(mnt, nan=0.0), 9)
+    z = ndimage.gaussian_filter(z, 2.0)
+    mnt[zm] = z[zm]
+    mns[zm] = z[zm]
+    ortho[zm] = PORTIER_PAVING
+    # Under the viaduct: level and pave the ground too, but leave the
+    # surface model alone so the deck keeps its height.
+    under = unary_union(bridges).intersection(inner.buffer(24.0)) if bridges else None
+    if under is not None and not under.is_empty:
+        um = raster_mask(under) & ~sea & np.isfinite(mnt) & ~zm
+        mnt[um] = z[um]
+        ortho[um] = PORTIER_PAVING
+        print(f"Rond-Point du Portier: {under.area:.0f} m2 paved under the viaduct")
+    print(f"Rond-Point du Portier: {zone.area:.0f} m2 levelled and paved")
+    return {"zone": zone, "island": inner.buffer(-ROAD_W["secondary"] / 2)}
+
+
+def neuehouse(m, poly, mntR):
+    """Neuehouse on the Portier roundabout's island: two glazed storeys
+    set back under thick travertine slabs that overhang them, pale square
+    columns at the slab edges, a roof terrace with planters."""
+    ring = poly.exterior
+    s = np.linspace(0, ring.length, max(8, int(ring.length)))
+    q = shapely.line_interpolate_point(ring, s)
+    gz = mntR.sample(shapely.get_x(q), shapely.get_y(q))
+    base = float(np.nanmin(gz)) if np.isfinite(gz).any() else 8.0
+    trav = np.array(hexrgb(TRAVERTINE))
+    glass = np.array(hexrgb("#55666c"))
+    leaf = np.array(hexrgb("#4a6a34"))
+    tiers = [(-1.6, 0.0, 4.1, 4.85, 0.55), (-1.1, 4.85, 8.2, 9.1, 0.8)]
+    for inset, z0, z1, z2, over in tiers:
+        g = poly.buffer(inset, join_style=2)
+        for gp in to_polys(g):
+            gp = orient(gp, 1.0)
+            add_walls(m, gp, base + z0 - 0.4, base + z1, base, 4.1, glass, WALL_GLASS, style=S_GLASS)
+        sl = poly.buffer(over, join_style=2)
+        for sp in to_polys(sl):
+            sp = orient(sp, 1.0)
+            add_walls(m, sp, base + z1, base + z2, base + z1, 100, trav, PLAIN)
+            add_roof(m, sp, base + z2, trav * (0.98 if z2 > 6 else 1.0), False)
+            # Columns at the slab edge, every 6.5 m.
+            cr = sp.buffer(-0.45, join_style=2).exterior
+            for d in np.arange(2.0, cr.length, 6.5):
+                c = cr.interpolate(d)
+                c2 = cr.interpolate(min(d + 0.5, cr.length))
+                ax = np.array([c2.x - c.x, c2.y - c.y])
+                _box(m, c.x, c.y, ax, 0.45, 0.45, base + z0 - 0.2, base + z1, trav * 0.97)
+    # Roof terrace: planters along the edge.
+    pr = poly.buffer(-1.6, join_style=2)
+    if isinstance(pr, Polygon) and pr.exterior.length > 10:
+        ex = pr.exterior
+        for d in np.arange(3.0, ex.length, 7.0):
+            c = ex.interpolate(d)
+            c2 = ex.interpolate(min(d + 0.5, ex.length))
+            ax = np.array([c2.x - c.x, c2.y - c.y])
+            _box(m, c.x, c.y, ax, 2.4, 0.9, base + 9.1, base + 9.6, trav * 0.95)
+            _box(m, c.x, c.y, ax, 2.2, 0.75, base + 9.6, base + 10.2, leaf, kind=LEAF)
+    return poly
+
+
 CHURCH_SD = "BATIMENT0000000074074425"
 CHURCH_SD_BODY = [(1056048.4, 6303135.9), (1056040.7, 6303123.1), (1056014.4, 6303141.3), (1056024.1, 6303152.7)]
 CHURCH_SD_TOWER = (1056043.2, 6303134.2)
@@ -2971,6 +3077,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             key = f["properties"].get("cleabs") or poly.wkt[:60]
             if key in GF_PARTS:
                 forum.append(poly)
+                continue
+            if key == NEUEHOUSE:
+                footprint.append(neuehouse(m, poly, mntR))
+                stats["landmarks"] = stats.get("landmarks", 0) + 1
                 continue
             if key == CHURCH_SD:
                 body = church_sainte_devote(m, mntR)
@@ -8330,6 +8440,8 @@ def main():
     sea |= ~land
     global MT
     MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
+    global PORTIER
+    PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
     mnt_f = np.where(sea, np.nan, mnt)
     global TUNNEL
     TUNNEL = load_tunnel()
@@ -8382,6 +8494,11 @@ def main():
     global SW
     entrances = carpark_entrances(ways, pts)
     SW = sidewalks_setup(ways, mnt_f, sea, feats)
+    if SW is not None and PORTIER is not None:
+        # The roundabout's plaza is pale stone, not the circuit's red brick.
+        for k_ in ("poly", "pale", "islands"):
+            if k_ in SW:
+                SW[k_] = SW[k_].difference(PORTIER["zone"])
     if SW is not None and mnt_ground is not mnt_f:
         m_ = raster_mask(SW["poly"])
         mnt_ground[m_] = mnt_f[m_]
