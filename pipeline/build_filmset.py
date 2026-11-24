@@ -546,6 +546,17 @@ def ground_mesh(mnt, sea):
         endz = contains_xy(TUNNEL["ends"], X, Y) & ~ins
         anyq = lambda a_: a_[:-1, :-1] | a_[:-1, 1:] | a_[1:, :-1] | a_[1:, 1:]
         keep &= ~(anyq(ins) & anyq(endz))
+    for pt_ in PORTALS:
+        # A bridge running into a tunnel: the ground grid's slope from the
+        # hill above the mouth down to the ground under the deck would
+        # hang across the opening. portals() fills the hole.
+        cut = contains_xy(pt_["cut"], X, Y)
+        hole = cut[:-1, :-1] | cut[:-1, 1:] | cut[1:, :-1] | cut[1:, 1:]
+        keep &= ~hole
+        ii_, jj_ = np.nonzero(hole)
+        pt_["hole"] = unary_union([box(X[i, j], Y[i, j] - GRID, X[i, j] + GRID, Y[i, j]) for i, j in zip(ii_, jj_)])
+    global GROUND_Z
+    GROUND_Z = Z
     if FM is not None and "cut" in FM:
         # Round the Fairmont's open court the wall, the court's floor and
         # the rim's slab stand in for the ground grid.
@@ -3377,7 +3388,14 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if photo is not None and not hero and not post_scan and key != FAIRMONT:
                     lx, ly = photo["lean"]
                     ph = dict(photo, shift=(hz * lx + adj[0], hz * ly + adj[1]))
-                for part in tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol):
+                parts_ = tunnel_split(m, region, zb, zt, base, fh, col, kind, style, rcol)
+                # Split over the tunnel: one parapet round the whole roof,
+                # not one round each part (across the Fairmont's roof
+                # garden the parts' shared edge stood up as a ridge
+                # tracing the tunnel underneath).
+                split_ = TUNNEL is not None and not (len(parts_) == 1 and parts_[0].equals(region))
+                parapet_done = False
+                for part in parts_:
                     if kind == WALL_OLD and part.area > 60:
                         # Stone cornice under the roof line: a moulding
                         # that juts out and catches the light.
@@ -3435,19 +3453,21 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                         else:
                             add_walls(m, part, zb, zt, base, fh, col, kind, style=style)
                         add_roof(m, part, zt, rcol, False, photo=ph)
-                        if part.area > 40:
+                        if part.area > 40 and not parapet_done:
                             # Parapet: a low wall round the roof edge, so
                             # roofs read as terraces instead of lids.
                             pc = np.asarray(col) * 0.97
                             if style == S_BELLE:
                                 # Belle Époque roofs end in a pale stone balustrade.
                                 pc = np.array(hexrgb("#f1ebdf"))
-                            add_walls(m, part, zt, zt + 0.9, zt, 10, pc, PLAIN)
-                            add_walls(m, part, zt, zt + 0.9, zt, 10, pc * 0.85, PLAIN, inward=True)
-                            inner_top = part.buffer(-0.25, join_style=2)
-                            ring_ = part.difference(inner_top) if not inner_top.is_empty else part
-                            for rp in to_polys(ring_):
-                                add_roof(m, rp, zt + 0.9, pc * 1.05, False)
+                            for pp in ([orient(q_, 1.0) for q_ in to_polys(region) if q_.area > 40] if split_ else [part]):
+                                add_walls(m, pp, zt, zt + 0.9, zt, 10, pc, PLAIN)
+                                add_walls(m, pp, zt, zt + 0.9, zt, 10, pc * 0.85, PLAIN, inward=True)
+                                inner_top = pp.buffer(-0.25, join_style=2)
+                                ring_ = pp.difference(inner_top) if not inner_top.is_empty else pp
+                                for rp in to_polys(ring_):
+                                    add_roof(m, rp, zt + 0.9, pc * 1.05, False)
+                            parapet_done = split_
                 zb = zt
             # Roof gardens: where the IGN photo shows green on a flat roof,
             # plant shrubs (Monaco has many planted terraces).
@@ -4900,11 +4920,22 @@ def edge_walls(U, mnt, zfn, skip, gardens=None):
             low = np.where(fin, np.min(np.where(fin, sm, 0), 0), zw)
             up = near & fin & (top - zw > 0.7)
             down = near & fin & ~up & (low < zw - 1.2)
+            # From Ostende to the tunnel a deep drop's foot can be further
+            # out: beside the Mirabeau tower the ground falls 12 m within
+            # 6 m of the kerb, and a wall stopping at the 3 m mark left
+            # the rest as a pale smeared slope.
+            far = np.stack([R.sample(mid[:, 0] + out[:, 0] * d, mid[:, 1] + out[:, 1] * d) for d in (4.0, 5.0, 6.0)])
+            far = np.nanmin(np.where(np.isfinite(far), far, np.inf), 0)
+            deep = down & in_upper(mid[:, 0], mid[:, 1]) & np.isfinite(far) & (low < zw - 3.0) & (far < low - 1.0)
+            low = np.where(deep, far, low)
             # No single-metre walls or gaps.
             up = ndimage.binary_opening(ndimage.binary_closing(up, iterations=1), iterations=1)
             down = ndimage.binary_opening(ndimage.binary_closing(down, iterations=1), iterations=1) & ~up
             top = ndimage.median_filter(np.minimum(top, zw + 12.0), 5, mode="nearest")
-            low = ndimage.minimum_filter1d(np.maximum(low, zw - 10.0), 3, mode="nearest")
+            # (Beside the Mirabeau tower the street drops 12 m to the
+            # tower's terrace: a wall stopping at 10 m left the rest to the
+            # ground grid's smeared slope.)
+            low = ndimage.minimum_filter1d(np.maximum(low, zw - 14.0), 3, mode="nearest")
             # Gardens beside the circuit from Ostende to the tunnel: a
             # rendered wall with an iron railing all along, low (60 cm)
             # where the garden is level with the pavement.
@@ -4943,11 +4974,16 @@ def edge_walls(U, mnt, zfn, skip, gardens=None):
 def wall_ground(X, Y, Zm):
     """Ground nodes just behind a retaining wall go down to the street, so
     the 3 m grid's slope stays behind the wall (under its cap) instead of
-    rising in front of it."""
+    rising in front of it. And round a drop, the nodes a grid step either
+    side of the wall go down to its foot, so the slope is under the
+    pavement, behind the wall, instead of a pale smear in front of it."""
     w = SW["walls"] if SW is not None else None
-    if w is None or not len(w["a"]) or not w["up"].any():
+    if w is None or not len(w["a"]):
         return Zm
     from scipy.spatial import cKDTree
+    Zm = drop_ground(X, Y, Zm, w)
+    if not w["up"].any():
+        return Zm
     m_ = (w["a"][w["up"]] + w["b"][w["up"]]) / 2
     o_ = w["out"][w["up"]]
     zw = w["zw"][w["up"]]
@@ -4959,6 +4995,44 @@ def wall_ground(X, Y, Zm):
     if sel.any():
         Zm = Zm.copy()
         Zm[sel] = np.minimum(Zm[sel], zw[jj.reshape(X.shape)[sel]] - 0.3)
+    return Zm
+
+
+def drop_ground(X, Y, Zm, w):
+    """Down to the foot of each tall drop wall, the ground nodes within a
+    grid step of it on both sides. Beside the Mirabeau tower the street
+    drops 12 m to the tower's terrace, and the 3 m grid ran from the
+    road's edge down to the terrace as steep pale slopes in front of the
+    wall: from the hairpin it looked like a hole beside the road. The
+    nodes on the street side are under the pavement slab (its own mesh),
+    those on the circuit keep the track's rules."""
+    from scipy.spatial import cKDTree
+    dn = ~w["up"] & ((w["zw"] - w["low"]) > 1.5)
+    if not dn.any():
+        return Zm
+    m_ = (w["a"][dn] + w["b"][dn]) / 2
+    o_ = w["out"][dn]
+    lo = w["low"][dn]
+    # Two grid steps out past the deep ones (more than 4 m down).
+    reach = np.where(w["zw"][dn] - lo > 4.0, 2 * GRID + 0.6, GRID + 0.6)
+    xr, yr = X.ravel(), Y.ravel()
+    d, j = cKDTree(m_).query(np.column_stack([xr, yr]), distance_upper_bound=2 * GRID + 0.6)
+    hit = np.isfinite(d)
+    jj = np.where(hit, j, 0)
+    hit &= d <= reach[jj]
+    t = (xr - m_[jj, 0]) * o_[jj, 0] + (yr - m_[jj, 1]) * o_[jj, 1]
+    sel = hit & (t > -(GRID + 0.3))
+    # Street side: only under the pavement slab.
+    ins = sel & (t < 0.3)
+    if ins.any():
+        ins[ins] = contains_xy(SW["poly"], xr[ins], yr[ins])
+    sel &= (t >= 0.3) | ins
+    if TRACK is not None:
+        sel &= track_dist(xr, yr) > TRACK_HALF + 0.2
+    sel = sel.reshape(X.shape)
+    if sel.any():
+        Zm = Zm.copy()
+        Zm[sel] = np.minimum(Zm[sel], lo[jj.reshape(X.shape)[sel]] - 0.1)
     return Zm
 
 
@@ -5082,7 +5156,20 @@ def street_walls(gm, m, stats):
         if rr.any():
             rails += railing(m, (A + O[:, :2] * 0.15)[rr], (B + O[:, :2] * 0.15)[rr], Zt[rr] + 0.06, STREET_RAIL, 0.75)
         Ao, Bo = A + O[:, :2] * 0.3, B + O[:, :2] * 0.3
-        _quad(m, E(Ao, Z0), E(Bo, Z0), E(Bo, Zt), E(Ao, Zt), stone[dn] * 0.95, O)
+        # Tall drops from Ostende to the tunnel: the rubble limestone of
+        # the Mirabeau retaining walls (a plain pale face read as a gap).
+        rb = tall & ud
+        pl = ~rb
+        if pl.any():
+            _quad(m, E(Ao[pl], Z0[pl]), E(Bo[pl], Z0[pl]), E(Bo[pl], Zt[pl]), E(Ao[pl], Zt[pl]),
+                  stone[dn][pl] * 0.95, O[pl])
+        if rb.any():
+            S0, S1 = s0[dn][rb], s1[dn][rb]
+            hh = Zt[rb] - Z0[rb]
+            rc = np.array(hexrgb(WALL_RUBBLE))[None] * tint[dn][rb]
+            _quad_uv(m, E(Ao[rb], Z0[rb]), E(Bo[rb], Z0[rb]), E(Bo[rb], Zt[rb]), E(Ao[rb], Zt[rb]), rc, O[rb],
+                     [np.column_stack([S0, np.zeros(rb.sum())]), np.column_stack([S1, np.zeros(rb.sum())]),
+                      np.column_stack([S1, hh]), np.column_stack([S0, hh])], style=RUBBLE)
         if tall.any():
             t_ = tall
             _quad(m, E(A[t_], zw[dn][t_] - 0.2), E(B[t_], zw[dn][t_] - 0.2), E(B[t_], Zt[t_]), E(A[t_], Zt[t_]),
@@ -6050,6 +6137,136 @@ def _bridge_approaches(ways, ends, fam, reach=14.0):
     return out
 
 
+# Bridges that run into a tunnel (Boulevard du Larvotto's viaduct goes under
+# the hill by the Fairmont hairpin): the deck used to stop at a slope of
+# smeared ground, a dead end. Each gets a portal: a headwall with the
+# opening, the tunnel's first metres inside, dark at the back.
+PORTALS = []
+GROUND_Z = None
+PORTAL_IN = 12.0                    # m of tunnel modelled inside the mouth
+
+
+def portals_setup(ways, mnt):
+    """Where an OpenStreetMap bridge's end meets a tunnel and the ground
+    beyond rises well above the deck."""
+    R = Raster(mnt)
+    for t, pts, closed in ways:
+        hw_ = t.get("highway")
+        w = BRIDGE_W.get(hw_)
+        if not w or not t.get("bridge") or closed or len(pts) < 2 or \
+                hw_ in ("footway", "steps", "cycleway", "path", "pedestrian"):
+            continue
+        for e, pv in ((pts[0], pts[1]), (pts[-1], pts[-2])):
+            E = Point(e)
+            if not any(t2.get("tunnel") == "yes" and t2.get("highway") in BRIDGE_W and not cl2 and len(p2) > 1 and
+                       min(Point(p2[0]).distance(E), Point(p2[-1]).distance(E)) < 0.8 for t2, p2, cl2 in ways):
+                continue
+            u = np.array(e, float) - np.array(pv, float)
+            u /= max(np.linalg.norm(u), 1e-6)
+            e = np.array(e, float)
+            g_in = R.sample(np.array([e[0] + u[0] * 6.0]), np.array([e[1] + u[1] * 6.0]))[0]
+            g_out = R.sample(np.array([e[0] - u[0] * 3.0]), np.array([e[1] - u[1] * 3.0]))[0]
+            if not (np.isfinite(g_in) and np.isfinite(g_out)) or g_in < g_out + 4.0:
+                continue
+            if not (X0 + 30 < e[0] < X1 - 30 and Y0 + 30 < e[1] < Y1 - 30):
+                continue
+            l = np.array([-u[1], u[0]])
+            hw = w / 2
+            W = hw + 2.5
+
+            def P_(a, b):
+                return tuple(e + u * a + l * b)
+            cut = Polygon([P_(-3.5, -W), P_(PORTAL_IN, -W), P_(PORTAL_IN, W), P_(-3.5, W)])
+            if TRACK is not None and track_dist(*np.array(cut.exterior.coords).T).min() < TRACK_HALF + 3.5:
+                continue
+            PORTALS.append({"e": e, "u": u, "l": l, "hw": hw, "cut": cut, "name": t.get("name")})
+    print("tunnel portals:", [p_["name"] for p_ in PORTALS])
+
+
+def _grid_z(x, y):
+    """The ground grid's height, bilinear."""
+    Z = GROUND_Z
+    fi = np.clip((Y1 - y) / GRID, 0, Z.shape[0] - 1.001)
+    fj = np.clip((x - X0) / GRID, 0, Z.shape[1] - 1.001)
+    i, j = np.floor(fi).astype(int), np.floor(fj).astype(int)
+    ti, tj = fi - i, fj - j
+    return (Z[i, j] * (1 - ti) * (1 - tj) + Z[i, j + 1] * (1 - ti) * tj +
+            Z[i + 1, j] * ti * (1 - tj) + Z[i + 1, j + 1] * ti * tj)
+
+
+def portals(gm, m, stats):
+    """Each portal: the hole cut in the ground grid filled (low under the
+    deck in front, the hill over the tunnel behind), a concrete headwall
+    round the opening, the tunnel's walls, ceiling and road for its first
+    metres, and the dark beyond."""
+    n = 0
+    concrete = np.array(hexrgb("#d6cfbf"))
+    cope = np.array(hexrgb("#ece4d3"))
+    wall_in, ceil, deep = np.array(hexrgb("#8c877c")), np.array(hexrgb("#4a4843")), np.array(hexrgb("#0b0b0c"))
+    asph = np.array(hexrgb("#55585e"))
+    for pt_ in PORTALS:
+        if "zr" not in pt_ or "hole" not in pt_ or pt_["hole"].is_empty:
+            continue
+        e, u, l, hw, zr = pt_["e"], pt_["u"], pt_["l"], pt_["hw"], pt_["zr"]
+        H = 5.0                                     # the opening's height
+        z_roof = zr + H + 0.4
+        # The filled hole: a half-plane each side of the headwall.
+        big = 80.0
+        front = Polygon([tuple(e + l * big), tuple(e - l * big), tuple(e - l * big - u * big), tuple(e + l * big - u * big)])
+        back = Polygon([tuple(e + l * big), tuple(e - l * big), tuple(e - l * big + u * big), tuple(e + l * big + u * big)])
+        hole = pt_["hole"]
+        hf, hb = hole.intersection(front), hole.intersection(back)
+        _flat_slab(gm, hf, lambda x, y: np.minimum(_grid_z(x, y), zr - 1.2))
+        _flat_slab(gm, hb, lambda x, y: np.maximum(_grid_z(x, y), z_roof))
+        # Lateral extent of the headwall: the hole's width at the mouth.
+        cross = LineString([tuple(e - l * big), tuple(e + l * big)]).intersection(hole.buffer(0.01))
+        if cross.is_empty:
+            continue
+        cc = np.array([c for g_ in getattr(cross, "geoms", [cross]) for c in g_.coords])
+        off = (cc - e) @ l
+        w0, w1 = float(off.min()), float(off.max())
+        offs = np.linspace(w0, w1, 9)
+        zg_top = float(np.max(np.maximum(_grid_z(e[0] + l[0] * offs + u[0] * 0.3, e[1] + l[1] * offs + u[1] * 0.3), z_roof)))
+        z_bot = float(np.min(np.minimum(_grid_z(e[0] + l[0] * offs - u[0] * 0.3, e[1] + l[1] * offs - u[1] * 0.3),
+                                        zr - 1.2))) - 0.5
+        zt = zg_top + 0.9                            # a parapet over the mouth
+
+        def E1(a, b, z):
+            p = e + u * a + l * b
+            return enu_fast(np.array([p[0]]), np.array([p[1]]), np.array([z]))
+        o_out = E1(-1, 0, zr) - E1(0, 0, zr)
+        o_in = -o_out
+        # Headwall: the two piers beside the opening and the lintel over it.
+        for b0, b1, za, zb_ in ((w0, -hw, z_bot, zt), (hw, w1, z_bot, zt), (-hw, hw, zr + H, zt)):
+            if b1 - b0 < 0.05:
+                continue
+            _quad(m, E1(0, b0, za), E1(0, b1, za), E1(0, b1, zb_), E1(0, b0, zb_), concrete[None], o_out)
+        # (its top: a coping 40 cm deep, and the back of the parapet)
+        _quad(m, E1(-0.1, w0, zt), E1(-0.1, w1, zt), E1(0.4, w1, zt), E1(0.4, w0, zt), cope[None],
+              E1(0, 0, zr + 1) - E1(0, 0, zr))
+        _quad(m, E1(0.4, w0, zg_top), E1(0.4, w1, zg_top), E1(0.4, w1, zt), E1(0.4, w0, zt), concrete[None] * 0.95, o_in)
+        # A band round the opening.
+        for b0, b1, za, zb_ in ((-hw - 0.5, -hw, zr, zr + H + 0.5), (hw, hw + 0.5, zr, zr + H + 0.5),
+                                (-hw, hw, zr + H, zr + H + 0.5)):
+            _quad(m, E1(-0.15, b0, za), E1(-0.15, b1, za), E1(-0.15, b1, zb_), E1(-0.15, b0, zb_), cope[None] * 0.97, o_out)
+        # Inside: road, walls, ceiling, and the dark.
+        L = PORTAL_IN
+        up_ = E1(0, 0, zr + 1) - E1(0, 0, zr)
+        _quad(m, E1(0, -hw, zr + 0.03), E1(0, hw, zr + 0.03), E1(L, hw, zr + 0.03), E1(L, -hw, zr + 0.03), asph[None], up_)
+        for sgn in (-1, 1):
+            side_in = E1(0, 0, zr) - E1(0, sgn, zr)
+            _quad(m, E1(0, sgn * hw, zr), E1(L, sgn * hw, zr), E1(L, sgn * hw, zr + H), E1(0, sgn * hw, zr + H),
+                  wall_in[None], side_in)
+        _quad(m, E1(0, -hw, zr + H), E1(0, hw, zr + H), E1(L, hw, zr + H), E1(L, -hw, zr + H), ceil[None], -up_)
+        _quad(m, E1(L, -hw, zr - 0.1), E1(L, hw, zr - 0.1), E1(L, hw, zr + H), E1(L, -hw, zr + H), deep[None], o_out)
+        # The tunnel's lid under the hill, so nothing shows through from above.
+        _quad(m, E1(0, -hw, z_roof - 0.05), E1(0, hw, z_roof - 0.05), E1(L, hw, z_roof - 0.05), E1(L, -hw, z_roof - 0.05),
+              ceil[None], up_)
+        n += 1
+    stats["tunnel_portals"] = n
+    return n
+
+
 def bridges(m, ways, mns, mnt):
     """Each OpenStreetMap bridge: a deck at its LiDAR surface height, carried
     on a girder whose underside arches up from deep haunches at the
@@ -6207,6 +6424,11 @@ def bridges(m, ways, mns, mnt):
                 continue
             ax_ = np.array([lx[i], ly[i]])
             _box(m, x[i], y[i], ax_, w * 0.7, 1.6, gnd[i] - 1, soffit[i] + 0.05, concrete * 0.92, PLAIN)
+        for pt_ in PORTALS:
+            # The deck's height where it reaches a tunnel's mouth.
+            d_ = np.hypot(x - pt_["e"][0], y - pt_["e"][1])
+            if d_.min() < 1.6:
+                pt_["zr"] = float(z[int(np.argmin(d_))])
         n_ += 1
     return n_
 
@@ -10527,6 +10749,7 @@ def main():
     if SW is not None and mnt_ground is not mnt_f:
         m_ = raster_mask(SW["poly"])
         mnt_ground[m_] = mnt_f[m_]
+    portals_setup(ways, mnt_f)
     global FM
     FM = fairmont_setup(feats, mns, mnt_f)
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
@@ -10574,6 +10797,7 @@ def main():
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     gm, gz = ground_mesh(mnt_ground, sea)
+    print("tunnel portals…", portals(gm, bm, stats))
     rm = Mesh()
     print("roads…", road_surfaces(rm, ways, pts, gz, bmask, stats), "m")
     drive = drive_map(gz, bmask, sea)
