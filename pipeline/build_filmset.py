@@ -613,6 +613,14 @@ def ground_mesh(mnt, sea):
             continue
         keep[i0:i1, j0:j1] = False
         fine.append(_detail_patch(mnt, Z, i0, i1, j0, j1))
+    # The cliffs all round Le Rocher: a 1 m grid over every cell with steep
+    # LiDAR ground in it (and a margin), so the faces stand up as rock and
+    # do not slump into 3 m ramps.
+    M = rocher_fine_cells(mnt, Z.shape)
+    if M is not None:
+        M &= keep
+        keep &= ~M
+        fine.append(_detail_mask_patch(mnt, Z, M))
     tris = np.concatenate([np.stack([a, cc, b], -1)[keep], np.stack([b, cc, d], -1)[keep]])
     m = Mesh()
     m.add(P, N, [255, 255, 255], GROUND, uv=uv, idx=tris)
@@ -671,6 +679,84 @@ def _detail_patch(mnt, Z, i0, i1, j0, j1):
     a, b, cc, d = ii[:-1, :-1], ii[:-1, 1:], ii[1:, :-1], ii[1:, 1:]
     tris = np.concatenate([np.stack([a, cc, b], -1).reshape(-1, 3), np.stack([b, cc, d], -1).reshape(-1, 3)])
     return P, N, uv, tris
+
+
+ROCHER_FINE_BOX = (1055890.0, 6302230.0, 1056720.0, 6302700.0)
+
+
+def rocher_fine_cells(mnt, shape):
+    """Coarse ground cells round Le Rocher that get the 1 m grid: any cell
+    with LiDAR ground steeper than ~42 degrees, grown by 6 m."""
+    x0, y0, x1, y1 = ROCHER_FINE_BOX
+    n = shape[0] - 1
+    k = int(round(GRID / RES))
+    j0, j1 = int((x0 - X0) // GRID), int((x1 - X0) // GRID)
+    i0, i1 = int((Y1 - y1) // GRID), int((Y1 - y0) // GRID)
+    if j1 <= j0 or i1 <= i0:
+        return None
+    sub = mnt[i0 * k:i1 * k, j0 * k:j1 * k]
+    if sub.shape != ((i1 - i0) * k, (j1 - j0) * k):
+        return None
+    gy, gx = np.gradient(np.nan_to_num(sub, nan=0.0), RES)
+    st = (np.hypot(gx, gy) > 0.9) & np.isfinite(sub) & (sub > 0.6)
+    cell = st.reshape(i1 - i0, k, j1 - j0, k).sum((1, 3)) >= 2
+    cell = ndimage.binary_dilation(cell, iterations=2)
+    M = np.zeros((n, n), bool)
+    M[i0:i1, j0:j1] = cell
+    if TRACK is not None:
+        # Never under the circuit (the track rules own those heights).
+        ci, cj = np.nonzero(M)
+        cx_, cy_ = X0 + (cj + 0.5) * GRID, Y1 - (ci + 0.5) * GRID
+        far = track_dist(cx_, cy_) > TRACK_HALF + 12
+        M[ci[~far], cj[~far]] = False
+    return M
+
+
+def _detail_mask_patch(mnt, Z, M):
+    """Like _detail_patch, over any set of coarse cells M: one fine grid on
+    M's bounding box, keeping only the fine quads inside M (and not sea
+    floor). Nodes on M's outline keep the coarse heights (no cracks), the
+    LiDAR fades in over 4 m inside."""
+    K = DETAIL_K
+    st = GRID / K
+    ii_, jj_ = np.nonzero(M)
+    i0, i1, j0, j1 = ii_.min(), ii_.max() + 1, jj_.min(), jj_.max() + 1
+    nxf, nyf = (j1 - j0) * K + 1, (i1 - i0) * K + 1
+    xs = X0 + j0 * GRID + np.arange(nxf) * st
+    ys = Y1 - i0 * GRID - np.arange(nyf) * st
+    Xf, Yf = np.meshgrid(xs, ys)
+    fi = (Y1 - Yf) / GRID
+    fj = (Xf - X0) / GRID
+    ia = np.clip(np.floor(fi).astype(int), 0, Z.shape[0] - 2)
+    ja = np.clip(np.floor(fj).astype(int), 0, Z.shape[1] - 2)
+    ti, tj = fi - ia, fj - ja
+    Zc = (Z[ia, ja] * (1 - ti) * (1 - tj) + Z[ia, ja + 1] * (1 - ti) * tj +
+          Z[ia + 1, ja] * ti * (1 - tj) + Z[ia + 1, ja + 1] * ti * tj)
+    h = ndimage.uniform_filter(np.nan_to_num(mnt, nan=0.0), size=3)
+    w = ndimage.uniform_filter((~np.isnan(mnt)).astype(np.float32), size=3)
+    r = np.clip(((Y1 - Yf) / RES).astype(int), 0, mnt.shape[0] - 1)
+    c = np.clip(((Xf - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
+    Zm = np.where(w[r, c] > 0.3, h[r, c] / np.maximum(w[r, c], 1e-6), np.nan)
+    Mf = np.repeat(np.repeat(M[i0:i1, j0:j1], K, 0), K, 1)        # fine quads
+    pad = np.pad(Mf, 1)
+    inside = pad[:-1, :-1] & pad[:-1, 1:] & pad[1:, :-1] & pad[1:, 1:]   # nodes
+    wt = np.clip(ndimage.distance_transform_edt(inside) * st / 4.0 - 0.25, 0.0, 1.0)
+    wt = np.where(np.isfinite(Zm) & (Zc > SEA_FLOOR + 1), wt, 0.0)
+    Zf = Zc + wt * (np.nan_to_num(Zm, nan=0.0) - Zc)
+    P = enu_fast(Xf.ravel(), Yf.ravel(), Zf.ravel())
+    gy, gx = np.gradient(Zf, st)
+    N = np.column_stack([-gx.ravel(), gy.ravel(), np.ones(Zf.size)])
+    N /= np.linalg.norm(N, axis=1, keepdims=True)
+    uv = np.column_stack([(Xf.ravel() - X0) / (X1 - X0), (Y1 - Yf.ravel()) / (Y1 - Y0)])
+    ii = np.arange(nxf * nyf).reshape(nyf, nxf)
+    a, b, cc, d = ii[:-1, :-1], ii[:-1, 1:], ii[1:, :-1], ii[1:, 1:]
+    low = Zf <= SEA_FLOOR + 0.05
+    seaq = low[:-1, :-1] & low[:-1, 1:] & low[1:, :-1] & low[1:, 1:]
+    kq = Mf & ~seaq
+    tris = np.concatenate([np.stack([a, cc, b], -1)[kq], np.stack([b, cc, d], -1)[kq]])
+    used, tris = np.unique(tris, return_inverse=True)
+    tris = tris.reshape(-1, 3)
+    return P[used], N[used], uv[used], tris
 
 
 def race_pool(d, xy, pts, px):
@@ -749,6 +835,28 @@ def clean_roof_patch(patch, pm, px):
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 
+# The garden on the Parking des Pêcheurs' roof (east of the Oceanographic
+# Museum, 25 m over the sea): outline and beds from the 20 cm photo.
+PECHE_DECK = Polygon([(1056497.0, 6302403.0), (1056541.0, 6302393.5), (1056601.0, 6302472.0),
+                      (1056607.0, 6302510.0), (1056592.0, 6302514.0), (1056572.0, 6302497.0),
+                      (1056547.0, 6302481.0), (1056531.0, 6302463.0), (1056505.0, 6302446.0),
+                      (1056495.0, 6302426.0)])
+PECHE_EDGE = [(1056515.0, 6302401.0), (1056525.0, 6302400.0), (1056542.0, 6302396.0),
+              (1056605.0, 6302474.0), (1056610.0, 6302507.0)]   # the sett walk (OpenStreetMap)
+PECHE_ZONES = {
+    "earth": [(1056505.0, 6302431.0), (1056512.0, 6302443.0), (1056527.0, 6302457.0), (1056537.0, 6302450.0),
+              (1056537.0, 6302438.0), (1056525.0, 6302422.0)],
+    "lawn_se": [(1056541.9, 6302420.4), (1056554.4, 6302437.25), (1056561.25, 6302432.25), (1056545.6, 6302412.9)],
+    "skate": [(1056531.25, 6302428.5), (1056540.0, 6302439.0), (1056553.75, 6302438.5), (1056543.75, 6302421.0)],
+    "turf": [(1056510.0, 6302417.0), (1056516.25, 6302421.6), (1056525.0, 6302415.4), (1056518.75, 6302409.75)],
+    "lawn_n": [(1056532.5, 6302458.5), (1056538.75, 6302467.25), (1056543.75, 6302463.5), (1056537.5, 6302454.75)],
+    "cinema": [(1056545.0, 6302478.5), (1056556.25, 6302491.0), (1056592.5, 6302468.5), (1056577.5, 6302449.75),
+               (1056563.75, 6302452.25)],
+}
+PECHE_COLS = {"earth": "#a38d6c", "lawn_se": "#5e8446", "skate": "#bdbab3", "turf": "#4b8048",
+              "lawn_n": "#5e8446", "cinema": "#d9d3c6"}
+
+
 def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     S = 6144
     px = S / (X1 - X0)
@@ -785,7 +893,8 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         if not closed:
             continue
         k = t.get("leisure") or t.get("landuse") or t.get("natural")
-        if k in GREEN and t.get("name") not in PAVED_GARDENS:
+        if k in GREEN and t.get("name") not in PAVED_GARDENS and not (
+                k == "pitch" and PECHE_DECK.intersects(Point(pts[0]))):
             poly(pts, GREEN[k])
     # Along the circuit, green comes only from mapped gardens: the photo's
     # green beside the road is tree shade, awnings and planters, and painted
@@ -822,6 +931,15 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
     can = can.filter(ImageFilter.GaussianBlur(3))
     img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#6d8a4c"))), img,
                           ImageChops.multiply(can.point(lambda v: int(min(255, v * 0.85))), keep_green))
+    # Le Rocher's cliffs: clean bare limestone all round, over the photo's
+    # green smudges and the canopy (the trees on the ledges stay as trees).
+    rz = Image.new("L", (S, S), 0)
+    bx0, by0, bx1, by1 = ROCHER_FINE_BOX
+    ImageDraw.Draw(rz).rectangle([(bx0 - X0) * px, (Y1 - by1) * px, (bx1 - X0) * px, (Y1 - by0) * px], fill=255)
+    rz = rz.filter(ImageFilter.GaussianBlur(20))
+    ImageDraw.Draw(rz).polygon(xy(np.asarray(PECHE_DECK.buffer(-1.5).exterior.coords)), fill=0)   # the garden's own beds
+    rk = ImageChops.multiply(st_.point(lambda v: min(255, int(v * 2.2))), rz)
+    img = Image.composite(Image.new("RGB", (S, S), tuple(hexrgb("#b5ab97"))), img, rk)
     d = ImageDraw.Draw(img)
     # Squares and pedestrian areas.
     for t, pts, closed in ways:
@@ -829,8 +947,40 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
                 "pedestrian", "footway", "service") or t.get("place") == "square" and closed:
             # Place du Palais is laid in dark red (street photos 2019).
             poly(pts, "#8c5b50" if t.get("name") == "Place du Palais" else "#dfd9cd")
+    # South of the Palace's gate the square goes on as a paved terrace under
+    # the pines, cannons along its parapet, down to the ramparts' walk: no
+    # lawn (the LiDAR pines and the blurred photo painted one there).
+    Fp = Frame(None, PALACE_O, PALACE_U)
+    fore = Fp.poly(-58.0, 2.0, 0.0, 42.0)
+    for t, pts, closed in ways:
+        if closed and t.get("leisure") == "garden" and len(pts) >= 3 and Polygon(pts).intersects(fore.buffer(25.0)):
+            fore = fore.union(Polygon(pts).buffer(0))
+    for q in to_polys(fore):
+        poly(np.asarray(q.exterior.coords), "#b8a690")
+    for t, pts, closed in ways:
+        if closed and t.get("name") == "Place du Palais":
+            poly(pts, "#8c5b50")
         if closed and t.get("amenity") == "parking" and t.get("parking") != "underground":
             poly(pts, "#9a9690")
+    # The public garden on the roof of the Pêcheurs car park, traced from
+    # the 20 cm photo: a pale stone deck, the sett walk round its sea edge,
+    # dry earth beds under olive trees, lawns, the small turf pitch, the
+    # concrete skate square, the summer cinema's terrace with its rows of
+    # seats.
+    for q in to_polys(PECHE_DECK):
+        poly(np.asarray(q.exterior.coords), "#d2cbbb")
+    for name_, pts_ in PECHE_ZONES.items():
+        poly(pts_, PECHE_COLS[name_])
+    # The cinema's seats: white rows parallel to the screen (north-west side).
+    cin = Polygon(PECHE_ZONES["cinema"]).buffer(-1.5)
+    u_, n_ = np.array((0.676, 0.737)), np.array((0.737, -0.676))
+    c0 = np.array(cin.centroid.coords[0])
+    for k in range(-16, 17):
+        o = c0 + n_ * k * 0.95
+        ln = LineString([o - u_ * 40, o + u_ * 40]).intersection(cin)
+        for g_ in getattr(ln, "geoms", [ln]):
+            if not g_.is_empty and g_.length > 1:
+                line(np.asarray(g_.coords), "#f1efe9", 0.5)
     if QA is not None:
         # The quay at the foot of the wall: paving, not the lawn the
         # aerial photo's pines and awnings made of it.
@@ -943,6 +1093,11 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         sh = Image.fromarray((shadow * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)
         sh = np.asarray(sh.filter(ImageFilter.GaussianBlur(int(0.5 * px)))).astype(np.float32) / 255
         tint = np.array([0.60, 0.64, 0.74], np.float32)
+        # On the Pêcheurs garden the LiDAR's trees and kiosks blur into
+        # big soft blots over the beds: half strength there.
+        dk = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(dk).polygon(xy(np.asarray(PECHE_DECK.exterior.coords)), fill=128)
+        sh = sh * (1.0 - np.asarray(dk).astype(np.float32) / 255)
         arr *= 1 - sh[..., None] * (1 - tint[None, None])
     # Shore: wet stone colour where the ground drops into the sea.
     seai = np.asarray(Image.fromarray((sea * 255).astype(np.uint8)).resize((S, S), Image.BILINEAR)) / 255
@@ -3155,6 +3310,34 @@ def grimaldi_forum(m, polys, mns, mntR, photo, stats):
     return [orient(q, 1.0) for q in to_polys(body)] + [hall]
 
 
+def rocher_cliff_top(poly, mntR):
+    """A building on the edge of Le Rocher's cliffs: BD TOPO's outline
+    often reaches over the edge, and walls from the lowest ground on it
+    hung a tall façade down the rock. Keep the part on the cliff top (and
+    a 1.5 m walk along the edge, the old town's path round the Rock)."""
+    ring = poly.exterior
+    s_ = np.linspace(0, ring.length, max(8, int(ring.length)))
+    p_ = shapely.line_interpolate_point(ring, s_)
+    z = mntR.sample(shapely.get_x(p_), shapely.get_y(p_))
+    if np.isnan(z).all():
+        return poly
+    if np.nanpercentile(z, 50) - np.nanmin(z) < 15.0:
+        return poly
+    x0, y0, x1, y1 = poly.bounds
+    xs = np.arange(x0 - 1, x1 + 1, RES)
+    ys = np.arange(y1 + 1, y0 - 1, -RES)
+    gx, gy = np.meshgrid(xs, ys)
+    zz = mntR.sample(gx.ravel(), gy.ravel()).reshape(gx.shape)
+    ztop = float(np.nanpercentile(z, 60))
+    keep = np.nan_to_num(zz, nan=-99.0) >= ztop - 3.0
+    top = cells_to_poly(keep, xs[0] - RES / 2, ys[0] + RES / 2, RES)
+    q = poly.intersection(top.buffer(-1.5))
+    parts = [g for g in to_polys(q) if g.area >= 10]
+    if not parts:
+        return None
+    return orient(max(parts, key=lambda g: g.area), 1.0)
+
+
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
     global BAY_NOW, GROUND_R, SHOP_NOW, ARCADE_NOW, PALE_NOW
     mntR = Raster(mnt)
@@ -3209,10 +3392,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             if key == CHAPITEAU:
                 footprint.append(chapiteau(m, mntR, stats))
                 continue
-            if key in (PALACE, MUSEE, CATH, FORT):
+            if key in (PALACE, MUSEE, CATH, FORT, PRISON):
                 # Le Rocher's landmarks are built piece by piece.
-                {PALACE: palais_princier, MUSEE: musee_oceanographique, CATH: cathedrale,
-                 FORT: fort_antoine}[key](m, None, mntR, stats)
+                if key == PRISON:
+                    prison(m, poly, mntR, stats)
+                else:
+                    {PALACE: palais_princier, MUSEE: musee_oceanographique, CATH: cathedrale,
+                     FORT: fort_antoine}[key](m, None, mntR, stats)
                 footprint.append(poly)
                 stats["landmarks"] = stats.get("landmarks", 0) + 1
                 continue
@@ -3245,6 +3431,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 glass_veranda(m, poly, mntR, 5.5 if key == HDP_VERANDA else 3.8, stats)
                 footprint.append(poly)
                 continue
+            if key not in (MUSEE, PRISON, PALACE, CATH, FORT) and box(*ROCHER_FINE_BOX).contains(poly.centroid):
+                poly = rocher_cliff_top(poly, mntR)
+                if poly is None:
+                    continue
             # Ground: lowest terrain along the outline.
             ring = poly.exterior
             s = np.linspace(0, ring.length, max(8, int(ring.length / 1.0)))
@@ -6687,9 +6877,12 @@ def no_tree_zones(ways):
     up, but no trees grow."""
     out = []
     # Place du Palais: its pines come from rocher_trees().
-    out.append(Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0))
+    out.append(Frame(None, PALACE_O, PALACE_U).poly(-60.0, 68.0, 0.5, 70.0))
     if ROCHER_GARDENS is not None:
         out.append(ROCHER_GARDENS)                 # ... and the Rock's gardens' too
+    # The Oceanographic Museum's sea face: the LiDAR's edge of the building
+    # over the drop reads as a row of tall trees standing against it.
+    out.append(Frame(None, MUSEE_O, MUSEE_U).poly(-3.0, MUSEE_L + 3.0, -0.5, 9.0))
     for tg, pts, closed in ways:
         if not closed or len(pts) < 4:
             continue
@@ -8359,9 +8552,23 @@ def palais_princier(m, gm, mntR, stats):
     F.window("+t", st[3], 53.0, 1.1, Z + 9.0, Z + 11.0, 0, 3, frame=grey * 1.06, arch=True)
     # Flag mast on top.
     p = F.xy(53.0, -9.0)
-    _cyl(m, p[0], p[1], Z + 25.2, Z + 37.0, 0.09, np.array(hexrgb("#e9e9e4")), sides=6)
-    F.box(52.95, 53.05, -9.0, -6.6, Z + 35.2, Z + 36.8, np.array(hexrgb("#d3202e")), top=False, sides="tT")
-    F.box(52.95, 53.05, -9.0, -6.6, Z + 35.2, Z + 36.0, np.array(hexrgb("#f7f5f2")), top=False, sides="tT")
+    # The sovereign's standard flies from Tour Sainte-Marie when the Prince
+    # is in: a big red-over-white flag (4:5), drawn on both faces with a
+    # gentle wave so it reads from across the port.
+    _cyl(m, p[0], p[1], Z + 23.2, Z + 33.4, 0.16, np.array(hexrgb("#e9e9e4")), sides=8)
+    _ball(m, p[0], p[1], Z + 33.55, 0.22, np.array(hexrgb("#c9a548")), None, 8, 5)
+    fl_red, fl_white = np.array(hexrgb("#d3202e"), float), np.array(hexrgb("#f3f0ea"), float)
+    FL, FH, ftop = 5.0, 4.0, Z + 33.1
+    nst = 6
+    for k in range(nst):
+        t0_, t1_ = -9.0 + 0.15 + FL * k / nst, -9.0 + 0.15 + FL * (k + 1) / nst
+        w0 = 0.35 * math.sin(math.pi * 1.5 * k / nst)
+        w1 = 0.35 * math.sin(math.pi * 1.5 * (k + 1) / nst)
+        for col_, z0_, z1_ in ((fl_red, ftop - FH / 2, ftop), (fl_white, ftop - FH, ftop - FH / 2)):
+            for sg_ in (-1, 1):
+                F.quad((53.0 + w0, t0_, z0_), (53.0 + w1, t1_, z0_), (53.0 + w1, t1_, z1_), (53.0 + w0, t0_, z1_),
+                       col_, (sg_, 0, 0))
+    stats["palace_flag_m"] = (FL, FH)
     # Curtain wall forward of the tower, to the clock tower.
     cw_ = (48.0, 66.0, -3.0, 3.5)
     F.box(*cw_, zg, Z + 13.5, grey, style=RUBBLE, uvm=0.55)
@@ -8391,7 +8598,7 @@ def palais_princier(m, gm, mntR, stats):
     wing(58.0, 80.0, -30.0, -3.0, 8.0, ("+s",), rows=[Z + 3.0])
 
     # -- The wings round the Cour d'honneur and behind ---------------------
-    wing(-27.0, 0.0, -63.0, -21.0, 17.0, ("-s", "+s"))
+    wing(-27.0, 0.0, -63.0, -21.0, 17.0, ("-s",))
     wing(-50.0, -27.0, -21.0, -1.6, 15.5, ("-s",))
     wing(-48.0, -33.0, -90.0, -21.0, 14.0, ("-s", "-t"))
     wing(-33.0, 25.0, -92.0, -63.0, 17.0, ("-t", "+t"))
@@ -8425,13 +8632,15 @@ def palais_princier(m, gm, mntR, stats):
         F.box(a - 0.18, a + 0.18, CT[0] + 2, CT[1] - 2, zc, zc + 0.02, pc, sides="")
     for b in np.linspace(CT[0] + 3, CT[1] - 3, 8):
         F.box(CS[0] + 2, CS[1] - 2, b - 0.18, b + 0.18, zc, zc + 0.02, pc, sides="")
-    # Court faces of the wings round it: frescoed ochre, two rows of windows.
-    for face, c, a0, a1 in (("+s", 0.0, -63.0, -21.0), ("-s", 23.0, -63.0, -21.0), ("-t", -21.0, 0.0, 23.0)):
+    # Court faces of the wings round it: frescoed ochre, rows of windows.
+    # The gate comes in through the east wing (-t at t -21); the north wing
+    # (-s at s 23) and the west end (+t at t -63) are plain ochre fronts.
+    for face, c, a0, a1 in (("-s", 23.0, -63.0, -21.0), ("-t", -21.0, 0.0, 23.0), ("+t", -63.0, 0.0, 23.0)):
         F.face_quad(face, c, a0, a1, zc, Z + 16.5, court_wall, out=0.02)
         nb = int(round((a1 - a0) / 3.8))
         for k in range(nb):
             a = a0 + (k + 0.5) * (a1 - a0) / nb
-            if face == "-t" and abs(a - gc) < 2.0:
+            if face == "-t" and abs(a - 11.0) < 2.0:
                 F.window(face, c, a, 3.0, zc, zc + 2.8, 0, 0, frame=marble, arch=True, dark=True, sill=False)
                 continue
             for i, z_ in enumerate((zc + 1.2, zc + 6.2, zc + 10.6)):
@@ -8439,36 +8648,51 @@ def palais_princier(m, gm, mntR, stats):
                 n_win += 1
             # Painted panels between the windows (the frescoes).
             F.face_quad(face, c, a + 0.95, a + 1.7, zc + 5.4, zc + 9.4, np.array(hexrgb("#c99d68")), out=0.04)
-    # The back of the court: the Galerie d'Hercule, two tiers of open arches,
-    # and in front the double horseshoe staircase in white Carrara marble.
-    gb = -63.0
-    F.face_quad("+t", gb, 0.0, 23.0, zc, Z + 17.0, court_wall, out=0.02)
-    for k in range(5):
-        a = 2.3 + k * 4.6
-        F.window("+t", gb, a, 3.0, zc, zc + 3.2, k, 0, frame=trim, arch=True, dark=True, sill=False)
-        F.window("+t", gb, a, 3.0, zc + 6.0, zc + 9.2, k, 1, frame=trim, arch=True, dark=True, sill=False)
-        F.balustrade("+t", gb + 0.3, a - 1.5, a + 1.5, zc + 6.0, trim, h=0.9, depth=0.25)
-        F.slab("+t", gb, a + 1.85, a + 2.75, zc, Z + 15.5, 0.2, trim)
-    F.slab("+t", gb, 0.0, 23.0, zc + 5.5, zc + 6.0, 0.6, trim)
-    F.window("+t", gb, 11.5, 1.2, zc + 11.6, zc + 13.6, 0, 3, frame=trim)
-    # Staircase: two quarter-turn flights from the court floor meeting at a
-    # landing in front of the gallery's middle arch.
-    cx, land_t, top = 11.5, gb + 3.2, zc + 6.0
-    F.box(cx - 2.2, cx + 2.2, gb, land_t, zc, top, marble)
-    F.balustrade("+t", land_t, cx - 2.2, cx + 2.2, top, marble, h=0.9, depth=0.25)
+    # The south side of the court: the Galerie d'Hercule, two tiers of open
+    # arcades along the whole south wing (it serves the south wing's rooms),
+    # and in the middle the double-revolution staircase in Carrara marble
+    # coming down into the court. A frame of its own: s along the gallery
+    # from the east end (t -21) to the west (t -63), t out into the court.
+    G = Frame(m, F.xy(0.0, -21.0), -F.v)
+    GL = 42.0
+    G.face_quad("+t", 0.0, 0.0, GL, zc, Z + 17.0, court_wall, out=0.02)
+    nbay = 9
+    bw_ = GL / nbay
+    for k in range(nbay):
+        a = (k + 0.5) * bw_
+        G.window("+t", 0.0, a, 3.0, zc, zc + 3.2, k, 0, frame=trim, arch=True, dark=True, sill=False)
+        G.window("+t", 0.0, a, 3.0, zc + 6.0, zc + 9.2, k, 1, frame=trim, arch=True, dark=True, sill=False)
+        G.balustrade("+t", 0.3, a - 1.5, a + 1.5, zc + 6.0, trim, h=0.9, depth=0.25)
+        # Frescoed panels over the upper arches (Hercules' labours).
+        G.face_quad("+t", 0.0, a - 1.6, a + 1.6, zc + 9.9, zc + 11.6, np.array(hexrgb("#c99d68")), out=0.04)
+        if k < nbay - 1:
+            G.slab("+t", 0.0, a + bw_ / 2 - 0.45, a + bw_ / 2 + 0.45, zc, Z + 15.5, 0.2, trim)
+    G.slab("+t", 0.0, 0.0, GL, zc + 5.5, zc + 6.0, 0.6, trim)
+    G.slab("+t", 0.0, 0.0, GL, zc + 12.0, zc + 12.4, 0.35, trim)
+    # Staircase: a landing on the middle arch, two flights curving out and
+    # down, their feet turned into the court (as at Fontainebleau), black
+    # Portor balls along the marble rail.
+    cx, land_t, top = GL / 2, 3.2, zc + 6.0
+    G.box(cx - 2.2, cx + 2.2, 0.0, land_t, zc, top, marble)
+    G.balustrade("+t", land_t, cx - 2.2, cx + 2.2, top, marble, h=0.9, depth=0.25)
+    portor = np.array(hexrgb("#1d1b1a"), float)
     for sg in (-1, 1):
         n_ = 28
         R0 = 6.4
         for k in range(n_):
             th = math.pi / 2 * (k + 0.5) / n_
-            # A quarter circle from the landing's side (top) round to the
-            # court floor, its foot turned toward the gate.
             a = cx + sg * (2.2 + R0 * math.sin(th))
             b = land_t + R0 * (1 - math.cos(th))
-            tan = sg * math.cos(th) * F.u + math.sin(th) * F.v
-            p = F.xy(a, b)
+            tan = sg * math.cos(th) * G.u + math.sin(th) * G.v
+            p = G.xy(a, b)
             zt = top - (top - zc) * (k + 1) / n_ + 0.18
             _box(m, p[0], p[1], tan, R0 * math.pi / 2 / n_ + 0.08, 1.7, zc, zt, marble * (0.97 + 0.03 * (k % 2)))
+            # The outer rail.
+            if k % 2 == 0:
+                ro = G.xy(cx + sg * (2.2 + (R0 + 0.8) * math.sin(th)), land_t + (R0 + 0.8) * (1 - math.cos(th)))
+                _box(m, ro[0], ro[1], tan, R0 * math.pi / n_ + 0.1, 0.22, zt, zt + 0.9, marble)
+                if k % 6 == 0:
+                    _ball(m, ro[0], ro[1], zt + 1.05, 0.16, portor, None, 6, 4)
         stats["palace_stair_steps"] = 2 * n_
     stats["palace"] = {"square": round(Z, 2), "court": round(zc, 2), "windows": n_win}
 
@@ -8513,6 +8737,7 @@ def palais_princier(m, gm, mntR, stats):
 
 # ------------------------------------------------- the Oceanographic Museum ----
 MUSEE = "BATIMENT0000000074078955"
+PRISON = "BATIMENT0000000324292895"        # Maison d'arrêt (prison())
 MUSEE_O = (1056417.9, 6302352.8)          # the sea face's south-west corner (BD TOPO)
 MUSEE_U = (74.3, 68.7)                    # along the sea face, south-west to north-east
 MUSEE_STONE = "#eae6dc"                   # pale La Turbie limestone (photos)
@@ -8559,6 +8784,14 @@ def musee_oceanographique(m, gm, mntR, stats):
             F.window("+t", 0.0, a, 1.6, z_, z_ + 2.4, k, i, frame=lit, arch=True, band=0.3)
             n_win += 1
         F.window("+t", 0.0, a, 1.9, Z - 1.6, Z + 1.4, k, 5, frame=lit, arch=True, band=0.3)
+    # Buttress strips: the paired columns' rhythm carried down the base to
+    # the rock, a little proud of the rustication.
+    for k in range(nb + 1):
+        a = k * L / nb
+        if CP[0] - 0.5 < a < CP[1] + 0.5:
+            continue
+        g = min(ground(a, 1.0), Z - 3.0)
+        F.box(a - 0.95, a + 0.95, 0.0, 0.4, g - 1.0, Z + 3.6, st * 0.98, sides="sST", style=RUBBLE, uvm=0.45)
     # Main order: tall arched windows between paired columns.
     zc0, zc1 = Z + 4.2, Z + 18.4
     F.slab("+t", 0.0, -0.2, L + 0.2, Z + 3.6, Z + 4.2, 0.55, lit)                        # string course
@@ -8915,9 +9148,7 @@ def armes_paving(gm, mntR, gz, stats):
     """The square and the Rampe Major, as slabs over the ground mesh in
     style HERRING: TEXCOORD_1 holds the grid's metres (the viewer lays the
     bricks and the bands)."""
-    pieces = [(ARMES["poly"], None)]
-    for r in ARMES["rampe"]:
-        pieces.append((r.buffer(ARMES_BAND / 2, cap_style=2).intersection(box(X0, Y0, X1, Y1)), r))
+    pieces = [(ARMES["poly"], None)]                # the Rampe Major: rampe_major() builds its steps
     area = 0.0
     for g, line in pieces:
         for q in to_polys(g):
@@ -8954,6 +9185,85 @@ def armes_paving(gm, mntR, gz, stats):
             area += q.area
     stats["armes_paved_m2"] = round(area)
     return round(area)
+
+
+def rampe_major(gm, m, ways, mnt, stats):
+    """The Rampe Major, the stepped ramp from Place d'Armes up to the
+    Palace (street photos 2016-2025): long gently sloping treads of red
+    herringbone brick between grey stone edges, each ending in one low
+    stone step (a pas-d'âne), a rubble parapet with a pale rendered coping
+    on the open side, the cliff on the other."""
+    mntR = Raster(mnt)
+    lines = [LineString(p_) for t, p_, c in ways if t.get("name") == "Rampe Major" and t.get("highway") == "steps"
+             and t.get("tunnel") not in ("yes", "building_passage") and t.get("layer", "0") == "0" and len(p_) >= 2]
+    W = ARMES_BAND
+    stone = np.array(hexrgb("#a9a49a"), float)
+    rubble = np.array(hexrgb(WALL_RUBBLE), float)
+    cope = np.array(hexrgb("#e2ddd2"), float)
+    n_steps, n_par = 0, 0.0
+    for ln in lines:
+        L = ln.length
+        if L < 3:
+            continue
+        nseg = max(1, int(round(L / W)))
+        ss = np.linspace(0.0, L, nseg + 1)
+        pts_ = np.array([ln.interpolate(x).coords[0] for x in ss])
+
+        def zc(x, y):
+            q = np.array([[x + dx, y + dy] for dx in (-1.0, 0.0, 1.0) for dy in (-1.0, 0.0, 1.0)])
+            z = mntR.sample(q[:, 0], q[:, 1])
+            return float(np.nanmedian(z)) if np.isfinite(z).any() else np.nan
+
+        zs = np.array([zc(*p_) for p_ in pts_])
+        if not np.isfinite(zs).all():
+            continue
+        # Keep the flight monotonic (the LiDAR under the trees wobbles).
+        up = zs[-1] >= zs[0]
+        zs = np.maximum.accumulate(zs) if up else np.minimum.accumulate(zs)
+        for i in range(nseg):
+            a, b = pts_[i], pts_[i + 1]
+            d = b - a
+            Ls = float(np.hypot(*d))
+            if Ls < 0.5:
+                continue
+            F = Frame(m, a, d)
+            lo, hi = (zs[i], zs[i + 1]) if up else (zs[i + 1], zs[i])
+            # The tread climbs a third of the rise, then one step.
+            za = zs[i] + 0.12
+            zb = za + (zs[i + 1] - zs[i]) * 0.35
+            z_next = zs[i + 1] + 0.12
+            # Tread top: herringbone brick (the viewer lays it from uv2).
+            corners = [(0.0, -W / 2, za), (Ls, -W / 2, zb), (Ls, W / 2, zb), (0.0, W / 2, za)]
+            P = np.array([F.E(*c)[0] for c in corners])
+            xy_ = np.array([F.xy(c[0], c[1]) for c in corners])
+            uv = np.column_stack([(xy_[:, 0] - X0) / (X1 - X0), (Y1 - xy_[:, 1]) / (Y1 - Y0)])
+            uv2 = np.array([[ss[i] + c[0], c[1] + W / 2] for c in corners])
+            gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=np.array([[0, 1, 2], [0, 2, 3]]),
+                   style=HERRING, uv2=uv2)
+            # The sides of the tread, down into the ground.
+            for sg in (-1, 1):
+                F.quad((0.0, sg * W / 2, za - 0.8), (Ls, sg * W / 2, zb - 0.8), (Ls, sg * W / 2, zb), (0.0, sg * W / 2, za),
+                       stone, (0, sg, 0))
+            # The step at the top end: a grey stone riser and nosing.
+            zr0, zr1 = (zb, z_next) if up else (z_next, zb)
+            if abs(z_next - zb) > 0.03:
+                riser_s = Ls if up else Ls
+                F.box(riser_s - 0.35, riser_s, -W / 2, W / 2, min(zr0, zr1) - 0.05, max(zr0, zr1), stone, top=True,
+                      sides="sS" if True else "")
+                n_steps += 1
+            # Parapet on the open (lower) side.
+            q1 = mntR.sample(*np.array([F.xy(Ls / 2, W / 2 + 2.5)]).T)[0]
+            q2 = mntR.sample(*np.array([F.xy(Ls / 2, -W / 2 - 2.5)]).T)[0]
+            if np.isfinite(q1) and np.isfinite(q2) and abs(q1 - q2) > 1.0:
+                sg = 1.0 if q1 < q2 else -1.0
+                t0, t1 = sorted((sg * W / 2, sg * (W / 2 + 0.45)))
+                ztop = max(za, zb) + 1.0
+                F.box(0.0, Ls, t0, t1, min(za, zb) - 1.5, ztop, rubble, top=False, style=RUBBLE, uvm=0.45)
+                F.box(-0.02, Ls + 0.02, t0 - 0.05, t1 + 0.05, ztop, ztop + 0.14, cope)
+                n_par += Ls
+    stats["rampe_major_steps"] = n_steps
+    stats["rampe_major_parapet_m"] = round(n_par)
+    return n_steps
 
 
 # ------------------------------------------------ Saint-Nicolas Cathedral ----
@@ -9340,6 +9650,118 @@ def _cannon(m, x, y, z, deg, scale=1.0):
               bronze)
 
 
+def peche_terrace(gm, m, mnt, gz, stats):
+    """The garden on the Parking des Pêcheurs' roof (25 m) and the walk at
+    its foot: the sett walk runs round the sea side just above the rocks
+    (OpenStreetMap, LiDAR 1-3 m), and from it the car park's sea wall rises
+    to the garden, a battered face of limestone rubble found from the
+    LiDAR's drop, with a parapet and coping on top."""
+    mntR = Raster(mnt)
+    E = LineString(PECHE_EDGE)
+    n_ = max(2, int(E.length / 2.0))
+    P = np.array([E.interpolate(E.length * i / n_).coords[0] for i in range(n_ + 1)])
+    T = np.gradient(P, axis=0)
+    T /= np.linalg.norm(T, axis=1, keepdims=True)
+    N = np.column_stack([-T[:, 1], T[:, 0]])                # inland (the garden on the walk's left)
+    ds = np.arange(0.0, 20.0, 0.25)
+    foot, top, zf, zt = [], [], [], []
+    for p_, n__ in zip(P, N):
+        q = p_[None] + ds[:, None] * n__[None]
+        z = np.nan_to_num(mntR.sample(q[:, 0], q[:, 1]), nan=0.0)
+        zw = float(np.median(z[:4]))
+        ztop = float(z.max())
+        up = np.nonzero(z > zw + 1.5)[0]
+        hi = np.nonzero(z >= ztop - 0.8)[0]
+        if ztop < 15 or not len(up) or not len(hi) or hi[0] <= up[0]:
+            foot.append(None); top.append(None); zf.append(np.nan); zt.append(np.nan)
+            continue
+        foot.append(p_ + n__ * max(0.0, ds[up[0]] - 0.6))
+        top.append(p_ + n__ * max(0.0, ds[hi[0]] - 0.3))
+        zf.append(zw)
+        zt.append(ztop)
+    stone = np.array(hexrgb(WALL_RUBBLE), float) * 1.02
+    cope = np.array(hexrgb("#e9e4d8"), float)
+    L_wall = 0.0
+    for i in range(len(P) - 1):
+        if top[i] is None or top[i + 1] is None:
+            continue
+        F = Frame(m, P[i], P[i + 1] - P[i])              # t out to sea
+        st_ = lambda q: ((q - F.O) @ F.u, (q - F.O) @ F.v)
+        za, zb = zt[i] + 0.05, zt[i + 1] + 0.05
+        (s0, t0), (s1, t1) = st_(top[i]), st_(top[i + 1])
+        (s2, t2), (s3, t3) = st_(foot[i]), st_(foot[i + 1])
+        F.quad((s2, t2, zf[i] - 0.4), (s3, t3, zf[i + 1] - 0.4), (s1, t1, zb), (s0, t0, za), stone, (0, 1, 0.3),
+               style=RUBBLE, uvm=0.45)
+        # Parapet and coping just inside the top of the face.
+        ta, L_ = min(t0, t1), float(np.hypot(*(P[i + 1] - P[i])))
+        sa_, sb_ = min(s0, s1), max(s0, s1)
+        F.box(sa_, sb_, ta - 0.45, ta, min(za, zb) - 0.3, max(za, zb) + 0.95, stone, top=False, style=RUBBLE, uvm=0.45)
+        F.box(sa_ - 0.03, sb_ + 0.03, ta - 0.5, ta + 0.05, max(za, zb) + 0.95, max(za, zb) + 1.08, cope)
+        L_wall += L_
+    # The walk: grey setts, 3 m wide, at the foot of the wall.
+    walk = E.buffer(1.5, cap_style=2)
+    stats["peche_walk_m2"] = round(_slab(gm, walk, mntR, None, SETT, lift=0.07, area=1.5))
+    stats["peche_seawall_m"] = round(L_wall)
+    return round(L_wall)
+
+
+def prison(m, poly, mntR, stats):
+    """The Maison d'arrêt on the Rock's north-east tip, built down the
+    cliff under Avenue des Pins: its roof terrace is about at the avenue
+    (LiDAR 48.5 m), its walls drop to the Pêcheurs road (13 m). Pale grey
+    limestone rubble like the ramparts, rows of small barred windows on
+    the open faces, a parapet round the roof, and the round rubble tower
+    on its north corner seen from the avenue (street photos 2019)."""
+    poly = orient(poly, 1.0)
+    stone = np.array(hexrgb(WALL_RUBBLE), float) * 0.98
+    pale = np.array(hexrgb("#e2ddd2"), float)
+    dark = np.array(hexrgb("#2a2826"), float)
+    x0, y0, x1, y1 = poly.bounds
+    TOP = 48.6
+    P = np.asarray(poly.exterior.coords)
+    n_win = 0
+    for a, b in zip(P[:-1], P[1:]):
+        L = float(np.hypot(*(b - a)))
+        if L < 0.6:
+            continue
+        F = Frame(m, a, b - a)                     # t out of the building (outline counter-clockwise)
+        ss = np.linspace(0.3, max(0.31, L - 0.3), max(2, int(L / 2)))
+        g = mntR.sample(*np.array([F.xy(s_, 1.2) for s_ in ss]).T)
+        gmin = float(np.nanmin(g)) if np.isfinite(g).any() else TOP - 3
+        z0 = min(gmin, TOP) - 0.6
+        F.quad((0.0, 0.0, z0), (L, 0.0, z0), (L, 0.0, TOP + 1.0), (0.0, 0.0, TOP + 1.0), stone, (0, 1, 0),
+               style=RUBBLE, uvm=0.45)
+        F.box(-0.05, L + 0.05, -0.45, 0.06, TOP + 1.0, TOP + 1.12, pale)               # coping
+        F.quad((0.0, -0.45, TOP), (L, -0.45, TOP), (L, -0.45, TOP + 1.0), (0.0, -0.45, TOP + 1.0), stone, (0, -1, 0))
+        if L < 3.5:
+            continue
+        nb = int(L / 3.2)
+        for i, z_ in enumerate(np.arange(TOP - 3.2, gmin + 2.0, -3.3)):
+            for k in range(nb):
+                s_ = (k + 0.5) * L / nb
+                gz = mntR.sample(*np.array([F.xy(s_, 1.2)]).T)[0]
+                if np.isfinite(gz) and z_ < gz + 1.0:
+                    continue
+                F.window("+t", 0.0, s_, 0.8, z_, z_ + 1.15, k, i, frame=pale, sill=True)
+                for d in (-0.2, 0.0, 0.2):                                              # bars
+                    F.box(s_ + d - 0.025, s_ + d + 0.025, 0.02, 0.07, z_, z_ + 1.15, dark, top=False, sides="T")
+                n_win += 1
+    add_roof(m, poly, TOP, np.array(hexrgb("#cfc8b8"), float), False)
+    # The round tower on the north corner.
+    c = min(P[:-1], key=lambda q: np.hypot(q[0] - 1056572.0, q[1] - 6302544.0))
+    gz = mntR.sample(np.array([c[0]]), np.array([c[1]]))[0]
+    zt0 = (float(gz) if np.isfinite(gz) else TOP) - 4.0
+    Ft = Frame(m, c, (1.0, 0.0))
+    Ft.drum(0.0, 0.0, zt0, TOP + 5.5, 2.7, stone, 16, style=RUBBLE, uvm=0.45)
+    Ft.cone(0.0, 0.0, TOP + 5.5, 2.75, 0.25, pale, 16, kind=PLAIN)
+    for k, th in enumerate((0.6, 2.2, 3.8)):
+        q = c + 2.72 * np.array([math.cos(th), math.sin(th)])
+        Fw = Frame(m, q, (-math.sin(th), math.cos(th)))
+        Fw.box(-0.35, 0.35, 0.0, 0.05, TOP + 2.6, TOP + 3.6, dark, top=False, sides="T")
+    stats["prison"] = {"roof": TOP, "windows": n_win}
+    return n_win
+
+
 def rocher_ramparts(m, ways, pts, mnt, stats):
     """The Rock's ramparts: the mapped retaining walls in pale limestone
     rubble with a parapet on the high side, and the battery of bronze
@@ -9468,7 +9890,10 @@ def rocher_trees(m, mns, mnt, ortho, fps, stats):
     """The umbrella pines on Place du Palais and the trees round it, from
     the LiDAR canopy (the photo is blurred there, so the generic finder,
     which wants green in it, misses them)."""
-    zone = Frame(None, PALACE_O, PALACE_U).poly(-60.0, 90.0, 0.5, 70.0)
+    # Pines only on the south side of the square (by the cannons and down
+    # to the ramparts); the square in front of the gate and the towers is
+    # open paving.
+    zone = Frame(None, PALACE_O, PALACE_U).poly(-60.0, 8.0, 0.5, 70.0)
     n_ = _zone_trees(m, zone, mns, mnt, ortho, fps, lambda h: "pine" if h > 7 else "broad", seed=47)
     # The gardens (Saint-Martin's pine wood on the south cliff), from the
     # canopy too: the generic finder thinned them to a few cypresses.
@@ -12100,6 +12525,7 @@ def main():
     print("Fairmont…", fairmont(gm, bm, tm, mns, mnt_f, sea, stats), "balconies,", stats.get("fairmont_columns"), "columns,",
           stats.get("fairmont_roof_trees"), "roof trees")
     print("Place d'Armes…", place_darmes(gm, bm, tm, ways, pts, mns, mnt_f, ortho, ortho_hi, gz, fps, stats), "stalls")
+    print("Rampe Major…", rampe_major(gm, bm, ways, mnt_f, stats), "steps,", stats.get("rampe_major_parapet_m"), "m of parapet")
     print("Le Rocher trees…", rocher_trees(tm, mns, mnt_f, ortho, fps, stats))
     print("Le Rocher ramparts…", rocher_ramparts(bm, ways, pts, mnt_f, stats), "m of wall,",
           stats.get("rampart_cannons"), "cannons")
@@ -12107,6 +12533,8 @@ def main():
           stats.get("rocher_garden_path_m2"), "m2 of paths")
     print("Le Rocher streets…", rocher_streets(gm, ways, mnt_f, gz, fps, stats), "m2 of setts,",
           stats.get("rocher_brick_m2"), "m2 of brick pavement")
+    print("Pêcheurs garden…", peche_terrace(gm, bm, mnt_f, gz, stats), "m of sea wall,",
+          stats.get("peche_walk_m2"), "m2 of walk")
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,

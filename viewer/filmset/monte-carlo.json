@@ -6,80 +6,84 @@
   "height": 0
  },
  "bounds_l93": [
-  1055598,
-  6302050,
+  1055100,
+  6301552,
   1057548,
   6304000
  ],
  "clip": [
   [
-   7.4147884,
-   43.7279867
+   7.4082737,
+   43.7237628
   ],
   [
-   7.438947,
-   43.7270035
+   7.4385998,
+   43.7225294
   ],
   [
    7.4403069,
    43.7445228
   ],
   [
-   7.4161409,
-   43.7455063
+   7.4099692,
+   43.7457566
   ]
  ],
- "triangles": 4454245,
+ "triangles": 6423331,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
-  "x0": 1055598,
+  "x0": 1055100,
   "y1": 6304000,
   "res": 1.0,
-  "size": 1950,
+  "size": 2448,
   "affine": [
    [
-    0.99822861,
-    -0.056036421,
-    2.544e-06
+    0.998226974,
+    -0.05603438,
+    4.1498e-05
    ],
    [
-    0.05603642,
-    0.998228638,
-    5.6847e-05
+    0.056034375,
+    0.998227001,
+    9.5937e-05
    ],
    [
-    -1064.498235888,
-    -1279.127727597,
-    48.757278367
+    -1589.517254719,
+    -1748.339992044,
+    48.579546482
    ]
   ]
  },
- "buildings": 1674,
- "dropped": 16,
- "rooftop": 101,
- "roof_plants": 67,
- "levels": 1675,
+ "buildings": 2911,
+ "dropped": 61,
+ "rooftop": 128,
+ "roof_plants": 106,
+ "levels": 2915,
  "towers": 10,
- "trees": 1736,
- "yachts": 779,
- "real_floors": 838,
+ "trees": 3749,
+ "yachts": 942,
+ "real_floors": 1339,
  "styles": [
-  354,
-  239,
+  566,
+  274,
   7,
-  371,
-  307,
-  93,
+  664,
+  646,
+  134,
   2,
-  88,
-  213
+  185,
+  433
  ],
- "shop_buildings": 198,
  "balconies": 1094,
+ "shop_buildings": 227,
+ "prison": {
+  "roof": 48.6,
+  "windows": 46
+ },
+ "landmarks": 10,
  "verandas": 3,
  "hdp": 1,
- "landmarks": 7,
  "casino_halls": 6,
  "heracles_awnings": 138,
  "heracles": {
@@ -96,13 +100,20 @@
  },
  "cathedral_windows": 71,
  "palace_gate": 13.5,
+ "palace_flag_m": [
+  5.0,
+  4.0
+ ],
  "palace_stair_steps": 56,
  "palace": {
   "square": 62.47,
   "court": 66.51,
-  "windows": 641
+  "windows": 590
  },
  "palace_cannons": 4,
+ "stade_wall_m": 730,
+ "stade_louis_ii": 1,
+ "chapiteau": 1,
  "fort_antoine": 1,
  "mareterra_slabs": 139,
  "forum_tiers": [
@@ -112,53 +123,54 @@
  ],
  "photo_facade_colours": 58,
  "photo_facade_types": 40,
- "photo_roofs": 1610,
+ "photo_roofs": 2863,
  "photo_lean": [
-  0.02000000000000035,
+  0.010000000000000342,
   -0.019999999999999685
  ],
  "casino_palms": 15,
  "mareterra_trees": 120,
  "boats_by_berth": {
-  "alongside": 4,
-  "stern-to": 738,
-  "photo outline": 21,
+  "alongside": 7,
+  "stern-to": 880,
+  "photo outline": 39,
   "marina": 16
  },
- "day_boats": 373,
- "sailing_yachts": 35,
+ "day_boats": 442,
+ "sailing_yachts": 34,
  "quay_wall_m": 2471,
- "bridges": 21,
+ "bridges": 29,
  "diving_towers": 1,
  "metropole": {
   "parasols": 7,
   "loungers": 9,
   "pavilions": 5
  },
+ "podium_wall_m": 273,
  "tunnel_portals": 3,
- "road_m": 57809,
- "kerb_m": 40669,
- "lamps": 1249,
+ "road_m": 82249,
+ "kerb_m": 62953,
+ "lamps": 1849,
  "spectators": 5592,
- "sidewalk_m2": 56894,
- "kerb_stone_m": 13071,
+ "sidewalk_m2": 56844,
+ "kerb_stone_m": 13052,
  "kerb_red_white_m": 821,
  "hairpin_wall_m": 87,
  "allee_shops": 10,
  "casino_apron_m2": 1902,
  "cafe_parasols": 16,
  "balustrade_m": 496,
- "side_street_steps_m": 356,
- "street_railing_m": 337,
+ "side_street_steps_m": 363,
+ "street_railing_m": 338,
  "garden_wall_m": 510,
- "street_wall_up_m": 966,
- "street_wall_down_m": 494,
+ "street_wall_up_m": 968,
+ "street_wall_down_m": 495,
  "carpark_doors": 1,
  "grid_slots": 20,
  "ostende_parapet_m": 421,
- "fountains": 12,
- "statues": 23,
- "flags": 21,
+ "fountains": 13,
+ "statues": 33,
+ "flags": 27,
  "sky_mirror": 1,
  "quai_wall_m": 548,
  "quai_steps": 2,
@@ -167,20 +179,24 @@
  "fairmont_balconies": 204,
  "fairmont_blocks": 882,
  "fairmont_columns": 39,
- "armes_paved_m2": 2861,
+ "armes_paved_m2": 2264,
  "armes_trees": 21,
  "armes_kiosks": 3,
- "armes_stalls": 32,
+ "armes_stalls": 33,
  "armes_lamps": 14,
  "armes_bollards": 53,
- "rocher_trees": 295,
+ "rampe_major_steps": 50,
+ "rampe_major_parapet_m": 226,
+ "rocher_trees": 275,
  "rampart_m": 1115,
  "rampart_cannons": 16,
  "rocher_garden_path_m2": 2943,
  "rocher_benches": 27,
  "palais_sq_m2": 3236,
- "rocher_sett_m2": 27467,
- "rocher_brick_m2": 754,
+ "rocher_sett_m2": 27673,
+ "rocher_brick_m2": 734,
+ "peche_walk_m2": 482,
+ "peche_seawall_m": 139,
  "conda_ped_m2": 7747,
  "conda_sett_m2": 1742,
  "gastaud_m2": 1153,
@@ -189,8 +205,8 @@
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
  "track_clear": true,
- "roof_kit": 3586,
- "roof_texels_per_m": 4.09,
+ "roof_kit": 3933,
+ "roof_texels_per_m": 3.22,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
