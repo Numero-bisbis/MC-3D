@@ -804,6 +804,14 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             poly(np.asarray(q.exterior.coords), QA_ASPHALT)
         for q in to_polys(QA["walk"]):
             poly(np.asarray(q.exterior.coords), QA_WALK)
+    if ARMES is not None:
+        # Place d'Armes and the Rampe Major in their brick red (the viewer
+        # reads the shade against it and lays the bricks).
+        for q in to_polys(ARMES["poly"]):
+            poly(np.asarray(q.exterior.coords), ARMES_BRICK)
+        for r in ARMES["rampe"]:
+            for q in to_polys(r.buffer(ARMES_BAND / 2, cap_style=2)):
+                poly(np.asarray(q.exterior.coords), ARMES_BRICK)
     if SW is not None:
         # Pavements along the circuit: paving (what is in their holes,
         # gardens and planters, stays).
@@ -1122,7 +1130,7 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None, mi
         if style is not None and not inward:
             a_, b_ = pts[:-1], pts[1:]
             okk = np.linalg.norm(b_ - a_, axis=1) > 0.3
-            pieces = street_rise(a_[okk], b_[okk], base, z0, z1, fh)
+            pieces = street_rise(a_[okk], b_[okk], base, z0, z1, fh) if ARCADE_NOW is None else None
             if pieces is not None:
                 sloped_walls(m, pieces, a_[okk], b_[okk], z0, z1, base, fh, col, kind, style)
                 continue
@@ -1145,15 +1153,23 @@ def add_walls(m, poly, z0, z1, base, fh, col, kind, inward=False, style=None, mi
                     U0.append(nb[i] * c0); U1.append(nb[i] * c1); F.append(fl)
             a, b = np.array(A_), np.array(B_)
             u0, u1, shop = np.array(U0), np.array(U1), np.array(F)
+        # Under an arcade (armes_arcade) the wall starts above the arches.
+        z0v = np.full(len(a), float(z0))
+        if ARCADE_NOW is not None and not inward:
+            z0v = np.where(_arcade_mask(a, b), np.maximum(z0v, ARCADE_NOW["z"]), z0v)
+            keep = z0v < z1 - 0.01
+            a, b, u0, u1, shop, z0v = a[keep], b[keep], u0[keep], u1[keep], shop[keep], z0v[keep]
         k = len(a)
+        if not k:
+            continue
         P = enu_fast(np.column_stack([a[:, 0], b[:, 0], b[:, 0], a[:, 0]]).ravel(),
                      np.column_stack([a[:, 1], b[:, 1], b[:, 1], a[:, 1]]).ravel(),
-                     np.tile([z0, z0, z1, z1], k)).reshape(k, 4, 3)
+                     np.column_stack([z0v, z0v, np.full(k, z1), np.full(k, z1)]).ravel()).reshape(k, 4, 3)
         nrm = np.cross(P[:, 1] - P[:, 0], P[:, 3] - P[:, 0])
         nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
-        v0, v1 = (z0 - base) / fh, (z1 - base) / fh
+        v0, v1 = (z0v - base) / fh, np.full(k, (z1 - base) / fh)
         uv = np.stack([np.column_stack([u0, u1, u1, u0]),
-                       np.column_stack([np.full(k, v0), np.full(k, v0), np.full(k, v1), np.full(k, v1)])], -1)
+                       np.column_stack([v0, v0, v1, v1])], -1)
         idx = (np.arange(k)[:, None] * 4 + np.array([0, 1, 2, 0, 2, 3])[None]).ravel()
         uv2 = np.column_stack([np.repeat(shop, 4), np.zeros(4 * k)])
         m.add(P.reshape(-1, 3), np.repeat(nrm, 4, 0), col, kind, uv=uv.reshape(-1, 2), idx=idx, style=style,
@@ -2328,6 +2344,10 @@ LANDMARKS = [
     ("Théâtre Princesse Grace", (1056443, 6303173), S_DECO, "#efe2c8"),
     ("Yacht Club de Monaco", (1056540, 6303156), S_RIBBON, "#f4f3ef"),   # white decks like a yacht
     ("Église Saint-Charles", (1056513, 6303731), S_ARCH, "#e9dcc4"),
+    # Place d'Armes (street photos 2019-2025): the salmon-pink block with
+    # cream trim on its white arcade, and the cream market hall.
+    ("Place d'Armes north side", (1055948, 6302612), S_BELLE, "#f2b89f"),
+    ("Halles du marché de la Condamine", (1055992, 6302585), S_ARCH, "#eed8b6"),
 ]
 
 
@@ -3046,7 +3066,7 @@ def grimaldi_forum(m, polys, mns, mntR, photo, stats):
 
 
 def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
-    global BAY_NOW, GROUND_R, SHOP_NOW
+    global BAY_NOW, GROUND_R, SHOP_NOW, ARCADE_NOW
     mntR = Raster(mnt)
     GROUND_R = mntR
     # Shops whose point lies inside some outline belong to that building only.
@@ -3295,6 +3315,11 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             if SHOP_NOW is not None:
                 stats["shop_buildings"] = stats.get("shop_buildings", 0) + 1
             zb = base - 1.0
+            ARCADE_NOW = None
+            if ARMES is not None and key in ARCADES:
+                # The arcade on Place d'Armes: arches, shops behind, then
+                # the walls on that side start above it.
+                armes_arcade(m, poly, key, col, kind, style, fh, mntR, stats)
             for li, (region, hz) in enumerate(levels):
                 zt = base + hz
                 last = li == len(levels) - 1
@@ -3463,6 +3488,7 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     m, levels[0][0], base, hwall if tiled else levels[0][1], fh, style, col, rnd,
                     info["balconies"], info["depth"])
             SHOP_NOW = None
+            ARCADE_NOW = None
             footprint.append(poly)
             stats["buildings"] += 1
             stats["levels"] += len(levels)
@@ -6313,6 +6339,8 @@ def no_tree_zones(ways):
         out += [crowd_free(a, b, TRACK_HALF + 10.0) for a, b in CROWD_ZONES]
     if QA is not None:
         out.append(QA["poly"].buffer(3.0))         # quai_albert() plants its own pines
+    if ARMES is not None:
+        out.append(ARMES["zone"])                  # armes_trees() plants the square's own
     al = allee_line(ways)
     if al is not None and al.length > 30:
         # The Allée François Blanc is open paving from the square down to
@@ -7228,6 +7256,494 @@ def _ball(m, cx, cy, z, r, col, style, nu=10, nv=6):
     nrm = Q - P
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
     m.add(P, nrm, col, PLAIN, idx=t, style=style)
+
+
+# ------------------------------------------------------------ Place d'Armes ----
+# The market square of La Condamine at the foot of the Rocher, rebuilt from
+# the IGN 20 cm photo, the LiDAR, OpenStreetMap and street photos on
+# Mapillary (2019, 2021, 2025): red herringbone brick laid in a grid of grey
+# stone bands, the market's red-canopied stalls, tall pines and small trees,
+# the brown snack-bar kiosk with its barrel roofs, the newspaper kiosk, the
+# fenced wooden playground, cast-iron lamps with clusters of globes, brown
+# bollards along the road. On the north side the salmon-pink block stands
+# on a white stone arcade; on the east side the Halles du marché (cream,
+# arched, a tiled roof with a glazed ridge) open onto the square through
+# their own arcade. The Rampe Major, the paved stepped ramp up to the
+# Palace, is laid in the same brick and grey stone.
+ARMES_NAME = "Place d'Armes"
+ARMES = None                  # {"poly", "zone", "o", "u", "v", "rampe"}
+ARMES_BAND = 4.7              # m between the grey stone bands (the photo's period)
+ARMES_PHASE = (0.0, -7.6)     # where a band crosses, m along / across the grid from the square's middle
+ARMES_C = (1055944.0, 6302584.0)
+HERRING = 11                  # GROUND style: herringbone brick in grey bands (viewer/filmset.js)
+ARMES_NORTH = "BATIMENT0000000074074633"     # the arcaded block on the north side
+ARMES_HALLE = "BATIMENT0000000074074614"     # Halles du marché de la Condamine
+# Arcades on the square: height of the arch row, depth, bay.
+ARCADES = {ARMES_NORTH: {"h": 5.2, "d": 3.2, "bay": 4.3, "pier": 1.0},
+           ARMES_HALLE: {"h": 5.6, "d": 3.4, "bay": 4.6, "pier": 1.1}}
+ARCADE_NOW = None             # the arcade edges of the building being built (add_walls)
+ARMES_BRICK = "#a4553f"
+ARMES_IRON = "#3a2a22"        # the lamps and bollards: dark brown cast iron
+ARMES_KIOSK = "#4b3125"       # varnished dark wood
+ARMES_KIOSK_ROOF = "#6e4430"  # the barrel roofs, brown
+ARMES_CANOPY = "#c3312d"      # the market stalls' red canopies
+
+
+def armes_setup(ways):
+    sq = None
+    for t, pts, closed in ways:
+        if closed and t.get("name") == ARMES_NAME and t.get("highway") == "pedestrian" and len(pts) > 3:
+            sq = Polygon(pts).buffer(0)
+    if sq is None or sq.is_empty:
+        return None
+    # The grid runs along the north frontage (the square's long side).
+    rr = np.asarray(sq.minimum_rotated_rectangle.exterior.coords)
+    ed = [rr[i + 1] - rr[i] for i in range(2)]
+    u = max(ed, key=lambda e: np.linalg.norm(e))
+    u = u / np.linalg.norm(u)
+    if u[0] < 0:
+        u = -u
+    v = np.array([-u[1], u[0]])
+    rampe = [LineString(p) for t, p, c in ways if t.get("name") == "Rampe Major" and t.get("highway") == "steps"]
+    rampe = [r for r in rampe if r.intersects(box(X0, Y0, X1, Y1)) and r.distance(sq) < 30]
+    return {"poly": sq, "zone": sq.buffer(12.0), "o": np.array(ARMES_C), "u": u, "v": v, "rampe": rampe}
+
+
+def armes_grid(x, y):
+    """Metres along / across the square's grid (TEXCOORD_1 of its paving)."""
+    d = np.column_stack([x, y]) - ARMES["o"]
+    return np.column_stack([d @ ARMES["u"] - ARMES_PHASE[0], d @ ARMES["v"] - ARMES_PHASE[1]])
+
+
+def _arcade_mask(a, b):
+    """Which wall edges a-b run along the arcade of the building being built."""
+    if ARCADE_NOW is None or not len(a):
+        return np.zeros(len(a), bool)
+    ok = np.zeros(len(a), bool)
+    for L in ARCADE_NOW["lines"]:
+        da = shapely.distance(shapely.points(a), L)
+        db = shapely.distance(shapely.points(b), L)
+        ok |= (da < 0.6) & (db < 0.6)
+    return ok
+
+
+def _arch_face(m, a, b, zf, ztop, nb, pier, col, out):
+    """A wall from a to b (its outside towards `out`), from the floor zf
+    (one per bay) up to ztop, pierced by nb round arches: the arcade's
+    face, both sides."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    L = float(np.linalg.norm(b - a))
+    u = (b - a) / L
+    w = L / nb
+    for i in range(nb):
+        z0 = float(zf[i])
+        ow = w - pier
+        r = ow / 2
+        spring = max(z0 + 2.4, ztop - 0.9 - r)
+        s0, s1 = i * w, (i + 1) * w
+        c = (s0 + s1) / 2
+        arc = [(c + r * math.cos(t), spring + r * math.sin(t)) for t in np.linspace(0, math.pi, 13)]
+        hole = [(c + r, z0)] + arc + [(c - r, z0)]
+        outer = [(s0, z0 - 0.4), (s1, z0 - 0.4), (s1, ztop), (s0, ztop)]
+        face = Polygon(outer).difference(Polygon(hole).buffer(0))
+        for q in to_polys(face):
+            t_ = triangulate(orient(q, 1.0))
+            if t_ is None:
+                continue
+            v, tri = t_
+            xy = a[None] + u[None] * v[:, :1]
+            for sg, off in ((1.0, 0.02), (-1.0, -0.3)):
+                P = enu_fast(xy[:, 0] + out[0] * off, xy[:, 1] + out[1] * off, v[:, 1])
+                A, B_, C = P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]]
+                nn = np.cross(B_ - A, C - A)
+                wv = enu_fast(np.array([xy[0, 0], xy[0, 0] + out[0] * sg]), np.array([xy[0, 1], xy[0, 1] + out[1] * sg]),
+                              np.array([z0, z0]))
+                want = np.tile(wv[1] - wv[0], (len(tri), 1))
+                flip = (nn * want).sum(1) < 0
+                B2 = np.where(flip[:, None], C, B_)
+                C2 = np.where(flip[:, None], B_, C)
+                m.tri(A, B2, C2, col * (1.0 if sg > 0 else 0.8), PLAIN)
+        # The arch's intrados and the pier's sides: the face's depth.
+        for t0, t1 in zip(np.linspace(0, math.pi, 13)[:-1], np.linspace(0, math.pi, 13)[1:]):
+            p0 = np.array([c + r * math.cos(t0), spring + r * math.sin(t0)])
+            p1 = np.array([c + r * math.cos(t1), spring + r * math.sin(t1)])
+            q0, q1 = a + u * p0[0], a + u * p1[0]
+            E = lambda q, z, o: enu_fast(np.array([q[0] + out[0] * o]), np.array([q[1] + out[1] * o]), np.array([z]))[0]
+            _quad(m, E(q0, p0[1], 0.02)[None], E(q1, p1[1], 0.02)[None], E(q1, p1[1], -0.3)[None],
+                  E(q0, p0[1], -0.3)[None], col * 0.9, np.array([[0.0, 0.0, -1.0]]))
+        for sx in (c - r, c + r):
+            q = a + u * sx - out * 0.14
+            _box(m, q[0], q[1], u, 0.02, 0.32, z0 - 0.4, spring, col * 0.9, top=False)
+
+
+def armes_arcade(m, poly, key, col, kind, style, fh, mntR, stats):
+    """The arcade of a building on the square: the arcade edges' walls start
+    above it (add_walls, through ARCADE_NOW), and here the arch face, the
+    shop wall at the back, the ceiling and the pale stone floor."""
+    global ARCADE_NOW
+    spec = ARCADES[key]
+    sq = ARMES["poly"]
+    ring = np.asarray(orient(poly, 1.0).exterior.coords)
+    lines, n_ = [], 0
+    zs_all = []
+    for a, b in zip(ring[:-1], ring[1:]):
+        L = float(np.linalg.norm(b - a))
+        if L < 6:
+            continue
+        u = (b - a) / L
+        out = np.array([u[1], -u[0]])
+        mid = (a + b) / 2
+        if sq.distance(Point(*(mid + out * 2.0))) > 1.5:
+            continue
+        nb = max(1, int(round(L / spec["bay"])))
+        s = (np.arange(nb) + 0.5) / nb
+        pp = a[None] + (b - a)[None] * s[:, None] + out[None] * 1.5
+        zf = mntR.sample(pp[:, 0], pp[:, 1])
+        if not np.isfinite(zf).any():
+            continue
+        zf = np.where(np.isfinite(zf), zf, np.nanmedian(zf)) + 0.05
+        ztop = float(zf.max()) + spec["h"]
+        _arch_face(m, a, b, zf, ztop, nb, spec["pier"], np.array(hexrgb("#efe9dc")), out)
+        # Back wall (shops, lit), ceiling, floor.
+        d = spec["d"]
+        back_a, back_b = a - out * d, b - out * d
+        strip = orient(Polygon([a, b, back_b, back_a]), 1.0)
+        zlo = float(zf.min())
+        add_walls(m, strip, zlo - 0.3, ztop, zlo, max(3.0, ztop - zlo), col * 0.92, kind, inward=True)
+        nbk = max(1, int(round(L / spec["bay"])))
+        for i in range(nbk):
+            q = back_a + (back_b - back_a) * (i + 0.5) / nbk + out * 0.04
+            z0_ = float(zf[min(i, len(zf) - 1)])
+            _vpanel(m, q, u, -out, [(-spec["bay"] / 2 + 0.6, z0_), (spec["bay"] / 2 - 0.6, z0_),
+                                    (spec["bay"] / 2 - 0.6, z0_ + 3.2), (-spec["bay"] / 2 + 0.6, z0_ + 3.2)],
+                    np.array(hexrgb("#e3bd82")), depth=0.02, style=LIT_GLASS)
+        t_ = triangulate(strip)
+        if t_ is not None:
+            v, tri = t_
+            P = enu_fast(v[:, 0], v[:, 1], np.full(len(v), ztop - 0.02))
+            _quad_tris(m, P, tri, np.array(hexrgb("#e8e0cf")) * 0.8, down=True)
+            zfl = mntR.sample(v[:, 0], v[:, 1])
+            zfl = np.where(np.isfinite(zfl), zfl, zlo) + 0.06
+            P = enu_fast(v[:, 0], v[:, 1], zfl)
+            _quad_tris(m, P, tri, np.array(hexrgb("#ddd5c6")), down=False)
+        lines.append(LineString([a, b]))
+        zs_all.append(ztop)
+        n_ += nb
+    ARCADE_NOW = {"lines": lines, "z": max(zs_all)} if lines else None
+    stats["armes_arches"] = stats.get("armes_arches", 0) + n_
+    return n_
+
+
+def _quad_tris(m, P, tri, col, down):
+    A, B_, C = P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]]
+    nn = np.cross(B_ - A, C - A)
+    up = np.array([0.0, 0.0, 1.0])
+    flip = ((nn @ up) > 0) == down
+    B2 = np.where(flip[:, None], C, B_)
+    C2 = np.where(flip[:, None], B_, C)
+    m.tri(A, B2, C2, col, PLAIN)
+
+
+def armes_paving(gm, mntR, gz, stats):
+    """The square and the Rampe Major, as slabs over the ground mesh in
+    style HERRING: TEXCOORD_1 holds the grid's metres (the viewer lays the
+    bricks and the bands)."""
+    pieces = [(ARMES["poly"], None)]
+    for r in ARMES["rampe"]:
+        pieces.append((r.buffer(ARMES_BAND / 2, cap_style=2).intersection(box(X0, Y0, X1, Y1)), r))
+    area = 0.0
+    for g, line in pieces:
+        for q in to_polys(g):
+            q = shapely.set_precision(q.simplify(0.05), 0.01)
+            if q.is_empty or q.geom_type != "Polygon" or q.area < 2 or not q.is_valid:
+                continue
+            tr = triangulate(orient(q, 1.0), area=3)
+            if tr is None:
+                continue
+            v, tri = tr
+            z = mntR.sample(v[:, 0], v[:, 1])
+            if gz is not None:
+                fi, fj = (v[:, 0] - X0) / GRID, (Y1 - v[:, 1]) / GRID
+                z = np.fmax(z, ndimage.map_coordinates(gz, [fj, fi], order=1, mode="nearest"))
+            ok = np.isfinite(z)
+            if not ok.all():
+                z = np.where(ok, z, np.nanmedian(z))
+            zt = z[tri]
+            tri = tri[(zt.max(1) - zt.min(1)) < 2.0]
+            P = enu_fast(v[:, 0], v[:, 1], z + 0.08)
+            uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+            if line is None:
+                uv2 = armes_grid(v[:, 0], v[:, 1])
+            else:
+                # Along the ramp, and across it from one edge: the grey
+                # stone edges and the steps' nosings are the bands.
+                s_ = shapely.line_locate_point(line, shapely.points(v))
+                cp = shapely.line_interpolate_point(line, s_)
+                dx, dy = v[:, 0] - shapely.get_x(cp), v[:, 1] - shapely.get_y(cp)
+                tg = np.array(line.coords[-1]) - np.array(line.coords[0])
+                side = np.sign(tg[0] * dy - tg[1] * dx)
+                uv2 = np.column_stack([s_, side * np.hypot(dx, dy) + ARMES_BAND / 2])
+            gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=HERRING, uv2=uv2)
+            area += q.area
+    stats["armes_paved_m2"] = round(area)
+    return round(area)
+
+
+def armes_trees(m, mns, mnt, ortho, fps, stats):
+    """The square's trees where the LiDAR has them (the generic tree finder
+    wants green in the photo and missed the tall dark pines): tall ones are
+    the pines along the road and by the market hall, low ones small leafy
+    trees. The market's red canopies are not trees."""
+    zone = ARMES["zone"].difference(unary_union([p for p in fps if p.distance(ARMES["poly"]) < 15] or [Polygon()]))
+    x0, y0, x1, y1 = zone.bounds
+    c0, c1 = int((x0 - X0) / RES), int((x1 - X0) / RES)
+    r0, r1 = int((Y1 - y1) / RES), int((Y1 - y0) / RES)
+    chm = np.nan_to_num(mns[r0:r1, c0:c1] - mnt[r0:r1, c0:c1])
+    o = ortho[r0:r1, c0:c1].astype(np.float32)
+    red = (o[..., 0] - o[..., 1] > 40) & (chm < 5)
+    gx, gy = cell_xy(np.arange(r0, r1)[:, None], np.arange(c0, c1)[None, :])
+    gx, gy = np.broadcast_arrays(gx, gy)
+    inz = contains_xy(zone, gx, gy)
+    sm = ndimage.gaussian_filter(np.where(inz & ~red, chm, 0), 1.5)
+    mx = ndimage.maximum_filter(sm, size=9)
+    rnd = np.random.default_rng(31)
+    n_ = 0
+    for r, c in np.argwhere((sm == mx) & (sm > 3.2) & inz):
+        h = float(min(chm[max(0, r - 2):r + 3, max(0, c - 2):c + 3].max(), 24))
+        win = chm[max(0, r - 14):r + 15, max(0, c - 14):c + 15] > max(2.5, h * 0.45)
+        rad = float(np.clip(math.sqrt(win.sum() * RES * RES / math.pi), 1.4, 6.5))
+        x, y = gx[r, c], gy[r, c]
+        z = float(mnt[r0 + r, c0 + c])
+        if not np.isfinite(z):
+            continue
+        kind = "pine" if h > 11 else "broad"
+        add_tree(m, x, y, z, h, rad * (0.9 if kind == "pine" else 0.85), kind, rnd)
+        n_ += 1
+    stats["armes_trees"] = n_
+    return n_
+
+
+def _barrel(m, c, u, L, W, z, rise, col, nseg=10):
+    """A barrel roof along u, L long, W wide, springing at z."""
+    v = np.array([-u[1], u[0]])
+    t = np.linspace(0, math.pi, nseg + 1)
+    xs, zs = np.cos(t) * W / 2, z + np.sin(t) * rise
+    a, b = c - u * L / 2, c + u * L / 2
+    for i in range(nseg):
+        p = [a + v * xs[i], a + v * xs[i + 1], b + v * xs[i + 1], b + v * xs[i]]
+        zz = [zs[i], zs[i + 1], zs[i + 1], zs[i]]
+        P = enu_fast(np.array([q[0] for q in p]), np.array([q[1] for q in p]), np.array(zz))
+        _quad(m, P[0][None], P[1][None], P[2][None], P[3][None], col * (0.92 + 0.08 * math.sin(t[i])),
+              np.array([[0.0, 0.0, 1.0]]))
+    for e in (a, b):   # the ends
+        ring = np.array([e + v * x_ for x_ in xs])
+        P = enu_fast(ring[:, 0], ring[:, 1], zs)
+        cen = enu_fast(np.array([e[0]]), np.array([e[1]]), np.array([z]))[0]
+        for i in range(nseg):
+            for A, B_ in ((P[i], P[i + 1]), (P[i + 1], P[i])):
+                m.tri(cen[None], A[None], B_[None], col * 0.8, PLAIN)
+
+
+def armes_furniture(m, ways, pts, mntR, ortho_hi, stats):
+    """Kiosks, playground, market stalls, lamps and bollards."""
+    sq = ARMES["poly"]
+    u_, v_ = ARMES["u"], ARMES["v"]
+    zat = lambda x, y: float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=19.5))
+    wood, roofc = np.array(hexrgb(ARMES_KIOSK)), np.array(hexrgb(ARMES_KIOSK_ROOF))
+    iron = np.array(hexrgb(ARMES_IRON))
+    n_k = 0
+    for t, p, closed in ways:
+        if not closed or len(p) < 4:
+            continue
+        g = Polygon(p).buffer(0)
+        if g.is_empty or g.distance(sq) > 2 or g.area > 150:
+            continue
+        rr = np.asarray(g.minimum_rotated_rectangle.exterior.coords)
+        e0, e1 = rr[1] - rr[0], rr[2] - rr[1]
+        L, W = float(np.linalg.norm(e0)), float(np.linalg.norm(e1))
+        u = e0 / L
+        if W > L:
+            u, L, W = e1 / W, W, L
+        c = np.array([g.centroid.x, g.centroid.y])
+        z = zat(*c)
+        if t.get("building") == "kiosk":
+            # The snack bar: dark varnished wood and glass, a white awning
+            # on the square side, three brown barrel roofs.
+            body = orient(g.buffer(-0.15, join_style=2), 1.0)
+            add_walls(m, body, z - 0.3, z + 0.9, z, 10, wood, PLAIN)
+            ring = np.asarray(body.exterior.coords)
+            for a, b in zip(ring[:-1], ring[1:]):
+                Le = float(np.linalg.norm(b - a))
+                if Le < 0.8:
+                    continue
+                ue = (b - a) / Le
+                out = np.array([ue[1], -ue[0]])
+                _vpanel(m, (a + b) / 2 + out * 0.02, ue, -out,
+                        [(-Le / 2 + 0.2, z + 0.9), (Le / 2 - 0.2, z + 0.9), (Le / 2 - 0.2, z + 2.5), (-Le / 2 + 0.2, z + 2.5)],
+                        np.array(hexrgb("#d9b27a")), depth=0.02, style=LIT_GLASS)
+                k = max(1, int(round(Le / 1.2)))
+                for i in range(k + 1):
+                    q = a + ue * Le * i / k + out * 0.05
+                    _box(m, q[0], q[1], ue, 0.12, 0.12, z + 0.9, z + 2.5, wood)
+            add_walls(m, orient(g.buffer(0.1, join_style=2), 1.0), z + 2.5, z + 2.9, z, 10, wood, PLAIN)
+            add_roof(m, orient(g.buffer(0.1, join_style=2), 1.0), z + 2.9, wood * 0.8, False)
+            nb = 3
+            for i in range(nb):
+                cc = c + u * (L * ((i + 0.5) / nb - 0.5))
+                _barrel(m, cc, u, L / nb - 0.15, W + 0.5, z + 2.9, 1.1, roofc)
+            # Awning: the long side facing the square's middle.
+            n_side = np.array([-u[1], u[0]])
+            if n_side @ (np.array([sq.centroid.x, sq.centroid.y]) - c) < 0:
+                n_side = -n_side
+            a0 = c + n_side * (W / 2 + 0.1)
+            P = [a0 - u * L / 2, a0 + u * L / 2, a0 + u * L / 2 + n_side * 2.4, a0 - u * L / 2 + n_side * 2.4]
+            P = enu_fast(np.array([q[0] for q in P]), np.array([q[1] for q in P]),
+                         np.array([z + 2.5, z + 2.5, z + 2.15, z + 2.15]))
+            _quad(m, P[0][None], P[1][None], P[2][None], P[3][None], np.array(hexrgb("#efebe2")), np.array([[0.0, 0.0, 1.0]]))
+            _quad(m, P[0][None], P[1][None], P[2][None], P[3][None], np.array(hexrgb("#d8d2c6")), np.array([[0.0, 0.0, -1.0]]))
+            n_k += 1
+        elif t.get("building") == "yes" and g.area < 30:
+            # The newspaper kiosk: dark brown slats, a red-edged flat roof.
+            add_walls(m, orient(g, 1.0), z - 0.3, z + 2.6, z, 10, wood * 1.1, PLAIN)
+            cap = orient(g.buffer(0.35, join_style=2), 1.0)
+            add_walls(m, cap, z + 2.6, z + 2.95, z, 10, np.array(hexrgb("#a8302a")), PLAIN)
+            add_roof(m, cap, z + 2.95, wood, False)
+            n_k += 1
+        elif t.get("leisure") == "playground":
+            # A low wooden fence round it, a play tower with red panels
+            # under a slate-blue roof, a slide.
+            ring = np.asarray(orient(g, 1.0).exterior.coords)
+            fence = np.array(hexrgb("#a9773f"))
+            for a, b in zip(ring[:-1], ring[1:]):
+                Le = float(np.linalg.norm(b - a))
+                ue = (b - a) / max(Le, 1e-6)
+                k = max(1, int(Le / 0.25))
+                for i in range(k + 1):
+                    q = a + ue * Le * i / k
+                    _box(m, q[0], q[1], ue, 0.08, 0.04, z, z + 0.95, fence)
+                for zz in (z + 0.3, z + 0.8):
+                    _box(m, *((a + b) / 2), ue, Le, 0.05, zz, zz + 0.1, fence * 0.85)
+            tc = c + u * (L * 0.2)
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    q = tc + u * sx * 0.9 + np.array([-u[1], u[0]]) * sy * 0.9
+                    _box(m, q[0], q[1], u, 0.14, 0.14, z, z + 3.6, fence)
+            _box(m, tc[0], tc[1], u, 2.0, 2.0, z + 1.4, z + 1.55, fence)
+            for sy in (-1, 1):
+                q = tc + np.array([-u[1], u[0]]) * sy * 0.95
+                _box(m, q[0], q[1], u, 1.7, 0.05, z + 1.55, z + 2.4, np.array(hexrgb("#b52b26")))
+            pyr = orient(Polygon([tc + u * 1.3 + np.array([-u[1], u[0]]) * 1.3, tc - u * 1.3 + np.array([-u[1], u[0]]) * 1.3,
+                                  tc - u * 1.3 - np.array([-u[1], u[0]]) * 1.3, tc + u * 1.3 - np.array([-u[1], u[0]]) * 1.3]), 1.0)
+            add_roof(m, pyr, z + 3.6, np.array(hexrgb("#3d4d5c")), True, 1.0)
+            sa, sb = tc - u * 1.0, tc - u * 4.2
+            P = [sa + np.array([-u[1], u[0]]) * 0.35, sa - np.array([-u[1], u[0]]) * 0.35,
+                 sb - np.array([-u[1], u[0]]) * 0.35, sb + np.array([-u[1], u[0]]) * 0.35]
+            P = enu_fast(np.array([q[0] for q in P]), np.array([q[1] for q in P]), np.array([z + 1.5, z + 1.5, z + 0.3, z + 0.3]))
+            _quad(m, P[0][None], P[1][None], P[2][None], P[3][None], np.array(hexrgb("#d9c23a")), np.array([[0.0, 0.0, 1.0]]))
+            n_k += 1
+    stats["armes_kiosks"] = n_k
+
+    # Market stalls where the 20 cm photo shows the red canopies, on the
+    # square's grid (3 x 3 m stalls, in rows).
+    n_s = 0
+    if ortho_hi is not None:
+        hi = ortho_hi
+        W_ = hi.size[0]
+        pxm = (X1 - X0) / W_
+        x0, y0, x1, y1 = sq.bounds
+        crop = np.asarray(hi.crop((int((x0 - X0) / pxm), int((Y1 - y1) / pxm),
+                                   int((x1 - X0) / pxm) + 1, int((Y1 - y0) / pxm) + 1)).convert("RGB")).astype(np.float32)
+        redm = (crop[..., 0] - crop[..., 1] > 55) & (crop[..., 0] > 130) & (crop[..., 0] - crop[..., 2] > 45)
+        ys, xs = np.nonzero(redm)
+        X = x0 + (xs + 0.5) * pxm
+        Y = y1 - (ys + 0.5) * pxm
+        G = armes_grid(X, Y)
+        S = 3.0
+        cells = {}
+        for k_ in zip(np.floor(G[:, 0] / S).astype(int), np.floor(G[:, 1] / S).astype(int)):
+            cells[k_] = cells.get(k_, 0) + 1
+        need = 0.35 * (S / pxm) ** 2
+        canopy = np.array(hexrgb(ARMES_CANOPY))
+        white = np.array(hexrgb("#ece8df"))
+        for (i, j), cnt in cells.items():
+            if cnt < need:
+                continue
+            s, tt = (i + 0.5) * S + ARMES_PHASE[0], (j + 0.5) * S + ARMES_PHASE[1]
+            c = ARMES["o"] + u_ * s + v_ * tt
+            if not sq.buffer(-0.5).contains(Point(*c)):
+                continue
+            z = zat(*c)
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    q = c + u_ * sx * 1.35 + v_ * sy * 1.35
+                    _box(m, q[0], q[1], u_, 0.06, 0.06, z, z + 2.3, white * 0.8)
+            _box(m, *(c - v_ * 0.6), u_, 2.6, 0.9, z, z + 0.9, white)          # the counter
+            # Crates of fruit, vegetables and flowers on the counter.
+            for kk in range(4):
+                q = c - v_ * 0.6 + u_ * (kk - 1.5) * 0.62
+                _box(m, q[0], q[1], u_, 0.55, 0.7, z + 0.9, z + 1.02,
+                     np.array(hexrgb(["#d9822b", "#6f9a3a", "#c8402e", "#e3c34a", "#8e5a9c", "#a7c76a"][(i * 7 + j * 3 + kk) % 6])))
+            ridge = [c - u_ * 1.5, c + u_ * 1.5]
+            for sy in (-1, 1):
+                e = [c - u_ * 1.5 + v_ * sy * 1.5, c + u_ * 1.5 + v_ * sy * 1.5]
+                P = enu_fast(np.array([e[0][0], e[1][0], ridge[1][0], ridge[0][0]]),
+                             np.array([e[0][1], e[1][1], ridge[1][1], ridge[0][1]]),
+                             np.array([z + 2.3, z + 2.3, z + 2.9, z + 2.9]))
+                _quad(m, P[0][None], P[1][None], P[2][None], P[3][None], canopy, np.array([[0.0, 0.0, 1.0]]))
+                _quad(m, P[0][None], P[1][None], P[2][None], P[3][None], canopy * 0.7, np.array([[0.0, 0.0, -1.0]]))
+            for e0 in (c - u_ * 1.5, c + u_ * 1.5):      # gable ends
+                P = enu_fast(np.array([(e0 - v_ * 1.5)[0], (e0 + v_ * 1.5)[0], e0[0]]),
+                             np.array([(e0 - v_ * 1.5)[1], (e0 + v_ * 1.5)[1], e0[1]]), np.array([z + 2.3, z + 2.3, z + 2.9]))
+                m.tri(P[0][None], P[1][None], P[2][None], canopy * 0.9, PLAIN)
+                m.tri(P[0][None], P[2][None], P[1][None], canopy * 0.9, PLAIN)
+            n_s += 1
+    stats["armes_stalls"] = n_s
+
+    # Lamps round the square: a tall dark brown cast-iron post with a
+    # cluster of four lantern globes.
+    ring = sq.exterior
+    n_l = 0
+    for s in np.arange(4.0, ring.length, 16.0):
+        p = ring.interpolate(s)
+        q = shapely.ops.nearest_points(sq.buffer(-1.2).exterior, p)[0]
+        x, y = q.x, q.y
+        z = zat(x, y)
+        add_walls(m, box(x - 0.09, y - 0.09, x + 0.09, y + 0.09), z - 0.3, z + 4.6, z, 10, iron, PLAIN, min_edge=0.05)
+        add_walls(m, box(x - 0.22, y - 0.22, x + 0.22, y + 0.22), z - 0.3, z + 1.0, z, 10, iron, PLAIN)
+        add_roof(m, box(x - 0.22, y - 0.22, x + 0.22, y + 0.22), z + 1.0, iron, False)
+        for ang in (0.0, math.pi / 2, math.pi, 1.5 * math.pi):
+            hx, hy = x + 0.55 * math.cos(ang + 0.3), y + 0.55 * math.sin(ang + 0.3)
+            arm = LineString([(x, y), (hx, hy)]).buffer(0.04, cap_style=2)
+            add_walls(m, orient(arm, 1.0), z + 4.25, z + 4.33, z, 10, iron, PLAIN)
+            _ball(m, hx, hy, z + 4.6, 0.2, np.array(hexrgb("#f4efe2")), LAMP_HEAD)
+        _ball(m, x, y, z + 5.0, 0.22, np.array(hexrgb("#f4efe2")), LAMP_HEAD)
+        n_l += 1
+    stats["armes_lamps"] = n_l
+
+    # Bollards along the square's edge on the road side.
+    roads = unary_union([LineString(p).buffer(9.0) for t, p, c in ways
+                         if t.get("highway") in ("secondary", "residential", "tertiary") and not c])
+    n_b = 0
+    edge = sq.buffer(-0.4).exterior
+    for s in np.arange(0.0, edge.length, 1.9):
+        p = edge.interpolate(s)
+        if not roads.contains(p):
+            continue
+        z = zat(p.x, p.y)
+        _box(m, p.x, p.y, u_, 0.2, 0.2, z, z + 0.85, iron)
+        _box(m, p.x, p.y, u_, 0.22, 0.22, z + 0.85, z + 0.92, np.array(hexrgb("#c9455a")))
+        n_b += 1
+    stats["armes_bollards"] = n_b
+    return n_s
+
+
+def place_darmes(gm, m, tm, ways, pts, mns, mnt, ortho, ortho_hi, gz, fps, stats):
+    if ARMES is None:
+        return 0
+    mntR = Raster(mnt)
+    armes_paving(gm, mntR, gz, stats)
+    armes_trees(tm, mns, mnt, ortho, fps, stats)
+    return armes_furniture(m, ways, pts, mntR, ortho_hi, stats)
 
 
 def street_features(m, ways, pts, mnt, stats):
@@ -8240,6 +8756,8 @@ def main():
     MT = mareterra_setup(ways, mnt, mns, ortho, sea, land)
     global PORTIER
     PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
+    global ARMES
+    ARMES = armes_setup(ways)
     mnt_f = np.where(sea, np.nan, mnt)
     global TUNNEL
     TUNNEL = load_tunnel()
@@ -8363,6 +8881,7 @@ def main():
     ostende_promenade(bm, mnt_f, stats)
     print("street features…", street_features(bm, ways, pts, mnt_f, stats))
     print("Quai Albert 1er…", quai_albert(gm, bm, tm, ways, pts, Raster(mnt_f), stats, fps), "pines")
+    print("Place d'Armes…", place_darmes(gm, bm, tm, ways, pts, mns, mnt_f, ortho, ortho_hi, gz, fps, stats), "stalls")
     jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))

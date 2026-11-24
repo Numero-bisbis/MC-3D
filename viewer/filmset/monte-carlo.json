@@ -29,7 +29,7 @@
    43.745455
   ]
  ],
- "triangles": 3439058,
+ "triangles": 3469241,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -61,13 +61,13 @@
  "roof_plants": 55,
  "levels": 1361,
  "towers": 8,
- "trees": 1424,
+ "trees": 1417,
  "yachts": 593,
  "real_floors": 732,
  "styles": [
-  258,
-  213,
-  6,
+  256,
+  214,
+  7,
   322,
   220,
   82,
@@ -81,6 +81,7 @@
  "hdp": 1,
  "landmarks": 3,
  "casino_halls": 6,
+ "armes_arches": 33,
  "mareterra_slabs": 139,
  "forum_tiers": [
   12.4,
@@ -139,6 +140,12 @@
  "quai_wall_m": 548,
  "quai_steps": 2,
  "quai_pines": 36,
+ "armes_paved_m2": 2785,
+ "armes_trees": 21,
+ "armes_kiosks": 3,
+ "armes_stalls": 31,
+ "armes_lamps": 14,
+ "armes_bollards": 53,
  "track_clear": true,
  "roof_kit": 3295,
  "roof_texels_per_m": 4.54,
