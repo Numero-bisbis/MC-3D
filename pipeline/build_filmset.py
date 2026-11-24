@@ -3421,6 +3421,13 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                 if not rest:
                     continue
                 poly = orient(max(rest, key=lambda q: q.area), 1.0)
+            if key in HERACLES_WINGS:
+                # The blocks either side of the Palais Héraclès.
+                footprint.append(heracles_wing(m, poly, key, mntR, stats))
+                stats["buildings"] += 1
+                continue
+            if key == HERACLES_COURT:
+                continue            # its entrance court is built with the slab
             rnd = rng_for(key)
             pr_ = f["properties"]
             if pr_.get("construction_legere") and float(track_dist(poly.centroid.x, poly.centroid.y)[0]) < 30:
@@ -7844,6 +7851,7 @@ HERACLES_SE = (1056056.55, 6302818.95)
 HERACLES_D = 35.3                       # m, south to north
 HERACLES_LIFT = (1056042.3, 6302842.9)  # lift room on the roof (LiDAR, up to 62.8 m)
 HERACLES_WALL = "#efe1bf"               # cream render
+HERACLES_CANOPY_TIP = (1056067.4, 6302842.9)   # entrance canopy, its tip over the pavement
 HERACLES_AWNING = "#2d4f93"             # blue awnings
 
 
@@ -8008,8 +8016,236 @@ def palais_heracles(m, mntR, stats):
     ls_, lt_ = float(lc @ u), float(lc @ v)
     cuboid(ls_ - 4.6, ls_ + 4.6, lt_ - 2.5, lt_ + 2.5, zr + 0.32, base + 58.6, wall * 0.97, bottom=False)
     cuboid(ls_ - 4.75, ls_ + 4.75, lt_ - 2.65, lt_ + 2.65, base + 58.6, base + 58.85, edge)
+    # The entrance, mid-way along the boulevard side: a folded concrete
+    # canopy cantilevered from the slab out to the pavement (OpenStreetMap
+    # way 1081601378), thick at the root and thin at the tip, between low
+    # planters with clipped hedges.
+    tip = np.array(HERACLES_CANOPY_TIP) - SW
+    s_tip, t_c = float(tip @ u), float(tip @ v)
+    conc = np.array(hexrgb("#bdb8ae"))
+    hw_ = 2.1
+    zt_, zr_b, zt_b = base + 4.25, base + 2.35, base + 3.8
+    cs = [W - DL, s_tip]
+    for sg in (-1, 1):
+        # Side faces: trapezoids.
+        P0, P1 = E(cs, t_c + sg * hw_, [zr_b, zt_b]), E(cs, t_c + sg * hw_, zt_)
+        _quad(m, P0[[0]], P0[[1]], P1[[1]], P1[[0]], conc, want(W + 3, t_c + sg * hw_, zt_ - 0.5, 0, sg, 0))
+    _quad(m, E(cs[0], t_c - hw_, zt_), E(cs[1], t_c - hw_, zt_), E(cs[1], t_c + hw_, zt_), E(cs[0], t_c + hw_, zt_),
+          conc * 1.04, want(W + 3, t_c, zt_, 0, 0, 1))
+    _quad(m, E(cs[0], t_c - hw_, zr_b), E(cs[1], t_c - hw_, zt_b), E(cs[1], t_c + hw_, zt_b), E(cs[0], t_c + hw_, zr_b),
+          conc * 0.82, want(W + 3, t_c, zr_b, 0, 0, -1))
+    _quad(m, E(cs[1], t_c - hw_, zt_b), E(cs[1], t_c + hw_, zt_b), E(cs[1], t_c + hw_, zt_), E(cs[1], t_c - hw_, zt_),
+          conc, want(s_tip, t_c, zt_, 1, 0, 0))
+    # Glass doors under it.
+    pane(W - 0.35 + 0.05, t_c - 1.6, W - 0.35 + 0.05, t_c + 1.6, base + 0.05, base + 2.6, (1, 0, 0), 3, 1)
+    stone_ = np.array(hexrgb("#d6ccb8"))
+    hedge = np.array(hexrgb("#4e6a3c"))
+    for t0, t1 in ((t_c + hw_ + 0.6, t_c + hw_ + 5.5), (t_c - hw_ - 5.5, t_c - hw_ - 0.6)):
+        cuboid(W + 0.4, s_tip - 2.5, t0, t1, base - 0.2, base + 0.75, stone_)
+        cuboid(W + 0.6, s_tip - 2.7, t0 + 0.2, t1 - 0.2, base + 0.75, base + 1.45, hedge)
     stats["heracles"] = {"base": round(base, 2), "top": round(zr + 0.32, 2), "storeys": NF + 2, "bays": nb}
     return orient(Polygon([SW, SE, SE + D * v, SW + D * v]), 1.0)
+
+
+# The two blocks either side of the slab, on the boulevard (Mapillary 2021
+# and 2025): the same cream render and the same hand. South block (BD TOPO
+# 074373, 7 levels, 22 m): shops behind stone piers on the ground floor
+# (Planet Sushi), on the boulevard loggias with brown slatted parapets and
+# blue awnings between windows, plain walls with small windows elsewhere
+# (the entrance court side too), a pergola on the roof terrace
+# under the slab. North block (074452, 6 levels, 19.5 m): an arcade of
+# square stone pillars in front of the shops (Société Générale, Wally),
+# loggias with blue awnings and windows with roller shutters and small iron
+# balconies on the boulevard, small windows towards the court.
+HERACLES_WINGS = {
+    "BATIMENT0000000074074373": {"name": "south", "gf": 4.2, "fh": 2.95, "nf": 6, "ground": "shop",
+                                 "parapet": "#8a5a3a"},
+    "BATIMENT0000000074074452": {"name": "north", "gf": 4.4, "fh": 2.95, "nf": 5, "ground": "arcade",
+                                 "parapet": HERACLES_WALL},
+}
+HERACLES_COURT = "BATIMENT0000000074074393"   # the planted entrance court, under the canopy
+HERACLES_STONE = "#ddd2bd"                     # travertine piers and pillars
+
+
+def _wing_edge_spec(name, mid, nrm, L):
+    """What each wall of a side block shows, from where it faces."""
+    east, north, south = nrm[0] > 0.75, nrm[1] > 0.75, nrm[1] < -0.75
+    if name == "south":
+        if east:                                        # the boulevard
+            return "WLWLWLW"[:max(3, int(round(L / 3.4)))] if L > 9 else "S" * max(1, int(round(L / 3.2)))
+    else:
+        if east and L > 20:
+            n = max(3, int(round(L / 3.45)))
+            return ("WLL" * n)[:n - 1] + "W"
+    if L < 2.5:
+        return ""
+    return "S" * max(1, int(round(L / 3.4)))
+
+
+def heracles_wing(m, poly, key, mntR, stats):
+    spec = HERACLES_WINGS[key]
+    rnd = rng_for(key)
+    ring = np.asarray(poly.exterior.coords)[:, :2]
+    gz = mntR.sample(ring[:, 0], ring[:, 1])
+    base = float(np.nanmin(gz)) if np.isfinite(gz).any() else 3.6
+    GF, FH, NF = spec["gf"], spec["fh"], spec["nf"]
+    ztop = base + GF + NF * FH
+    wall = np.array(hexrgb(HERACLES_WALL))
+    edge = np.minimum(wall * 1.04 + 6, 255)
+    stone = np.array(hexrgb(HERACLES_STONE))
+    par_c = np.array(hexrgb(spec["parapet"]))
+    shutter = np.array(hexrgb("#e9e6de"))
+    awning = np.array(hexrgb(HERACLES_AWNING))
+    glass_c = np.array(hexrgb("#5b6a74"))
+    DL = 1.2
+    n_l = 0
+    for A, B in zip(ring[:-1], ring[1:]):
+        L = float(np.linalg.norm(B - A))
+        if L < 0.5:
+            continue
+        d = (B - A) / L
+        nrm = np.array([d[1], -d[0]])                  # outward (the ring runs anticlockwise)
+        pat = _wing_edge_spec(spec["name"], (A + B) / 2, nrm, L)
+
+        def E(s, dep, z):
+            s, dep, z = np.broadcast_arrays(np.atleast_1d(np.asarray(s, float)),
+                                            np.atleast_1d(np.asarray(dep, float)),
+                                            np.atleast_1d(np.asarray(z, float)))
+            q = A[None] + s[:, None] * d[None] + dep[:, None] * nrm[None]
+            return enu_fast(q[:, 0], q[:, 1], z)
+
+        def W(s, dep, z, ds, dd, dz):
+            return E(s + ds, dep + dd, z + dz) - E(s, dep, z)
+
+        def quad(s0, s1, d0, d1, z0, z1, col, face):
+            """A quad from (s0, d0) to (s1, d1), z0 to z1, facing face
+            (ds, ddep, dz); horizontal when z0 == z1 (then d0 to d1 is
+            its depth)."""
+            if z0 == z1:
+                P = [E(s0, d0, z0), E(s1, d0, z0), E(s1, d1, z0), E(s0, d1, z0)]
+            else:
+                P = [E(s0, d0, z0), E(s1, d1, z0), E(s1, d1, z1), E(s0, d0, z1)]
+            _quad(m, *P, col, W((s0 + s1) / 2, (d0 + d1) / 2, (z0 + z1) / 2, *face))
+
+        def pane(s0, s1, dep, z0, z1, cell, fl):
+            uvs = [np.array([[cell + 0.06, fl + 0.18]]), np.array([[cell + 0.94, fl + 0.18]]),
+                   np.array([[cell + 0.94, fl + 0.9]]), np.array([[cell + 0.06, fl + 0.9]])]
+            _quad_uv(m, E(s0, dep, z0), E(s1, dep, z0), E(s1, dep, z1), E(s0, dep, z1), glass_c,
+                     W((s0 + s1) / 2, dep, z0, 0, 1, 0), uvs, kind=WALL_GLASS, style=S_GLASS)
+
+        OUT = (0, 1, 0)
+        # Ground floor.
+        nb = max(1, len(pat))
+        bay = L / nb
+        g0, g1 = base - 1.0, base + GF
+        if pat and spec["ground"] == "arcade" and L > 20:
+            AD = 2.4
+            quad(0, L, -AD, -AD, g0, g1, wall * 0.9, OUT)                    # back wall
+            for k in range(nb):
+                pane(k * bay + 0.35, (k + 1) * bay - 0.35, -AD + 0.02, base + 0.1, g1 - 0.7, k, 1)
+            _quad(m, E(0, -AD, g1), E(L, -AD, g1), E(L, 0, g1), E(0, 0, g1), wall * 0.8,
+                  W(L / 2, -1, g1, 0, 0, -1))                                # soffit
+            quad(0, 0, -AD, 0, g0, g1, wall * 0.9, (1, 0, 0))                # ends of the arcade
+            quad(L, L, -AD, 0, g0, g1, wall * 0.9, (-1, 0, 0))
+            for k in range(nb + 1):
+                sc = min(max(k * bay, 0.35), L - 0.35)
+                for (a0, a1, b0, b1, f) in ((sc - 0.3, sc + 0.3, 0, 0, OUT), (sc - 0.3, sc + 0.3, -0.6, -0.6, (0, -1, 0)),
+                                            (sc - 0.3, sc - 0.3, -0.6, 0, (-1, 0, 0)), (sc + 0.3, sc + 0.3, -0.6, 0, (1, 0, 0))):
+                    quad(a0, a1, b0, b1, g0, g1, stone, f)
+        elif pat and pat != "S" * len(pat):
+            quad(0, L, 0, 0, g0, g1, stone, OUT)
+            for k in range(nb):
+                pane(k * bay + 0.3, (k + 1) * bay - 0.3, 0.03, base + 0.1, g1 - 0.75, k, 1)
+            # A thin canopy over the shop windows.
+            _quad(m, E(0, 0, g1 - 0.6), E(L, 0, g1 - 0.6), E(L, 1.1, g1 - 0.6), E(0, 1.1, g1 - 0.6), edge,
+                  W(L / 2, 0.5, g1 - 0.6, 0, 0, 1))
+            _quad(m, E(0, 0, g1 - 0.68), E(L, 0, g1 - 0.68), E(L, 1.1, g1 - 0.68), E(0, 1.1, g1 - 0.68), edge * 0.8,
+                  W(L / 2, 0.5, g1 - 0.68, 0, 0, -1))
+            quad(0, L, 1.1, 1.1, g1 - 0.68, g1 - 0.6, edge, OUT)
+        else:
+            quad(0, L, 0, 0, g0, g1, wall, OUT)
+        # Storeys.
+        for i in range(1, NF + 1):
+            z0, z1 = base + GF + (i - 1) * FH, base + GF + i * FH
+            if not pat:
+                quad(0, L, 0, 0, z0, z1, wall, OUT)
+                continue
+            for k, c in enumerate(pat):
+                s0, s1 = k * bay, (k + 1) * bay
+                if c == "L":
+                    p = 0.35
+                    a, b = s0 + p, s1 - p
+                    quad(s0, a, 0, 0, z0, z1, wall, OUT)
+                    quad(b, s1, 0, 0, z0, z1, wall, OUT)
+                    quad(a, b, 0, 0, z1 - 0.22, z1, edge, OUT)               # slab edge
+                    quad(a, b, -DL, -DL, z0, z1 - 0.22, wall * 0.88, OUT)    # back of the loggia
+                    quad(a, a, -DL, 0, z0, z1 - 0.22, wall * 0.84, (1, 0, 0))
+                    quad(b, b, -DL, 0, z0, z1 - 0.22, wall * 0.84, (-1, 0, 0))
+                    quad(a, b, -DL, 0, z1 - 0.22, z1 - 0.22, wall * 0.8, (0, 0, -1))
+                    quad(a, b, -DL, 0, z0, z0, wall * 0.9, (0, 0, 1))
+                    pane(a + 0.15, b - 0.15, -DL + 0.02, z0 + 0.1, z1 - 0.5, k, i)
+                    # Parapet: solid, cream or brown slats.
+                    quad(a, b, 0.02, 0.02, z0, z0 + 1.0, par_c, OUT)
+                    quad(a, b, -0.12, -0.12, z0, z0 + 1.0, par_c * 0.85, (0, -1, 0))
+                    quad(a, b, -0.12, 0.02, z0 + 1.0, z0 + 1.0, np.minimum(par_c * 1.08, 255), (0, 0, 1))
+                    if rnd.random() < 0.6:
+                        za, zb_ = z1 - 0.3, z1 - 1.05
+                        P0, P1 = E([a + 0.03, b - 0.03], -0.05, za), E([b - 0.03, a + 0.03], 0.6, zb_)
+                        for sg in (1, -1):
+                            _quad(m, P0[[0]], P0[[1]], P1[[0]], P1[[1]], awning,
+                                  W((a + b) / 2, 0.3, za, 0, 0.6 * sg, 0.75 * sg))
+                    n_l += 1
+                else:
+                    quad(s0, s1, 0, 0, z0, z1, wall, OUT)
+                    sc = (s0 + s1) / 2
+                    if c == "S":
+                        pane(sc - 0.45, sc + 0.45, 0.02, z0 + 1.0, z0 + 2.15, k, i)
+                    else:
+                        hw = min(0.8, bay * 0.28)
+                        pane(sc - hw, sc + hw, 0.02, z0 + 0.15, z0 + 2.35, k, i)
+                        r = rnd.random()
+                        if r < 0.7:                                          # roller shutter part way down
+                            zs = z0 + 2.35 - (2.2 * rnd.uniform(0.15, 1.0))
+                            quad(sc - hw - 0.03, sc + hw + 0.03, 0.04, 0.04, zs, z0 + 2.4, shutter, OUT)
+                        if spec["name"] == "north" and rnd.random() < 0.5:
+                            # A small iron balcony.
+                            _quad(m, E(sc - hw - 0.2, 0, z0), E(sc + hw + 0.2, 0, z0), E(sc + hw + 0.2, 0.55, z0),
+                                  E(sc - hw - 0.2, 0.55, z0), edge, W(sc, 0.3, z0, 0, 0, 1))
+                            q0, q1 = A + d * (sc - hw - 0.2) + nrm * 0.55, A + d * (sc + hw + 0.2) + nrm * 0.55
+                            railing(m, q0[None], q1[None], z0, "#23272a", h=1.0)
+        # Cornice band at the top.
+        quad(0, L, 0.12, 0.12, ztop - 0.3, ztop, edge, OUT)
+    # Roof and parapet.
+    add_roof(m, poly, ztop, np.array(hexrgb("#d3ccbd")), False)
+    pc = edge * 0.97
+    add_walls(m, poly, ztop, ztop + 0.9, ztop, 10, pc, PLAIN)
+    add_walls(m, poly, ztop, ztop + 0.9, ztop, 10, pc * 0.85, PLAIN, inward=True)
+    inner = poly.buffer(-0.25, join_style=2)
+    for rp in to_polys(poly.difference(inner) if not inner.is_empty else poly):
+        add_roof(m, rp, ztop + 0.9, pc * 1.05, False)
+    if spec["name"] == "south":
+        # The pergola and planters on the roof terrace under the slab's south end.
+        ax = np.array([0.99, 0.17])
+        iron = np.array(hexrgb("#2b2d2c"))
+        cx, cy, w, dd = 1056046.0, 6302806.5, 11.0, 4.6
+        side = np.array([-ax[1], ax[0]])
+        for i_ in (-1, 0, 1):
+            for j_ in (-1, 1):
+                q = np.array([cx, cy]) + ax * i_ * (w / 2 - 0.1) + side * j_ * (dd / 2 - 0.1)
+                _box(m, q[0], q[1], ax, 0.12, 0.12, ztop, ztop + 2.6, iron)
+        for j_ in (-1, 1):
+            q = np.array([cx, cy]) + side * j_ * (dd / 2 - 0.1)
+            _box(m, q[0], q[1], ax, w, 0.14, ztop + 2.45, ztop + 2.6, iron)
+        for i_ in np.linspace(-w / 2 + 0.3, w / 2 - 0.3, 12):
+            q = np.array([cx, cy]) + ax * i_
+            _box(m, q[0], q[1], side, dd, 0.08, ztop + 2.6, ztop + 2.7, iron)
+        for i_ in (-0.38, -0.1, 0.2, 0.42):
+            q = np.array([cx, cy]) + ax * i_ * w - side * (dd / 2 - 0.5)
+            _box(m, q[0], q[1], ax, 1.0, 0.8, ztop, ztop + 0.6, np.array(hexrgb("#b9a789")))
+            add_tree(m, q[0], q[1], ztop + 0.6, rnd.uniform(1.2, 2.0), rnd.uniform(0.6, 0.9), "broad", rnd)
+    stats.setdefault("heracles_wings", {})[spec["name"]] = {"base": round(base, 2), "top": round(ztop, 2),
+                                                            "loggias": n_l}
+    return poly
 
 
 def _box(m, cx, cy, ax, w, d, z0, z1, col, kind=PLAIN, style=None, top=True):
