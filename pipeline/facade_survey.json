@@ -248,6 +248,20 @@
    "colour": "#ece5d6",
    "seen": "Fairmont, low wing at the Portier tunnel mouth",
    "balconies": "none"
+  },
+  "BATIMENT0000002009026513": {
+   "style": "modern",
+   "seen": "white port offices with a blue band on the Digue's abutment car park (Mapillary 2021, 20 cm photo 2023)",
+   "colour": "#eef0ef",
+   "levels": 2,
+   "balconies": "none"
+  },
+  "BATIMENT0000002009026512": {
+   "style": "modern",
+   "seen": "white port offices with a blue band on the Digue's abutment car park (Mapillary 2021, 20 cm photo 2023)",
+   "colour": "#eef0ef",
+   "levels": 2,
+   "balconies": "none"
   }
  }
 }
