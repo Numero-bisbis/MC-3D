@@ -29,7 +29,7 @@
    43.7455063
   ]
  ],
- "triangles": 4455192,
+ "triangles": 4454245,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -135,6 +135,7 @@
   "loungers": 9,
   "pavilions": 5
  },
+ "tunnel_portals": 3,
  "road_m": 57809,
  "kerb_m": 40669,
  "lamps": 1249,
