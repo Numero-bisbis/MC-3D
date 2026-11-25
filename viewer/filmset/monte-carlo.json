@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6708112,
+ "triangles": 6710088,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -63,12 +63,12 @@
  "towers": 10,
  "trees": 3743,
  "yachts": 942,
- "real_floors": 1338,
+ "real_floors": 1337,
  "styles": [
-  564,
-  273,
+  565,
+  271,
   7,
-  663,
+  664,
   644,
   134,
   2,
@@ -123,7 +123,7 @@
   "court": 66.51,
   "windows": 590
  },
- "palace_cannons": 4,
+ "palace_cannons": 7,
  "stade_wall_m": 730,
  "stade_louis_ii": 1,
  "chapiteau": 1,
@@ -209,7 +209,8 @@
  "rampart_cannons": 16,
  "rocher_garden_path_m2": 2943,
  "rocher_benches": 27,
- "palais_sq_m2": 3236,
+ "palais_sq_m2": 1938,
+ "palais_grey_m2": 1299,
  "rocher_sett_m2": 27673,
  "rocher_brick_m2": 734,
  "peche_walk_m2": 482,
@@ -223,7 +224,7 @@
  "gastaud_olives": 10,
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
- "park_lawn_m2": 89579,
+ "park_lawn_m2": 89581,
  "park_path_m2": 21311,
  "park_bed_m2": 70193,
  "park_flowers_m2": 2462,
