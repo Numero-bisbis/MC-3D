@@ -996,6 +996,9 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
             if closed and len(pts) > 3 and t.get("leisure") in ("sports_centre", "stadium") and \
                     any(Polygon(pts).buffer(0).intersects(q) for q in pools) and Polygon(pts).buffer(0).distance(QA["poly"]) < 30:
                 poly(pts, QA_DECK)
+    # The west harbours' quays: clean paving, decks, the breakwater's road.
+    wq_paint(img, xy, poly, line)
+    d = ImageDraw.Draw(img)
     # Roads: pavement first, asphalt on top, markings last.
     WIDTH = {"motorway": 12, "trunk": 11, "primary": 10, "secondary": 8.5, "tertiary": 7.5,
              "residential": 6, "unclassified": 6, "service": 4.5, "living_street": 5,
@@ -1805,6 +1808,8 @@ def skeleton_roof(poly, z, slope, t_max, dt=0.35):
 def add_roof(m, poly, z, col, tiled, cap=None, photo=None):
     """photo: a dict {"mesh", "polys"}; the roof goes into that textured
     mesh, mapped onto the aerial photo painted into the ground map."""
+    if photo is not None and not box(X0 + 1.0, Y0 + 1.0, X1 - 1.0, Y1 - 1.0).contains(poly):
+        photo = None            # past the set's edge there is no photo: plain roof
     if tiled:
         slope = math.tan(math.radians(28))
         t = skeleton_roof(poly, z, slope, (cap if cap else 99) / slope, dt=0.4)
@@ -3413,6 +3418,8 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
                     STADE_DONE.append(1)
                     footprint.append(stade_louis_ii(m, mns, mntR, photo, STADE_POLY, stats))
                 continue
+            if key in WQ_DROP and WQ is not None:
+                continue            # Cap d'Ail's raised walk: wq_build() lays it as a walk, not a block
             if key in DIGUE_PARTS:
                 # The breakwater's terminal and raised walk: digue() builds
                 # the whole thing (main), the mask takes its plan once.
@@ -7044,6 +7051,7 @@ def trees(m, mns, mnt, ortho, bmask, osm_pts, stats, no_tree=None):
         add_tree(m, x, y, z, h, rad, kind, rnd)
         placed.append((x, y))
         stats["trees"] += 1
+    wq_palms(m, mns, mnt, bmask, placed, rnd, stats)
     placed = np.array(placed) if placed else np.zeros((0, 2))
     mntR = Raster(mnt)
     for (x, y), t in osm_pts:
@@ -12984,6 +12992,425 @@ def podium_walls(gm, m, stats):
     return n_
 
 
+# ------------------------------------------------------ west harbours ----
+# Port de Fontvieille and Port de Cap d'Ail (the French marina next door).
+# Their quays are low (1.4-2 m NGF) and end in vertical walls; the long
+# breakwaters run on two levels: a raised promenade at the heliport's level
+# (5.7 m) on the sea side, over a lower quay at the water (LiDAR surface
+# model: the promenade is a structure, so the terrain model has only the
+# lower level, or nothing). The 3 m ground grid ran all of it as soft
+# slopes into the sea, the painted ground took the 20 cm photo's parked
+# cars, boats on the hard standing and awnings for lawn, and the yard's
+# travel lift and boats stood up as grey mounds. Here, from the LiDAR and
+# the 20 cm photo (2026-11-24):
+# - Cap d'Ail's outer breakwater, in the heliport's own frame (s along the
+#   apron's axis, t out to sea): a lower quay (road, parking along the
+#   wall) at 1.95 m from t 0.8 to 9.8, the raised walk at 5.75 m from 9.8
+#   to 16.4, its sea face straight into the water; past s -152 the walk
+#   steps in (t 3 to 10) with a lower quay at 1.5 m outside it, which runs
+#   on under the heliport's nets.
+# - Fontvieille's seawall from the heliport to the outer jetty (its own
+#   frame, axis 38 degrees): the rose-brown promenade at 5.7-6.5 m over a
+#   lower quay at 1.4 m.
+# - Every other quay edge in the two ports: a level deck by the water with
+#   a vertical wall and a pale coping, except where the photo shows rock
+#   armour (the curved bay, the Cap d'Ail mole's sea face).
+# - Clean paving on the quays, the boatyard's hard standing in grey, and
+#   the tall palms along the quays that the tree finder dropped for not
+#   being green in the photo.
+WQ = None
+WQ_ZONES = [box(1055470.0, 6301500.0, 1055990.0, 6301870.0),     # Port de Cap d'Ail
+            box(1055780.0, 6301880.0, 1056345.0, 6302380.0).difference(
+                box(1056242.0, 6302150.0, 1056400.0, 6302400.0))]   # Port de Fontvieille (not the Rock's foot)
+WQ_RIPRAP = [  # rock armour (20 cm photo), as lines along the shore
+    [(1055470, 6301730), (1055492, 6301715), (1055525, 6301707), (1055565, 6301697), (1055610, 6301684),
+     (1055660, 6301664), (1055695, 6301641), (1055708, 6301620)],
+    [(1056117, 6302152), (1056122, 6302100), (1056140, 6302065), (1056165, 6302040), (1056195, 6302027),
+     (1056228, 6302022)],
+    [(1056236, 6302255), (1056236, 6302148)]]
+WQ_DROP = ("BATIMENT0000000327487874",)                            # BD TOPO's "building" for the walk
+WQ_YARD = box(1055500.0, 6301712.0, 1055562.0, 6301775.0)          # the boatyard's hard standing
+WQ_FV_O, WQ_FV_AXIS = (1056075.0, 6301905.0), 38.0
+WQ_FV_S = (4.0, 136.0)
+WQ_FV_STEP = [(4, 4.5), (10, 3.8), (20, 2.2), (30, 0.8), (40, 0.4), (130, 0.9), (136, 1.5)]
+WQ_DIKE_S0 = -345.0                    # past the set's edge (the breakwater's head is in France)
+WQ_DIKE_JOG = -152.0
+WQ_DIKE_INNER = 0.8                    # t of the lower quay's harbour edge
+WQ_DIKE_WALK = (9.8, 16.4)             # the raised walk
+WQ_DIKE_LOW, WQ_WALK_Z, WQ_OUT_LOW = 1.95, 5.75, 1.5
+WQ_HF_STEP = [(-108, 10.0), (-104, 8.2), (-26.5, 8.2)]
+WQ_PAVING, WQ_LOWQ, WQ_WALKC, WQ_ASPH = "#cdc8bd", "#77726e", "#93807a", "#5f5d5e"
+WQ_COPING, WQ_FACE = "#e3dfd5", "#b4ad9f"
+
+
+def _pw(pts):
+    xs, ys = np.array(pts, float).T
+    return lambda s: np.interp(s, xs, ys)
+
+
+def _fpoly(F, s0, s1, t0, t1, step=2.0):
+    """Polygon in frame F between t0(s) and t1(s) (numbers or functions)."""
+    ss = np.unique(np.r_[np.arange(s0, s1, step), s1])
+    f0 = t0 if callable(t0) else (lambda s, c=t0: np.full_like(s, c, dtype=float))
+    f1 = t1 if callable(t1) else (lambda s, c=t1: np.full_like(s, c, dtype=float))
+    a = [F.xy(s, t) for s, t in zip(ss, f0(ss))]
+    b = [F.xy(s, t) for s, t in zip(ss[::-1], f1(ss[::-1]))]
+    return orient(Polygon(a + b).buffer(0), 1.0)
+
+
+def _frames():
+    a = math.radians(HELI_AXIS)
+    HF = Frame(None, HELI_O, (math.cos(a), math.sin(a)))
+    b = math.radians(WQ_FV_AXIS)
+    FF = Frame(None, WQ_FV_O, (math.cos(b), math.sin(b)))
+    return HF, FF
+
+
+def _sea_edge(F, ss, t_from, sea, t_max=30.0):
+    """For each s, the t past t_from where the water starts (the land mask
+    from the OSM coastline), median-smoothed."""
+    seaR = Raster(sea.astype(np.float32))
+    ts = np.arange(0.0, t_max, 0.25)
+    out = np.full(len(ss), np.nan)
+    for i, (s, tf) in enumerate(zip(ss, t_from)):
+        q = F.O[None] + s * F.u[None] + (tf + ts)[:, None] * F.v[None]
+        w = seaR.sample(q[:, 0], q[:, 1]) > 0.5
+        k = np.nonzero(w)[0]
+        if len(k):
+            out[i] = tf + ts[k[0]]
+    ok = np.isfinite(out)
+    if ok.sum() < 3:
+        return out
+    out = np.interp(np.arange(len(ss)), np.nonzero(ok)[0], out[ok])
+    return ndimage.median_filter(out, 5, mode="nearest")
+
+
+def wq_flatten(mnt, mns):
+    """Boats on the yard's hard standing and its travel lift, read as
+    ground by the LiDAR: levelled to the quay (as flatten_port())."""
+    out, n = mnt.copy(), 0
+    for z in WQ_ZONES:
+        x0, y0, x1, y1 = z.intersection(box(X0, Y0, X1, Y1)).bounds
+        c0, c1 = int((x0 - X0) / RES), int((x1 - X0) / RES)
+        r0, r1 = int((Y1 - y1) / RES), int((Y1 - y0) / RES)
+        A = out[r0:r1, c0:c1]
+        land = np.isfinite(A)
+        F = np.where(land, A, 0.8)
+        k = 4
+        h, w = F.shape[0] // k * k, F.shape[1] // k * k
+        Fs = F[:h, :w].reshape(h // k, k, w // k, k).min(axis=(1, 3))
+        up = lambda a: np.pad(np.kron(a, np.ones((k, k))), ((0, F.shape[0] - h), (0, F.shape[1] - w)), mode="edge")
+        quay = up(ndimage.percentile_filter(Fs, 20, size=11))
+        around = up(ndimage.percentile_filter(Fs, 75, size=21))
+        hump = land & (quay < 3.0) & (F - quay > 1.2) & (around < quay + 2.0)
+        hump = ndimage.binary_dilation(hump, iterations=2) & land
+        A[hump] = np.minimum(A[hump], quay[hump] + 0.1)
+        n += int(hump.sum())
+    mns = mns - np.nan_to_num(mnt - out, nan=0.0)
+    # The boats on the hard standing are not built: no shadows or "trees"
+    # from them either.
+    yd = raster_mask(WQ_YARD)
+    mns = np.where(yd & np.isfinite(out), out, mns)
+    return out, mns, int(n * RES * RES)
+
+
+def wq_setup(ways, mnt, sea):
+    """Geometry of the two ports' quays: the breakwater's and the seawall's
+    levels and faces, the generic quay bands, what to paint where."""
+    global WQ
+    if HELI is None:
+        WQ = None
+        return 0
+    HF, FF = _frames()
+    world = box(X0, Y0, X1, Y1)
+    R = Raster(np.where(np.isfinite(mnt), mnt, np.nan).astype(np.float32))
+    decks, steps, paint, rails = [], [], [], []
+
+    # Cap d'Ail's outer breakwater.
+    inner = _fpoly(HF, WQ_DIKE_S0, WQ_DIKE_JOG, WQ_DIKE_INNER, WQ_DIKE_WALK[0]).intersection(world)
+    walk = orient(Polygon([HF.xy(*p) for p in [(WQ_DIKE_S0, WQ_DIKE_WALK[0]), (WQ_DIKE_JOG, WQ_DIKE_WALK[0]),
+                                               (-148.0, 3.0), (-108.0, 3.0), (-108.0, 10.0), (-148.0, 10.0),
+                                               (-154.0, WQ_DIKE_WALK[1]), (WQ_DIKE_S0, WQ_DIKE_WALK[1])]]), 1.0)
+    walk = walk.intersection(world)
+    hstep = _pw(WQ_HF_STEP)
+    ss = np.arange(-153.0, -26.0, 1.0)
+    tfrom = np.where(ss < -148, 10.0 + (-148 - ss) / 6 * 6.4, np.where(ss < -108, 10.0, hstep(ss)))
+    tsea = _sea_edge(HF, ss, tfrom, sea)
+    tsea = np.where(np.isfinite(tsea), np.clip(tsea, tfrom + 3.0, 17.0), 15.5)
+    lsea = lambda s: np.interp(s, ss, tsea)
+    low = _fpoly(HF, -153.2, -26.5, lambda s: np.interp(s, ss, tfrom), lsea, 1.0).difference(walk.buffer(0.02))
+    up_s = np.arange(-108.0, -26.0, 2.0)
+    upz = []
+    for s in up_s:
+        q = np.array([HF.xy(s, t) for t in np.arange(hstep(s) - 9.0, hstep(s) - 2.0, 1.0)])
+        upz.append(np.nanmedian(R.sample(q[:, 0], q[:, 1])))
+    upz = ndimage.median_filter(np.nan_to_num(np.array(upz), nan=WQ_WALK_Z), 5, mode="nearest")
+    hz = lambda s: np.interp(s, up_s, upz)
+    hup = _fpoly(HF, -108.0, -26.5, lambda s: hstep(s) - 8.0, hstep, 1.0)
+    decks += [{"poly": inner, "z": lambda x, y: np.full(len(x), WQ_DIKE_LOW), "walls": "sea"},
+              {"poly": walk, "z": lambda x, y: np.full(len(x), WQ_WALK_Z), "walls": "all"},
+              {"poly": low, "z": lambda x, y: np.full(len(x), WQ_OUT_LOW), "walls": "sea"},
+              {"poly": hup, "z": lambda x, y: hz((np.column_stack([x, y]) - HF.O) @ HF.u), "walls": None}]
+    steps.append((HF, np.arange(-108.0, -26.4, 1.0), hstep, hz, WQ_OUT_LOW))
+    # Paint: coping, road and parking under the wall; the walk's paving.
+    paint += [(_fpoly(HF, WQ_DIKE_S0, WQ_DIKE_JOG, WQ_DIKE_INNER, WQ_DIKE_WALK[0]), WQ_COPING),
+              (_fpoly(HF, WQ_DIKE_S0, WQ_DIKE_JOG, 1.6, 6.8), WQ_ASPH),
+              (_fpoly(HF, WQ_DIKE_S0, WQ_DIKE_JOG, 6.8, WQ_DIKE_WALK[0] - 0.15), "#686566"),
+              (walk, WQ_COPING), (walk.buffer(-0.6), WQ_WALKC), (low, WQ_LOWQ),
+              (_fpoly(HF, -108.0, -26.5, lambda s: hstep(s) - 6.0, lambda s: hstep(s) - 0.5, 1.0), WQ_WALKC)]
+    ticks = [(HF.xy(s, 6.8), HF.xy(s, WQ_DIKE_WALK[0] - 0.3)) for s in np.arange(WQ_DIKE_S0, WQ_DIKE_JOG - 4, 5.5)]
+    lines = [([HF.xy(s, 6.8) for s in (WQ_DIKE_S0, WQ_DIKE_JOG)], 0.15)] + [(list(t), 0.12) for t in ticks]
+    rails += [(walk, "all")]
+
+    # Fontvieille's seawall.
+    fstep = _pw(WQ_FV_STEP)
+    fs = np.arange(WQ_FV_S[0], WQ_FV_S[1] + 0.1, 1.0)
+    fsea = _sea_edge(FF, fs, fstep(fs) + 1.5, sea)
+    fsea = np.where(np.isfinite(fsea), np.maximum(fsea, fstep(fs) + 3.0), fstep(fs) + 8.0)
+    flow = _fpoly(FF, WQ_FV_S[0], WQ_FV_S[1], fstep, lambda s: np.interp(s, fs, fsea), 1.0)
+    zl = []
+    for s in fs[::4]:
+        q = np.array([FF.xy(s, t) for t in np.arange(fstep(s) + 1.5, np.interp(s, fs, fsea) - 1.0, 0.75)])
+        zl.append(np.nanmedian(R.sample(q[:, 0], q[:, 1])) if len(q) else np.nan)
+    fz_low = float(np.nanmedian(zl)) if np.isfinite(zl).any() else 1.4
+    fup_s = np.arange(WQ_FV_S[0], WQ_FV_S[1] + 0.1, 2.0)
+    fupz = []
+    for s in fup_s:
+        q = np.array([FF.xy(s, t) for t in np.arange(fstep(s) - 9.0, fstep(s) - 2.0, 1.0)])
+        fupz.append(np.nanmedian(R.sample(q[:, 0], q[:, 1])))
+    fupz = ndimage.median_filter(np.nan_to_num(np.array(fupz), nan=5.7), 5, mode="nearest")
+    fz = lambda s: np.interp(s, fup_s, fupz)
+    fup = _fpoly(FF, WQ_FV_S[0], WQ_FV_S[1], lambda s: fstep(s) - 8.0, fstep, 1.0)
+    decks += [{"poly": flow, "z": lambda x, y: np.full(len(x), fz_low), "walls": "sea"},
+              {"poly": fup, "z": lambda x, y: fz((np.column_stack([x, y]) - FF.O) @ FF.u), "walls": None}]
+    steps.append((FF, fs, fstep, fz, fz_low))
+    paint += [(_fpoly(FF, WQ_FV_S[0], WQ_FV_S[1], lambda s: fstep(s) - 12.0, lambda s: fstep(s) - 0.5, 1.0), WQ_WALKC),
+              (flow, WQ_LOWQ)]
+
+    # The frames' own areas stay out of the generic quay bands, as do the
+    # heliport (its apron, nets and the quay under them) and the rock armour.
+    framed = unary_union([_fpoly(HF, WQ_DIKE_S0 - 10, 140.0, -6.0, 22.0),
+                          _fpoly(FF, -10.0, WQ_FV_S[1] + 2.0, -16.0, 22.0)])
+    # The armour runs from the line out to the water (on its right for
+    # the mole, on its left for the bay and the jetty).
+    rip = unary_union([LineString(l).buffer(3.0).union(LineString(l).buffer(-20.0 if k == 0 else 20.0, single_sided=True))
+                       for k, l in enumerate(WQ_RIPRAP)])
+    zone = unary_union(WQ_ZONES).intersection(world)
+    land = ~sea
+    dist = ndimage.distance_transform_edt(land) * RES
+    zm = raster_mask(zone) & ~raster_mask(framed) & ~raster_mask(rip)
+    # Quay level: the low part of the land just inland of the edge, spread.
+    m_ = np.where(land & (dist > 1.5) & (dist < 6.0) & np.isfinite(mnt), mnt, np.nan)
+    m_ = np.where(m_ < 4.0, m_, np.nan)
+    idx = ndimage.distance_transform_edt(np.isnan(m_), return_distances=False, return_indices=True)
+    qz = ndimage.median_filter(m_[idx[0], idx[1]], size=11)
+    band = land & zm & (dist <= 8.0) & (qz < 3.5)
+    # Roads keep their ground (their surfaces follow it).
+    roadm = raster_mask(unary_union([LineString(p).buffer(5.0) for t, p, c in ways
+                                     if t.get("highway") in ("residential", "service", "tertiary", "secondary", "primary",
+                                                             "unclassified") and len(p) >= 2]).intersection(zone))
+    lower = band & (dist <= 3.6) & ~roadm
+    # Under the frames' decks the grid goes under water too.
+    for F, s0, s1, t0, t1 in ((HF, WQ_DIKE_S0 - 10, WQ_DIKE_JOG, -4.0, 22.0),):
+        lower |= raster_mask(_fpoly(F, s0, s1, t0, t1)) & np.isfinite(mnt)
+    lower |= raster_mask(low.buffer(0.5)) | raster_mask(flow.buffer(0.5))
+    lower |= raster_mask(_fpoly(HF, -108.0, -26.5, lambda s: hstep(s) - 4.0, hstep, 1.0))
+    lower |= raster_mask(_fpoly(FF, WQ_FV_S[0], WQ_FV_S[1], lambda s: fstep(s) - 4.0, fstep, 1.0))
+    pz = land & raster_mask(zone.difference(framed)) & (dist <= 30.0) & np.isfinite(mnt)
+    pz &= (np.nan_to_num(mnt, nan=99) < 4.0)
+    greens = [Polygon(p).buffer(0) for t, p, c in ways if c and len(p) > 3 and
+              (t.get("leisure") in ("park", "garden", "pitch", "playground", "stadium") or t.get("landuse") in ("grass",))]
+    if greens:
+        pz &= ~raster_mask(unary_union(greens))
+    deck_mask = raster_mask(unary_union([d["poly"] for d in decks]))
+    WQ = {"HF": HF, "FF": FF, "decks": decks, "steps": steps, "paint": paint, "lines": lines, "rails": rails,
+          "band": band, "qz": qz.astype(np.float32), "lower": lower, "pave": pz, "deck_mask": deck_mask,
+          "zone": zone, "rip": rip,
+          # Palms only on the quays themselves (not in the gardens behind).
+          "palm_zone": (pz | band | deck_mask) & ~raster_mask(WQ_YARD.buffer(3.0))}
+    print(f"  west quays: band {band.sum() * RES * RES:.0f} m2, lowered {lower.sum() * RES * RES:.0f} m2,"
+          f" seawall lower quay {fz_low:.2f} m, upper {fupz.min():.2f}-{fupz.max():.2f} m")
+    return int(band.sum() * RES * RES)
+
+
+def wq_ground(mnt):
+    """The grid under the decks and within 3.6 m of a quay wall goes under
+    water: the decks and walls stand alone, with no slope in front."""
+    if WQ is None:
+        return mnt
+    out = mnt.copy()
+    out[WQ["lower"]] = -0.6
+    return out
+
+
+def wq_sea_paint(sea):
+    """The sea mask for the ground map: the breakwater's walk stands where
+    the coastline says water; it is painted as paving."""
+    if WQ is None:
+        return sea
+    return sea & ~WQ["deck_mask"]
+
+
+def _ground_deck(gm, pg, zf, lift=0.04):
+    tr = triangulate(orient(pg, 1.0), area=8)
+    if tr is None:
+        return 0
+    v, tri = tr
+    z = np.asarray(zf(v[:, 0], v[:, 1]), float) + lift
+    P = enu_fast(v[:, 0], v[:, 1], z)
+    uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
+    gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri)
+    return len(tri)
+
+
+def _faces(m, pg, zf, seaR, mode, zground=1.0, wall=WQ_FACE):
+    """Vertical faces on a deck's outline: into the water where the water
+    is just outside (mode "sea"), down to the ground elsewhere too ("all").
+    A pale coping on the edge over the water."""
+    ring = np.asarray(orient(pg, 1.0).exterior.coords)[:, :2]
+    a, b = ring[:-1], ring[1:]
+    L = np.linalg.norm(b - a, axis=1)
+    ok = L > 0.05
+    a, b, L = a[ok], b[ok], L[ok]
+    if not len(a):
+        return 0.0
+    u = (b - a) / L[:, None]
+    out = np.column_stack([u[:, 1], -u[:, 0]])
+    mid = (a + b) / 2
+    # The world's edge: no face (the set just stops there).
+    edge = (np.abs(mid[:, 0] - X0) < 0.3) | (np.abs(mid[:, 0] - X1) < 0.3) | \
+        (np.abs(mid[:, 1] - Y0) < 0.3) | (np.abs(mid[:, 1] - Y1) < 0.3)
+    wet = (seaR.sample(mid[:, 0] + out[:, 0] * 1.2, mid[:, 1] + out[:, 1] * 1.2) > 0.5) | \
+        ~np.isfinite(seaR.sample(mid[:, 0] + out[:, 0] * 1.2, mid[:, 1] + out[:, 1] * 1.2))
+    sel = ~edge & (wet if mode == "sea" else np.ones(len(a), bool))
+    if not sel.any():
+        return 0.0
+    a, b, out, wet = a[sel], b[sel], out[sel], wet[sel]
+    za, zb = np.asarray(zf(a[:, 0], a[:, 1]), float) + 0.04, np.asarray(zf(b[:, 0], b[:, 1]), float) + 0.04
+    z0 = np.where(wet, -1.5, zground)
+    col = np.array(hexrgb(wall), float)
+    A0, B0 = enu_fast(a[:, 0], a[:, 1], z0), enu_fast(b[:, 0], b[:, 1], z0)
+    A1, B1 = enu_fast(a[:, 0], a[:, 1], za), enu_fast(b[:, 0], b[:, 1], zb)
+    w = np.column_stack([out, np.zeros(len(a))])
+    _quad(m, A0, B0, B1, A1, col, w)
+    # Coping: 0.5 m of pale stone, a hair proud, over the water.
+    cw = wet
+    if cw.any():
+        ai, bi = a[cw] - out[cw] * 0.5, b[cw] - out[cw] * 0.5
+        C0 = enu_fast(a[cw][:, 0], a[cw][:, 1], za[cw] + 0.03); C1 = enu_fast(b[cw][:, 0], b[cw][:, 1], zb[cw] + 0.03)
+        D0 = enu_fast(ai[:, 0], ai[:, 1], za[cw] + 0.03); D1 = enu_fast(bi[:, 0], bi[:, 1], zb[cw] + 0.03)
+        _quad(m, C0, C1, D1, D0, np.array(hexrgb(WQ_COPING), float), np.tile([[0.0, 0.0, 1.0]], (int(cw.sum()), 1)))
+    return float(np.linalg.norm(b - a, axis=1).sum())
+
+
+def wq_build(gm, m, sea, stats):
+    """Decks (painted from the ground map), walls, steps and railings."""
+    if WQ is None:
+        return 0
+    seaR = Raster(sea.astype(np.float32))
+    n_tri, wall_m = 0, 0.0
+    for d in WQ["decks"]:
+        for pg in to_polys(d["poly"]):
+            if pg.area < 2:
+                continue
+            n_tri += _ground_deck(gm, pg, d["z"])
+            if d["walls"]:
+                wall_m += _faces(m, pg, d["z"], seaR, d["walls"])
+    # The steps between the two levels: a stone wall with a railing on top.
+    for F, ss, tf, zf, zlow in WQ["steps"]:
+        t = tf(ss)
+        A = np.array([F.xy(s, tt) for s, tt in zip(ss, t)])
+        zt = zf(ss) + 0.04
+        k = len(A) - 1
+        a, b = A[:-1], A[1:]
+        out = np.tile(F.v, (k, 1))
+        P0, P1 = enu_fast(a[:, 0], a[:, 1], np.full(k, zlow - 0.2)), enu_fast(b[:, 0], b[:, 1], np.full(k, zlow - 0.2))
+        Q0, Q1 = enu_fast(a[:, 0], a[:, 1], zt[:-1]), enu_fast(b[:, 0], b[:, 1], zt[1:])
+        _quad(m, P0, P1, Q1, Q0, np.array(hexrgb(WQ_FACE), float), np.column_stack([out, np.zeros(k)]))
+        railing(m, a - out * 0.15, b - out * 0.15, zt[:-1], "#e8e8e2", 1.05, zt[1:])
+        wall_m += float(np.linalg.norm(b - a, axis=1).sum())
+    # Railings along both edges of the breakwater's raised walk.
+    for pg_, _ in WQ["rails"]:
+        for pg in to_polys(pg_):
+            ring = np.asarray(orient(pg, 1.0).exterior.coords)[:, :2]
+            a, b = ring[:-1], ring[1:]
+            L = np.linalg.norm(b - a, axis=1)
+            mid = (a + b) / 2
+            edge = (np.abs(mid[:, 1] - Y0) < 0.3) | (np.abs(mid[:, 0] - X0) < 0.3)
+            sel = (L > 4.0) & ~edge
+            u = (b[sel] - a[sel]) / L[sel][:, None]
+            inn = np.column_stack([-u[:, 1], u[:, 0]])
+            railing(m, a[sel] + inn * 0.2, b[sel] + inn * 0.2, np.full(int(sel.sum()), WQ_WALK_Z + 0.04), "#e8e8e2", 1.05)
+    # Generic quays: a level band by the water, its wall and coping.
+    band = WQ["band"]
+    qR = Raster(WQ["qz"])
+    lab, nl = ndimage.label(band)
+    zq = lambda x, y: np.nan_to_num(qR.sample(x, y), nan=1.5)
+    for j, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        sub = lab[sl] == j
+        if sub.sum() < 40:
+            continue
+        poly = cells_to_poly(sub, X0 + sl[1].start * RES, Y1 - sl[0].start * RES, RES)
+        for pg in to_polys(poly):
+            if pg.area < 8:
+                continue
+            pg = orient(pg.simplify(0.3), 1.0)
+            n_tri += _ground_deck(gm, pg, zq, 0.05)
+            wall_m += _faces(m, pg, zq, seaR, "sea")
+    stats["west_quay_wall_m"] = int(wall_m)
+    return int(wall_m)
+
+
+def wq_paint(img, xy, poly, line):
+    """Clean paving on the quays (no photo lawn), the yard's hard standing,
+    the breakwater's road and walk, the seawall's promenade."""
+    if WQ is None:
+        return
+    S = img.size[0]
+    pv = Image.fromarray((WQ["pave"] * 255).astype(np.uint8)).resize((S, S), Image.NEAREST)
+    img.paste(tuple(hexrgb(WQ_PAVING)), (0, 0, S, S), pv)
+    poly(np.asarray(WQ_YARD.exterior.coords), "#8a8884")
+    for g, col in WQ["paint"]:
+        for q in to_polys(g):
+            poly(np.asarray(q.exterior.coords), col)
+    for pts_, w in WQ["lines"]:
+        line(np.asarray(pts_), "#eeeeea", w)
+
+
+def wq_palms(m, mns, mnt, bmask, placed, rnd, stats):
+    """Tall palms on the quays: 7-16 m in the LiDAR, a crown of a few m²,
+    but grey in the photo (fronds over paving), so trees() left them out."""
+    if WQ is None:
+        return 0
+    chm = np.nan_to_num(mns - mnt, nan=0)
+    zone = WQ["palm_zone"] & ~(bmask > 0)
+    hi = (chm > 3.0) & zone
+    lab, n = ndimage.label(hi)
+    if not n:
+        return 0
+    sizes = ndimage.sum(hi, lab, np.arange(1, n + 1))
+    tall = ndimage.maximum(chm, lab, np.arange(1, n + 1))
+    keep = np.isin(lab, np.nonzero((sizes >= 8) & (sizes <= 400) & (tall >= 7.0))[0] + 1)
+    sm = ndimage.gaussian_filter(np.where(keep, chm, 0), 1.0)
+    pk = np.argwhere((sm == ndimage.maximum_filter(sm, size=9)) & keep & (sm > 5.0))
+    pl = list(placed)
+    k = 0
+    for r, c in pk:
+        x, y = cell_xy(r, c)
+        if pl and min(math.hypot(x - px, y - py) for px, py in pl) < 4.0:
+            continue
+        h = float(np.clip(chm[max(0, r - 2):r + 3, max(0, c - 2):c + 3].max(), 6.0, 16.0))
+        z = mnt[r, c] if np.isfinite(mnt[r, c]) else 1.5
+        add_tree(m, x, y, z, h, float(rnd.uniform(2.6, 3.3)), "palm", rnd)
+        pl.append((x, y))
+        k += 1
+    stats["trees"] += k
+    stats["quay_palms"] = k
+    return k
+
+
 # ---------------------------------------------------------------- parks ----
 # Parks and gardens all over the set: until now each was a flat OSM green
 # with the 50 cm photo's green and the LiDAR canopy blurred over it (soft
@@ -13959,6 +14386,10 @@ def main():
     FM = fairmont_setup(feats, mns, mnt_f)
     STADE_POLY = stade_setup(feats)
     print("heliport apron…", heliport_setup(ways, mnt_f, feats))
+    mnt_pre = mnt_f
+    mnt_f, mns, wq_m2 = wq_flatten(mnt_f, mns)
+    mnt_ground = np.where(np.nan_to_num(mnt_f, nan=-99) != np.nan_to_num(mnt_pre, nan=-99), mnt_f, mnt_ground)
+    print("west quays…", wq_setup(ways, mnt_f, sea), "m2 of quay band;", wq_m2, "m2 of yard humps levelled")
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -14004,9 +14435,10 @@ def main():
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     print("Fontvieille podiums…", podium_setup(ways, mnt_f))
-    gm, gz = ground_mesh(heliport_ground(podium_ground(mnt_ground)), sea)
+    gm, gz = ground_mesh(wq_ground(heliport_ground(podium_ground(mnt_ground))), sea)
     print("podium walls…", podium_walls(gm, bm, stats), "m")
     print("heliport…", heliport(gm, bm, ortho_hi, stats), "triangles of apron and paint")
+    print("west quays…", wq_build(gm, bm, sea, stats), "m of quay wall")
     print("tunnel portals…", portals(gm, bm, stats))
     rm = Mesh()
     print("roads…", road_surfaces(rm, ways, pts, gz, bmask, stats), "m")
@@ -14042,7 +14474,7 @@ def main():
     print("Digue…", digue(bm, tm, Raster(mnt_f), stats), "trees,", stats.get("digue_m"), "m of breakwater")
     print("La Condamine…", condamine(gm, bm, tm, ways, pts, mns, mnt_f, ortho, gz, fps, stats), "orange trees")
     print("parks…", parks(gm, bm, ways, pts, mnt_f, mns, ortho_hi, gz, fps, stats), "parks and gardens")
-    jpg = paint_ground(ways, mnt_f, ndimage.zoom(sea.astype(np.float32), 0.5, order=1),
+    jpg = paint_ground(ways, mnt_f, ndimage.zoom(wq_sea_paint(sea).astype(np.float32), 0.5, order=1),
                        ndimage.zoom(bmask.astype(np.float32), 0.5, order=1), canopy, ortho,
                        sun_shadows(harbour_shadow_surface(mns, mnt_f, bgrow), sea), roofs=(ortho_hi, photo["polys"] if photo else None))
 
