@@ -1018,6 +1018,13 @@ def paint_ground(ways, mnt, sea, bmask, canopy, ortho, shadow=None, roofs=None):
         if hw in ("footway", "pedestrian", "path", "steps", "cycleway") and t.get("area") != "yes" \
                 and t.get("tunnel") != "yes" and t.get("layer", "0") not in ("-1", "-2"):
             line(pts, "#cdbb9c" if hw == "steps" else "#e8dcc6", 3.0 if hw == "pedestrian" else 2.0)
+    # Place du Palais again, over the footway lines drawn across it: its
+    # brick and grey setts take their shade from here.
+    for t, pts, closed in ways:
+        if closed and t.get("name") == "Place du Palais" and t.get("highway") == "pedestrian":
+            poly(pts, "#8c5b50")
+    for q in to_polys(palais_pattern()):
+        poly(np.asarray(q.exterior.coords), "#a19f9a")
     if RAMPE is not None:
         # The Rampe Major's bed: grey stone a little wider than the ribbon.
         for q in to_polys(RAMPE["line"].buffer(RAMPE_W / 2 + 0.5, cap_style=2, join_style=2, mitre_limit=2.0)):
@@ -4664,34 +4671,12 @@ def quai_albert(gm, m, tm, ways, pts, mntR, stats, fps=()):
             return True
         lo = mntR.sample(np.array([x]), np.array([y]))
         return not (np.size(lo) and np.isfinite(lo[0]) and float(QA["zup"](x, y)[0]) - float(lo[0]) > 1.0)
-    trunk = []
-    for (x, y), t in pts:
-        if t.get("natural") == "tree" and upper(x, y):
-            trunk.append((x, y))
-    # The row is unbroken in the street photos (2025): fill the gaps of
-    # the OSM mapping at the row's own spacing, in line with the
-    # neighbours.
-    if len(trunk) > 2:
-        T = np.array(trunk)
-        order = QA["on"][QA["kd"].query(T)[1]]
-        T = T[np.argsort(order)]
-        blds_ = blds if blds is not None and not blds.is_empty else None
-        for p0, p1 in zip(T[:-1], T[1:]):
-            gap = float(np.linalg.norm(p1 - p0))
-            if gap < 15 or gap > 60:
-                continue
-            k = int(round(gap / 10.5))
-            for i in range(1, k):
-                q = p0 + (p1 - p0) * i / k
-                if upper(*q) and (blds_ is None or not blds_.contains(Point(*q))):
-                    trunk.append((float(q[0]), float(q[1])))
+    osm = [(x, y) for (x, y), t in pts if t.get("natural") == "tree" and upper(x, y)]
+    trunk = quai_pine_row(osm, upper, blds)
     planter, soil = np.array(hexrgb("#e6dfcf")), np.array(hexrgb("#5d4a3a"))
-    for x, y in trunk:
+    for x, y, ax in trunk:
         z = float(QA["zup"](x, y)[0])
         # Square to the boulevard.
-        j = QA["on"][QA["kd"].query([x, y])[1]]
-        j0, j1 = max(0, j - 2), min(len(TRACK["x"]) - 1, j + 2)
-        ax = np.array([TRACK["x"][j1] - TRACK["x"][j0], TRACK["y"][j1] - TRACK["y"][j0]])
         _box(m, x, y, ax, 2.3, 2.3, z - 0.3, z + 0.5, planter)
         _box(m, x, y, ax, 1.8, 1.8, z + 0.5, z + 0.52, soil)
         h = float(rnd.uniform(11.5, 15.0))
@@ -4700,6 +4685,47 @@ def quai_albert(gm, m, tm, ways, pts, mntR, stats, fps=()):
         stats["trees"] += 1
     stats["quai_pines"] = len(trunk)
     return len(trunk)
+
+
+QA_PINE_STEP = 11.0      # m between the pines along the boulevard (median OSM gap, street photos)
+QA_PINE_OFFSET = 9.0     # m from the lap's centre line: just behind the boulevard's kerb
+
+
+def quai_pine_row(osm, upper, blds):
+    """The stone pines along Boulevard Albert 1er stand in one straight,
+    evenly spaced row of planters just behind the kerb (street photos
+    2021-2025). OpenStreetMap maps them 7-11 m from the road with gaps of
+    4 to 38 m, so the trees only give the row's two ends: the planters
+    are laid out at an even step between them, all at the same distance
+    from the lap's centre line, each square to the road. Returns
+    (x, y, axis) for each planter."""
+    if len(osm) < 2:
+        return []
+    line = TRACK["line"]
+    L = line.length
+    O = np.array(osm, float)
+    s_ = np.array([line.project(Point(*q)) for q in O])
+    s_ = np.where(s_ > L / 2, s_ - L, s_)            # the row crosses the start line (s = 0)
+
+    def frame(s):
+        p, q = line.interpolate(s % L), line.interpolate((s + 3.0) % L)
+        p0 = line.interpolate((s - 3.0) % L)
+        t = np.array([q.x - p0.x, q.y - p0.y])
+        t /= max(np.hypot(*t), 1e-9)
+        return np.array([p.x, p.y]), t, np.array([-t[1], t[0]])
+    # Which side of the road: the OSM trees' own side.
+    side = np.sign(np.median([np.dot(q - frame(s)[0], frame(s)[2]) for q, s in zip(O, s_)]))
+    s0, s1 = float(s_.min()), float(s_.max())
+    n = max(1, int(round((s1 - s0) / QA_PINE_STEP)))
+    out = []
+    blds_ = blds if blds is not None and not blds.is_empty else None
+    for s in np.linspace(s0, s1, n + 1):
+        c, t, nrm = frame(s)
+        q = c + nrm * side * QA_PINE_OFFSET
+        if not upper(*q) or (blds_ is not None and blds_.buffer(1.5).contains(Point(*q))):
+            continue
+        out.append((float(q[0]), float(q[1]), t))
+    return out
 
 
 # --------------------------------------------------------------- sidewalks ----
@@ -8972,34 +8998,18 @@ def palais_princier(m, gm, mntR, stats):
         stats["palace_stair_steps"] = 2 * n_
     stats["palace"] = {"square": round(Z, 2), "court": round(zc, 2), "windows": n_win}
 
-    # -- On the square: the guard's cobbled enclosure, cannons --------------
-    cob = np.array(hexrgb("#8d8a84"), float)
-    F.box(gc - 9.0, gc + 9.0, 9.0, 21.0, Z - 0.2, Z + 0.18, cob, sides="stST")
-    bol = np.array(hexrgb("#33463c"), float)
-    for a in np.arange(gc - 9.0, gc + 9.01, 2.25):
-        for b in (9.0, 21.0):
-            p = F.xy(a, b)
-            _cyl(m, p[0], p[1], Z, Z + 0.95, 0.13, bol, sides=8)
-            _ball(m, p[0], p[1], Z + 1.0, 0.11, bol, None, 6, 4)
-    for b in np.arange(11.25, 21.0, 2.25):
-        for a in (gc - 9.0, gc + 9.0):
-            p = F.xy(a, b)
-            _cyl(m, p[0], p[1], Z, Z + 0.95, 0.13, bol, sides=8)
-    for a, b0, b1 in ((gc - 9.0, 9.0, 21.0), (gc + 9.0, 9.0, 21.0)):
-        F.box(a - 0.03, a + 0.03, b0, b1, Z + 0.62, Z + 0.68, bol * 0.6, top=False, sides="sS")
-    for b in (9.0, 21.0):
-        F.box(gc - 9.0, gc + 9.0, b - 0.03, b + 0.03, Z + 0.62, Z + 0.68, bol * 0.6, top=False, sides="tT")
+    # -- On the square: Louis XIV's cannons, chains ---------------------------
+    # Seven bronze cannons on wooden carriages along the front, four south
+    # of the gate and three north of it, each with its pyramid of balls
+    # (OpenStreetMap's historic=cannon, pointing out across the square).
     bronze = np.array(hexrgb("#6b5532"), float)
     wood = np.array(hexrgb("#3d2f25"), float)
-    for k, a in enumerate((22.0, 30.0, 37.5, 44.0)):
-        p = F.xy(a, 4.2)
-        F.box(a - 0.45, a + 0.45, 3.3, 5.1, Z, Z + 0.75, wood)
-        # Barrel: pointing out across the square.
+    for a in (-8.2, -4.7, -1.1, 1.7, 21.6, 25.1, 28.6):
+        F.box(a - 0.45, a + 0.45, 2.0, 3.8, Z, Z + 0.75, wood)
         for j in range(6):
             r_ = 0.24 - 0.02 * j
-            F.box(a - r_, a + r_, 3.2 + j * 0.45, 3.65 + j * 0.45, Z + 0.85 - r_, Z + 0.85 + r_, bronze)
-        # Cannonballs: a small pyramid beside it.
-        q = F.xy(a + 1.4, 4.2)
+            F.box(a - r_, a + r_, 1.9 + j * 0.45, 2.35 + j * 0.45, Z + 0.85 - r_, Z + 0.85 + r_, bronze)
+        q = F.xy(a + 1.4, 2.9)
         for lv, nb in enumerate((3, 2, 1)):
             for i in range(nb):
                 for j in range(nb):
@@ -9007,7 +9017,26 @@ def palais_princier(m, gm, mntR, stats):
                     off2 = (j - (nb - 1) / 2) * 0.24
                     pp = q + F.u * off + F.v * off2
                     _ball(m, pp[0], pp[1], Z + 0.12 + lv * 0.19, 0.12, np.array(hexrgb("#2e2e2c")), None, 6, 4)
-    stats["palace_cannons"] = 4
+    # Low green posts and chains round the coaches' bay (OSM barrier=chain).
+    bol = np.array(hexrgb("#33463c"), float)
+    for line in (((57.8, 47.1), (35.5, 59.6), (26.0, 33.2)), ((21.6, 35.3), (30.8, 61.7), (23.7, 64.1))):
+        for (s0, t0), (s1, t1) in zip(line[:-1], line[1:]):
+            L = math.hypot(s1 - s0, t1 - t0)
+            n_p = max(1, int(round(L / 2.5)))
+            prev = None
+            for k in range(n_p + 1):
+                f = k / n_p
+                ps, pt = s0 + (s1 - s0) * f, t0 + (t1 - t0) * f
+                p = F.xy(ps, pt)
+                z0 = mntR.sample(np.array([p[0]]), np.array([p[1]]))[0]
+                z0 = Z if not np.isfinite(z0) else float(z0)
+                _cyl(m, p[0], p[1], z0, z0 + 0.7, 0.07, bol, sides=8)
+                if prev is not None:
+                    q0, zq = prev
+                    mid, zc_ = (q0 + p) / 2, (zq + z0) / 2 + 0.45
+                    _box(m, mid[0], mid[1], p - q0, float(np.linalg.norm(p - q0)), 0.04, zc_ - 0.025, zc_ + 0.025, bol * 0.6)
+                prev = (p, z0)
+    stats["palace_cannons"] = 7
     return F
 
 
@@ -9924,7 +9953,7 @@ def cathedrale(m, gm, mntR, stats):
 # in asphalt with a red brick pavement along each house front.
 ROCHER_ZONE = Polygon([(1056030, 6302255), (1056530, 6302255), (1056530, 6302560), (1056030, 6302560)])
 ROCHER_GARDENS = None                  # the Rock's mapped gardens (rocher_gardens_setup)
-SETT, SETT_RED = 12, 13                # GROUND styles: grey setts, Place du Palais's pink-red ones
+SETT, PALAIS_BRICK = 12, 13           # GROUND styles: grey setts; Place du Palais's herringbone brick (no bands)
 ROCHER_SETT_W = 7.0                    # m: the lanes' paving reaches the house fronts
 ROCHER_PAVE_W = 1.3                    # m, brick pavement along the house fronts
 
@@ -9934,6 +9963,45 @@ def rocher_paved(t, p_):
     (Place de la Mairie, Rue Princesse Marie de Lorraine): no asphalt."""
     return (t.get("surface") in ("paving_stones", "sett") and len(p_) >= 2
             and ROCHER_ZONE.contains(Point(*p_[len(p_) // 2])))
+
+
+PALAIS_SUN_C = (1056044.95, 6302419.5)  # the sunburst's centre: before the gate, on its step (20 cm photo)
+# The long grey sett panels across the square, traced from the 20 cm photo
+# (the north one is the coaches' and cars' bay).
+PALAIS_PANELS = [
+    [(1056079.6, 6302424.7), (1056076.4, 6302427.7), (1056076.8, 6302430.5), (1056097.7, 6302439.2),
+     (1056104.9, 6302439.2), (1056108.9, 6302433.2), (1056108.7, 6302427.7)],
+    [(1056103.2, 6302397.5), (1056077.1, 6302409.0), (1056078.3, 6302418.6), (1056109.1, 6302424.3),
+     (1056108.9, 6302404.8)],
+    [(1056099.8, 6302386.3), (1056088.5, 6302385.8), (1056074.5, 6302396.0), (1056072.2, 6302400.3),
+     (1056077.5, 6302402.4), (1056101.5, 6302393.9)],
+    [(1056063.6, 6302391.7), (1056067.3, 6302391.7), (1056071.5, 6302381.0), (1056066.8, 6302376.8)],
+]
+
+
+def palais_pattern():
+    """The grey in Place du Palais's red brick: in front of the gate a
+    sunburst (a half disc of setts, eleven rays, kites and wedges in turn,
+    and a thin grey arc round them), then the long radial panels."""
+    c = np.array(PALAIS_SUN_C)
+    F = Frame(None, PALACE_O, PALACE_U)
+    ax = F.v                                   # out onto the square
+    side = F.u
+    out = [Point(*c).buffer(5.5, 48)]
+    n = 11
+    for k in range(n):
+        a = math.radians(-90.0 + (k + 0.5) * 180.0 / n)
+        d = ax * math.cos(a) + side * math.sin(a)
+        w = np.array([-d[1], d[0]])
+        if k % 2 == 0:                          # a wedge
+            pts = [c + d * 7.3 + w * 0.45, c + d * 16.6 + w * 1.05, c + d * 16.6 - w * 1.05, c + d * 7.3 - w * 0.45]
+        else:                                   # a kite
+            pts = [c + d * 8.6, c + d * 11.8 + w * 1.25, c + d * 16.0, c + d * 11.8 - w * 1.25]
+        out.append(Polygon(pts))
+    out.append(Point(*c).buffer(18.2, 64).difference(Point(*c).buffer(17.8, 64)))
+    half = Polygon([c - side * 30, c + side * 30, c + side * 30 + ax * 30, c - side * 30 + ax * 30])
+    sun = unary_union(out).intersection(half)
+    return unary_union([sun] + [Polygon(p) for p in PALAIS_PANELS])
 
 
 def rocher_streets(gm, ways, mnt, gz, fps, stats):
@@ -9970,7 +10038,18 @@ def rocher_streets(gm, ways, mnt, gz, fps, stats):
     side = side.intersection(blds.buffer(ROCHER_PAVE_W)).difference(off).difference(carriage).difference(sett)
     gardens = unary_union(keep_off[1:] or [Polygon()])
     sq = unary_union(palais_sq or [Polygon()]).difference(blds).difference(gardens).difference(carriage)
-    stats["palais_sq_m2"] = round(_slab(gm, sq, mntR, gz, SETT_RED, lift=0.09))
+    # Red brick in herringbone (style PALAIS_BRICK: no grey bands), laid
+    # square to the Palace's front (TEXCOORD_1, metres), with the
+    # grey setts of the sunburst in front of the gate and the long radial
+    # panels beyond (palais_pattern()).
+    grey = sq.intersection(palais_pattern())
+    Fp = Frame(None, PALACE_O, PALACE_U)
+
+    def palais_grid(x, y):
+        d = np.column_stack([x, y]) - Fp.O
+        return np.column_stack([d @ Fp.u, d @ Fp.v])
+    stats["palais_sq_m2"] = round(_slab(gm, sq.difference(grey), mntR, gz, PALAIS_BRICK, lift=0.09, uv2f=palais_grid))
+    stats["palais_grey_m2"] = round(_slab(gm, grey, mntR, gz, SETT, lift=0.09))
     stats["rocher_sett_m2"] = round(_slab(gm, sett, mntR, gz, SETT, lift=0.09))
     stats["rocher_brick_m2"] = round(_slab(gm, side, mntR, gz, PAVER, lift=0.14))
     return stats["rocher_sett_m2"]
@@ -10571,7 +10650,7 @@ def condamine_setup(ways):
     return {"zone": zone, "park": park, "ped": ped, "ped_poly": pp}
 
 
-def _slab(gm, poly, mntR, gz, style, lift=0.08, area=3):
+def _slab(gm, poly, mntR, gz, style, lift=0.08, area=3, uv2f=None):
     n_ = 0.0
     for q in to_polys(poly):
         q = shapely.set_precision(q.simplify(0.05), 0.01)
@@ -10592,7 +10671,8 @@ def _slab(gm, poly, mntR, gz, style, lift=0.08, area=3):
         tri = tri[(zt.max(1) - zt.min(1)) < 2.0]
         P = enu_fast(v[:, 0], v[:, 1], z + lift)
         uv = np.column_stack([(v[:, 0] - X0) / (X1 - X0), (Y1 - v[:, 1]) / (Y1 - Y0)])
-        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=style)
+        gm.add(P, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=tri, style=style,
+               uv2=None if uv2f is None else uv2f(v[:, 0], v[:, 1]))
         n_ += q.area
     return n_
 

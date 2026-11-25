@@ -177,13 +177,14 @@
               material.diffuse = mix(d, rock, steep * (1.0 - 0.35 * veg));
             }
           }
-          if (a255 > 10.5 && a255 < 11.5) {
+          if (a255 > 10.5 && a255 < 11.5 || a255 > 12.5 && a255 < 13.5) {
             // Place d'Armes and the Rampe Major (style 11): red brick laid
-            // in herringbone, framed by a grid of grey stone bands.
+            // in herringbone, framed by a grid of grey stone bands. Place
+            // du Palais (13): the same brick, no bands.
             // texCoord_1 = metres along / across the square's grid.
             vec2 g = fsInput.attributes.texCoord_1;
             float px = length(fwidth(g));
-            vec3 ref = czm_srgbToLinear(vec3(0.643, 0.333, 0.247));
+            vec3 ref = czm_srgbToLinear(a255 > 12.5 ? vec3(0.60, 0.40, 0.34) : vec3(0.643, 0.333, 0.247));
             vec3 grey = czm_srgbToLinear(vec3(0.62, 0.61, 0.58));
             float shade = clamp(dot(mapC, vec3(0.3, 0.59, 0.11)) / dot(ref, vec3(0.3, 0.59, 0.11)), 0.45, 1.1);
             // Herringbone: 22 x 11 cm bricks at 45 degrees.
@@ -207,7 +208,7 @@
             vec2 baa = vec2(max(px * 1.2, 0.01));
             float bandA = 1.0 - smoothstep(0.225 - baa.x, 0.225 + baa.x, bd.y);
             float bandB = 1.0 - smoothstep(0.225 - baa.y, 0.225 + baa.y, bd.x);
-            float band = max(bandA, bandB);
+            float band = a255 > 12.5 ? 0.0 : max(bandA, bandB);
             float along = bandA > bandB ? g.x : g.y;
             float sj = abs(fract(along / 0.6 + 0.5) - 0.5) * 0.6;
             vec3 gcol = grey * mix(0.9, 1.06, hash12(vec2(floor(along / 0.6), floor(g.x / 4.7) + floor(g.y / 4.7) * 7.0)));
@@ -319,8 +320,7 @@
             float sc = length(czm_model[0].xyz);
             vec2 wp = fsInput.attributes.positionMC.xz * sc;
             float px = length(fwidth(wp));
-            // Style 12: Le Rocher's grey setts, small squares in courses;
-            // 13: the pink-red setts of Place du Palais.
+            // Style 12: Le Rocher's grey setts, small squares in courses.
             bool sett = a255 > 11.5;
             bool rsett = a255 > 12.5;
             bool brick = a255 < 9.5 || sett;
