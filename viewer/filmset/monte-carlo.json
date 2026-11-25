@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6754634,
+ "triangles": 6759728,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -223,6 +223,8 @@
  "rocher_brick_m2": 734,
  "peche_walk_m2": 482,
  "peche_seawall_m": 139,
+ "solarium_tiers": 6,
+ "solarium_m": 143.0,
  "digue_m": 348.6,
  "digue_trees": 15,
  "conda_ped_m2": 7747,

@@ -12976,14 +12976,53 @@ DIGUE_TERMINAL_COL = "#a9533f"           # red-brown cladding (Mapillary 2017)
 DIGUE_TERMINAL_ROOF = "#8e5446"
 # The abutment, in the same frame: (s0, s1, t0, t1) boxes of what the photo
 # shows. Levels from the LiDAR terrain model.
-DIGUE_SOLARIUM = [(8.0, 140.0, 0.5, 5.5, 4.0), (8.0, 140.0, 5.5, 10.5, 3.0), (8.0, 140.0, 10.5, 14.0, 1.6)]
 DIGUE_PAINT = [
     ((22.0, 140.0, -95.0, -11.0), "#6d6f72"),      # the car park, the boat yard and the Quai Rainier loop's asphalt
-    ((30.0, 140.0, -11.0, -3.0), "#c9c5bc"),       # the pale walk where the tents stand in summer
-    ((5.0, 140.0, -3.0, 0.5), "#8c5d4e"),          # the red-brown walk under the trees
     ((20.0, 40.0, -20.0, -9.0), "#9b6a58"),        # the terrace with round planters under the Fort
-    ((8.0, 140.0, 0.5, 14.5), "#e2dccf"),          # the Solarium's decks
+    ((-4.0, 144.0, -9.0, 15.0), "#a9a7a1"),       # the Solarium (under its concrete, see solarium())
 ]
+
+# The Solarium ("Plage du Solarium"), the public bathing terraces along the
+# abutment's sea side under Fort Antoine. OpenStreetMap maps it as a beach
+# (natural=beach, surface=asphalt) and the photo's pale concrete read as
+# sand: it was three cream slabs on the 3 m terrain grid. What is there is a
+# concrete grandstand into the sea. The LiDAR surface model (2021) shows it
+# plainly: a top terrace at 7.0 m NGF, then six tiers 2 m deep and 1 m high
+# down to a last one at 1.0 m and the sea wall (t 14.8); behind it, a raised
+# concrete promenade on a two-level structure (OSM building=pier, footway
+# level 2, surface concrete) from 11.0-11.5 m under the Fort down to 8.8 m
+# where it runs on as the breakwater's raised walk, with a wall into the
+# car park (2 m) on the harbour side. At the north end the tiers stop at a
+# platform at 3.0 m reached by a flight from the terrace, at the south end
+# a platform at 4.9 m against the Fort's rock. Benches, showers and the
+# drinking tap are OpenStreetMap's (2023 survey); ladders into the sea as
+# the bathing guides describe.
+SOL_TOP = 7.0                            # m NGF: the top terrace
+SOL_T0 = -0.8                            # t: the promenade's sea wall (the terrace's back)
+SOL_EDGE = 2.8                           # t: the first tier's edge; then one every SOL_STEP
+SOL_STEP = 2.0
+SOL_TIERS = 6                            # 6.0 .. 1.0 m
+SOL_SEA = SOL_EDGE + SOL_STEP * SOL_TIERS   # 14.8: the sea wall
+SOL_S0, SOL_S1 = 8.0, 122.0              # the top terrace along s
+SOL_NORTH = (126.0, 139.0, 3.0)          # the north platform: from, to, level
+SOL_LEDGE = (139.0, 142.5, 1.2)          # the low ledge by the breakwater's root
+SOL_SOUTH = (-4.0, 8.0, -2.5, 4.9)       # the south platform: s0, s1, t0, level
+SOL_PROM = [(-4.0, 11.0), (15.0, 11.0), (30.0, 11.5), (42.0, 11.5), (50.0, 11.1), (62.0, 10.75),
+            (80.0, 10.2), (100.0, 9.65), (119.0, 9.1), (131.0, 8.9), (140.0, 8.8)]   # (s, level) along t -4
+SOL_PROM_T = -9.0                        # t: the promenade's harbour wall
+SOL_CARPARK = 1.6                        # the harbour wall's foot (car park 2.0)
+SOL_CONC = "#a9aaa7"                     # sun-bleached concrete, cool grey (the grade warms it)
+SOL_RISER = "#8a8b88"                    # the tiers' faces, a shade darker so each step reads
+SOL_SEAWALL = "#7c7d7a"
+SOL_WET = "#4f5552"
+SOL_PROM_COL = "#a4a29d"
+SOL_WALL = "#b4b1aa"
+SOL_BENCHES = [(43.6, 0.6), (45.7, 0.6), (55.1, 0.6), (57.2, 0.6), (59.7, 0.6), (70.4, 0.8), (72.5, 0.8),
+               (75.0, 0.8), (85.9, 0.6), (88.4, 0.6), (49.4, 3.7), (50.9, 3.6), (80.0, 3.7), (81.5, 3.6),
+               (10.6, 5.2), (17.7, 4.7)]
+SOL_SHOWERS = [(36.2, 0.5), (65.4, 0.6), (83.7, 0.7)]
+SOL_LADDERS = [15.0, 31.0, 47.0, 70.0, 93.0, 110.0, 133.0]
+SOL_FLIGHTS = [24.0, 62.0, 101.0]        # stairs down through the tiers
 DIGUE_BAYS = [((-30.5, -25.5), (60.0, 100.0)), ((-25.5, -20.5), (60.0, 100.0))]
 
 
@@ -12995,7 +13034,31 @@ def digue_zone():
     """The breakwater and the abutment's decks (no LiDAR trees, no lawn)."""
     F = digue_frame()
     return unary_union([F.poly(DIGUE_ROOT - 2.0, DIGUE_END + 1.0, DIGUE_HARBOUR - 0.5, 0.5),
-                        F.poly(26.0, 142.0, -11.0, 15.0)])
+                        F.poly(26.0, 142.0, -11.0, 15.0), F.poly(-5.0, 146.0, -12.5, 16.0)])
+
+
+def sol_prom_z(s):
+    """The Solarium's promenade level at s."""
+    a = np.array(SOL_PROM)
+    return np.interp(s, a[:, 0], a[:, 1])
+
+
+def solarium_ground(mnt):
+    """The 3 m ground grid under the Solarium goes under water: the tiers
+    stand alone, with no terrain slope cutting through their edges."""
+    F = digue_frame()
+    P = F.poly(SOL_SOUTH[0] + 1.0, SOL_LEDGE[1] + 2.0, SOL_PROM_T + 0.6, SOL_SEA + 1.5)
+    x0, y0, x1, y1 = P.bounds
+    c0, c1 = max(int((x0 - X0) / RES), 0), min(int((x1 - X0) / RES) + 1, mnt.shape[1])
+    r0, r1 = max(int((Y1 - y1) / RES), 0), min(int((Y1 - y0) / RES) + 1, mnt.shape[0])
+    rr, cc = np.mgrid[r0:r1, c0:c1]
+    cx, cy = cell_xy(rr, cc)
+    k = contains_xy(P, cx, cy)
+    out = mnt.copy()
+    sub = out[r0:r1, c0:c1]
+    sub[k] = -0.6
+    out[r0:r1, c0:c1] = sub
+    return out
 
 
 def digue_paint(poly, line):
@@ -13007,9 +13070,6 @@ def digue_paint(poly, line):
     for (t0, t1), (sa, sb) in DIGUE_BAYS:
         for s in np.arange(sa, sb + 0.1, 2.5):
             line([F.xy(s, t0), F.xy(s, t1)], "#c4c3be", 0.15)
-    # The decks' step edges, a darker line each.
-    for s0, s1, t0, t1, z in DIGUE_SOLARIUM[1:]:
-        line([F.xy(s0, t0), F.xy(s1, t0)], "#b9b2a4", 0.35)
 
 
 def digue(m, tm, mntR, stats):
@@ -13037,17 +13097,16 @@ def digue(m, tm, mntR, stats):
     lo_t0 = -4.5
     hi = [(r0 + 14.0, ts0, -12.0, 0.0), (ts0, ts1, tt1, 0.0), (ts1, DIGUE_STEP_S, -14.0, 0.0)]
     for s0, s1, t0, t1 in hi:
-        F.box(s0, s1, t0, t1, d, DIGUE_WALK_HI, conc, sides="stT" if s0 == r0 + 14.0 else "tT")
+        F.box(s0, s1, t0, t1, d, DIGUE_WALK_HI, conc, sides="tT")     # the Solarium's promenade runs on at the root
     F.box(DIGUE_STEP_S, 440.0, -12.0, lo_t0, d, DIGUE_WALK_LO, conc, sides="tTS")
     F.box(DIGUE_STEP_S, DIGUE_STEP_S + 0.01, -14.0, lo_t0, DIGUE_WALK_LO, DIGUE_WALK_HI, conc, top=False, sides="S")
     F.box(DIGUE_STEP_S, r1, lo_t0, 0.0, d, d + 0.05, conc * 0.98)                    # the lower sea walk
     for s in np.arange(DIGUE_STEP_S + 4.0, r1 - 6.0, 7.4):
         F.drum(s, 0.0, d, d + 0.55, 3.1, conc * 0.93, n=10, th0=math.pi, th1=2 * math.pi)
         F.cone(s, 0.0, d + 0.55, 3.1, 0.25, conc * 0.97, n=10, th0=math.pi, th1=2 * math.pi, kind=PLAIN)
-    # Steps: from the raised walk down to the lower one by the terminal's
-    # end, and at the root from the abutment's walk (4 m) up to the deck.
+    # Steps from the raised walk down to the lower one by the terminal's end
+    # (at the root the walk runs on as the Solarium's promenade).
     _stairs(m, F.xy(DIGUE_STEP_S + 0.5, -2.2), F.xy(DIGUE_STEP_S + 9.0, -2.2), DIGUE_WALK_HI, d, 3.6, conc, wall)
-    _stairs(m, F.xy(r0 + 14.0, -6.0), F.xy(r0 - 4.0, -6.0), DIGUE_WALK_HI, 4.0, 9.0, conc, wall)
     # Parapets: a pale wall on the sea edge of the high walk, white
     # railings along its harbour side and round the lower walk.
     F.box(r0 + 14.0, DIGUE_STEP_S, -0.6, 0.0, DIGUE_WALK_HI, DIGUE_WALK_HI + 1.1, conc * 1.02)
@@ -13080,24 +13139,147 @@ def digue(m, tm, mntR, stats):
     F.drum(r1 - 2.6, th + 2.6, d + 9.0, d + 10.6, 0.8, C("#c3352c"), n=10)
     F.cone(r1 - 2.6, th + 2.6, d + 10.6, 1.0, 0.8, C("#7c2a24"), n=10, kind=PLAIN)
     # The root: the deck runs onto the abutment over a short ramp (the car
-    # park is at 2 m), and the abutment's sea edge steps down in the
-    # Solarium's three sunbathing decks.
+    # park is at 2 m); on its sea side, the Solarium.
     F.box(r0 - 8.0, r0, th + 1.6, -12.0, 1.9, 2.0, asph, sides="")
     F.quad((r0 - 8.0, th + 1.6, 2.03), (r0, th + 1.6, d + 0.03), (r0, -12.0, d + 0.03), (r0 - 8.0, -12.0, 2.03), asph,
            (0, 0, 1))
-    deck = C("#e2dccf")
-    for s0, s1, t0, t1, z in DIGUE_SOLARIUM:
-        F.box(s0, s1, t0, t1, -1.0, z + 0.06, deck, sides="tTS")
-    # The red-brown walk's row of small trees (the 20 cm photo).
+    nt = solarium(m, tm, stats)
+    stats["digue_m"] = round(r1 - r0, 1)
+    stats["digue_trees"] = nt
+    return nt
+
+
+def solarium(m, tm, stats):
+    """The Solarium: the concrete tiers into the sea, the top terrace, the
+    raised promenade behind it, the platforms at both ends, ladders,
+    flights of steps, benches, showers and the promenade's small trees."""
+    F = digue_frame(m)
+    C = lambda h: np.array(hexrgb(h), float)
+    conc, riser, seaw, wet = C(SOL_CONC), C(SOL_RISER), C(SOL_SEAWALL), C(SOL_WET)
+    pcol, wall = C(SOL_PROM_COL), C(SOL_WALL)
+    steel, wood = C("#c4c8cb"), C("#8b5d3b")
+    foot = -1.5
+    # Cast concrete in bays: each 6 m slab a shade apart, so the joints show.
+    shade = lambda s, t: 0.975 + 0.05 * int(hashlib.md5(f"sol{s:.1f}:{t:.1f}".encode()).hexdigest()[:6], 16) / 0xFFFFFF
+
+    def tread(s0, s1, t0, t1, z, sides="T", face=riser, bay=6.0):
+        n = max(1, int(round((s1 - s0) / bay)))
+        e = np.linspace(s0, s1, n + 1)
+        for a, b in zip(e[:-1], e[1:]):
+            F.box(a, b, t0, t1, z - 0.02, z, conc * shade(a, t0), sides="")
+        if sides:
+            F.box(s0, s1, t0, t1, foot, z, face, top=False, sides=sides)
+
+    # The top terrace and the six tiers, the last one standing on the sea
+    # wall; their ends step down to the platforms.
+    tread(SOL_S0, SOL_S1, SOL_T0, SOL_EDGE, SOL_TOP, sides="sST")
+    for k in range(1, SOL_TIERS + 1):
+        t0, t1, z = SOL_EDGE + SOL_STEP * (k - 1), SOL_EDGE + SOL_STEP * k, SOL_TOP - k
+        s0 = SOL_S0 if z > SOL_SOUTH[3] - 0.5 else SOL_SOUTH[0] + 1.0
+        s1 = SOL_NORTH[0] if z > SOL_NORTH[2] + 0.5 else SOL_NORTH[1]
+        tread(s0, s1, t0, t1, z, sides="sST" if k < SOL_TIERS else "sS")
+    # The sea wall: plain concrete, darker and wet at the waterline.
+    F.box(SOL_SOUTH[0] + 1.0, SOL_NORTH[1], SOL_SEA - 0.01, SOL_SEA, -2.5, SOL_TOP - SOL_TIERS, seaw, top=False, sides="T")
+    F.box(SOL_SOUTH[0] + 1.0, SOL_LEDGE[1], SOL_SEA, SOL_SEA + 0.02, -0.6, 0.35, wet, top=False, sides="T")
+    # North: a platform at 3.0 m and the low ledge at the breakwater's root,
+    # with a flight down from the top terrace along the promenade's wall.
+    ns0, ns1, nz = SOL_NORTH
+    tread(ns0, ns1, SOL_T0, SOL_EDGE + SOL_STEP * 3, nz, sides="")
+    ls0, ls1, lz = SOL_LEDGE
+    tread(ls0, ls1, SOL_T0, SOL_SEA, lz, sides="tTS")
+    F.box(ns1, ls0 + 0.01, SOL_T0, SOL_EDGE + SOL_STEP * 4, lz, nz, riser, top=False, sides="S")
+    _stairs(m, F.xy(SOL_S1, (SOL_T0 + SOL_EDGE) / 2), F.xy(SOL_S1 + 11.0, (SOL_T0 + SOL_EDGE) / 2), SOL_TOP, nz,
+            SOL_EDGE - SOL_T0 - 0.6, conc, riser)
+    # South: a platform at 4.9 m against the Fort's rock, a flight down to it.
+    ss0, ss1, st0, sz = SOL_SOUTH
+    tread(ss0, ss1, st0, SOL_EDGE + SOL_STEP * 2, sz, sides="stT")
+    _stairs(m, F.xy(SOL_S0, (SOL_T0 + SOL_EDGE) / 2), F.xy(SOL_S0 - 5.0, (SOL_T0 + SOL_EDGE) / 2), SOL_TOP, sz,
+            SOL_EDGE - SOL_T0 - 0.6, conc, riser)
+    # Flights of steps down through the tiers to the water (0.2 m steps).
+    for sc in SOL_FLIGHTS:
+        n = int(round((SOL_TOP - (SOL_TOP - SOL_TIERS)) / 0.2))
+        dt = (SOL_SEA - 0.4 - SOL_EDGE) / n
+        for i in range(n):
+            ta = SOL_EDGE + dt * i
+            F.box(sc - 0.8, sc + 0.8, ta, ta + dt + 0.01, foot, SOL_TOP - 0.2 * (i + 1), conc * 0.97, sides="sST")
+        for side in (-0.85, 0.85):                                         # steel handrails
+            for i in range(0, n, 5):
+                ta = SOL_EDGE + dt * i
+                F.box(sc + side - 0.03, sc + side + 0.03, ta, ta + 0.06, SOL_TOP - 0.2 * (i + 1),
+                      SOL_TOP - 0.2 * (i + 1) + 0.95, steel)
+            for i in range(n - 1):
+                ta = SOL_EDGE + dt * i
+                F.box(sc + side - 0.03, sc + side + 0.03, ta, ta + dt + 0.01, SOL_TOP - 0.2 * (i + 1) + 0.9,
+                      SOL_TOP - 0.2 * (i + 1) + 0.96, steel, sides="sS")
+    # Ladders down the sea wall: two rails bent over the edge, rungs.
+    for sc in SOL_LADDERS:
+        z = SOL_TOP - SOL_TIERS if sc < ns1 else lz
+        for side in (-0.28, 0.28):
+            F.box(sc + side - 0.025, sc + side + 0.025, SOL_SEA + 0.12, SOL_SEA + 0.17, -1.4, z + 0.85, steel)
+            F.box(sc + side - 0.025, sc + side + 0.025, SOL_SEA - 0.55, SOL_SEA + 0.17, z + 0.8, z + 0.85, steel)
+            F.box(sc + side - 0.025, sc + side + 0.025, SOL_SEA - 0.55, SOL_SEA - 0.5, z, z + 0.85, steel)
+        for zr in np.arange(-1.2, z, 0.3):
+            F.box(sc - 0.28, sc + 0.28, SOL_SEA + 0.12, SOL_SEA + 0.16, zr, zr + 0.04, steel, sides="tT")
+    # The promenade: a concrete deck on its structure, sloping with the
+    # LiDAR, a wall into the car park and a parapet over the terrace.
+    # Each 2.5 m piece is a sloping quad (no steps or gaps between them).
+    def sloped(a, b, t0, t1, z0, z1, col, sides, top=True):
+        za0, zb0, za1, zb1 = z0(a), z0(b), z1(a), z1(b)
+        if top:
+            F.quad((a, t0, za1), (b, t0, zb1), (b, t1, zb1), (a, t1, za1), col * 1.02, (0, 0, 1))
+        for c in sides:
+            tt = t0 if c == "t" else t1
+            F.quad((a, tt, za0), (b, tt, zb0), (b, tt, zb1), (a, tt, za1), col, (0, -1 if c == "t" else 1, 0))
+
+    e = np.arange(SOL_SOUTH[0], 140.0 + 0.01, 2.5)
+    zp = lambda x: float(sol_prom_z(x))
+    for a, b in zip(e[:-1], e[1:]):
+        t1 = SOL_T0 if a >= SOL_S0 - 2.0 else SOL_SOUTH[2]
+        t0 = SOL_PROM_T if a < 125.0 else SOL_PROM_T - 3.0 * (a - 125.0) / 15.0
+        sloped(a, b, t0, t1, lambda x: SOL_CARPARK, zp, wall, "tT", top=False)
+        F.quad((a, t0, zp(a)), (b, t0, zp(b)), (b, t1, zp(b)), (a, t1, zp(a)), pcol * shade(a, -5), (0, 0, 1))
+        sloped(a, b, t1 - 0.4, t1, zp, lambda x: zp(x) + 1.0, wall * 1.03, "tT")
+        if a == SOL_S0 - 2.0 or a == SOL_SOUTH[0]:
+            F.box(a - 0.01, a, t1 - 0.4, t1, zp(a), zp(a) + 1.0, wall * 1.03, top=False, sides="s")
+    # The south end's face toward the Fort and the north end's join with the
+    # breakwater's raised walk.
+    F.box(SOL_SOUTH[0], SOL_SOUTH[0] + 0.01, SOL_PROM_T, SOL_SOUTH[2], SOL_CARPARK, float(sol_prom_z(SOL_SOUTH[0])), wall,
+          top=False, sides="s")
+    # A railing along the harbour wall over the car park (OSM: from s 46).
+    A = np.array([F.xy(a, SOL_PROM_T + 0.1) for a in e[18:-6]])
+    B = np.array([F.xy(b, SOL_PROM_T + 0.1) for b in e[19:-5]])
+    railing(m, A, B, sol_prom_z(e[18:-6]), STREET_RAIL, zb=sol_prom_z(e[19:-5]))
+    # Two flights from the promenade down to the terrace, meeting at s 56.5.
+    for a, b in ((46.0, 56.0), (67.0, 57.0)):
+        _stairs(m, F.xy(a, 0.0), F.xy(b, 0.0), float(sol_prom_z(a)), SOL_TOP, 1.6, conc, wall)
+    # Benches (wooden slats on concrete feet), facing the sea.
+    for sb, tb in SOL_BENCHES:
+        k = int(np.clip(np.floor((tb - SOL_EDGE) / SOL_STEP) + 1, 0, SOL_TIERS))
+        z = SOL_TOP - k
+        F.box(sb - 0.8, sb + 0.8, tb - 0.25, tb + 0.25, z + 0.38, z + 0.45, wood)
+        F.box(sb - 0.8, sb + 0.8, tb - 0.3, tb - 0.24, z + 0.45, z + 0.9, wood)
+        for o in (-0.65, 0.65):
+            F.box(sb + o - 0.06, sb + o + 0.06, tb - 0.25, tb + 0.2, z, z + 0.38, riser)
+    # Showers and the drinking tap: steel posts.
+    for sb, tb in SOL_SHOWERS:
+        x, y = F.xy(sb, tb)
+        _cyl(m, x, y, SOL_TOP, SOL_TOP + 2.3, 0.05, steel, 8)
+        F.box(sb - 0.05, sb + 0.05, tb, tb + 0.35, SOL_TOP + 2.22, SOL_TOP + 2.3, steel)
+        F.box(sb - 0.4, sb + 0.4, tb - 0.4, tb + 0.4, SOL_TOP, SOL_TOP + 0.03, riser * 0.85)
+    x, y = F.xy(19.1, -0.6)
+    _cyl(m, x, y, SOL_TOP, SOL_TOP + 1.0, 0.12, steel, 8)
+    # The promenade's small trees in square planters (the 20 cm photo).
     rnd = rng_for("digue-trees")
     nt = 0
     for s in np.arange(9.0, 136.0, 8.5):
-        x, y = F.xy(s + rnd.uniform(-1, 1), -1.4)
-        z = float(np.nan_to_num(mntR.sample(np.array([x]), np.array([y]))[0], nan=4.0))
-        add_tree(tm, x, y, z, rnd.uniform(4.5, 6.0), rnd.uniform(1.6, 2.2), "broad", rnd)
+        sc = s + rnd.uniform(-1, 1)
+        z = float(sol_prom_z(sc))
+        F.box(sc - 0.7, sc + 0.7, -3.1, -1.7, z, z + 0.5, wall * 0.97)
+        x, y = F.xy(sc, -2.4)
+        add_tree(tm, x, y, z + 0.5, rnd.uniform(4.0, 5.5), rnd.uniform(1.5, 2.0), "broad", rnd)
         nt += 1
-    stats["digue_m"] = round(r1 - r0, 1)
-    stats["digue_trees"] = nt
+    stats["solarium_tiers"] = SOL_TIERS
+    stats["solarium_m"] = round(SOL_NORTH[1] - SOL_SOUTH[0], 1)
     return nt
 
 
@@ -14682,7 +14864,7 @@ def main():
     canopy = ((chm > 2.5) & ~bgrow).astype(np.float32)
     canopy = ndimage.zoom(canopy, 0.5, order=1)
     print("Fontvieille podiums…", podium_setup(ways, mnt_f))
-    gm, gz = ground_mesh(wq_ground(heliport_ground(podium_ground(mnt_ground))), sea)
+    gm, gz = ground_mesh(solarium_ground(wq_ground(heliport_ground(podium_ground(mnt_ground)))), sea)
     print("podium walls…", podium_walls(gm, bm, stats), "m")
     print("heliport…", heliport(gm, bm, ortho_hi, stats), "triangles of apron and paint")
     print("west quays…", wq_build(gm, bm, sea, stats), "m of quay wall")
