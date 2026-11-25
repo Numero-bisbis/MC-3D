@@ -3430,6 +3430,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             if key == CHAPITEAU:
                 footprint.append(chapiteau(m, mntR, stats))
                 continue
+            if key == JUSTICE:
+                footprint.append(palais_justice(m, mntR, stats))
+                stats["landmarks"] = stats.get("landmarks", 0) + 1
+                continue
             if key in (PALACE, MUSEE, CATH, FORT, PRISON):
                 # Le Rocher's landmarks are built piece by piece.
                 if key == PRISON:
@@ -10240,6 +10244,249 @@ def prison(m, poly, mntR, stats):
         Fw.box(-0.35, 0.35, 0.0, 0.05, TOP + 2.6, TOP + 3.6, dark, top=False, sides="T")
     stats["prison"] = {"roof": TOP, "windows": n_win}
     return n_win
+
+
+# ------------------------------------------------ the Palais de Justice ----
+# Rue Colonel Bellando de Castro, 1922-1930, neo-Florentine in warm sandy
+# ashlar. Its south end is one big round apse (the LiDAR's eaves fit a
+# circle of 11.6 m tangent to both long walls; the walls stand ~0.8 m in),
+# with LEX on the frieze under deep tiled eaves. The entrance is on that
+# curve: a horseshoe double stair (OpenStreetMap maps both flights and the
+# landing, the LiDAR sees them) whose flights start side by side in front
+# of the ground-floor door, run outward and curl back to a balustraded
+# landing; the upper door has a gabled stone porch on two columns. Photos:
+# Mapillary 492163795170012 and 523753175670204 (2019, from the
+# Conseil d'Etat corner), 888590281708010 (east side).
+JUSTICE = "BATIMENT0000000074078969"
+PJ_C = (1056180.65, 6302335.15)             # the apse's centre (eave circle from the LiDAR)
+PJ_R = 10.75                                # m, its wall
+PJ_NW = [(1056165.6, 6302353.1), (1056158.8, 6302352.9), (1056158.5, 6302345.9)]   # BD TOPO's north end
+PJ_NE = (1056191.9, 6302354.4)
+PJ_AXIS = -71.0                             # degrees (maths angle round PJ_C): the stair's axis, SSE
+PJ_STONE = "#ddcbb0"                        # sandy ashlar (photos)
+PJ_OCHRE = "#cdb084"                        # the stair, porch and carvings: warmer, yellower stone
+PJ_EAVE = 73.6                              # m NGF (LiDAR roof 75-76 with 22 degree tiles)
+PJ_LAND = 3.9                               # m: the landing above the forecourt
+PJ_GF = 4.7                                 # m: the rusticated ground floor
+
+
+def pj_outline():
+    """The Palais de Justice's plan: BD TOPO's straight walls, its south
+    end the round apse (centre PJ_C), counter-clockwise."""
+    C = np.array(PJ_C)
+    a, b = np.array(PJ_NW[2]), np.array(PJ_C)
+    # The west wall: from the north-west corner toward the apse; its
+    # tangent point is the foot of the centre on that line.
+    d = np.array([19.0, -24.0]) / math.hypot(19.0, -24.0)
+    tw = a + d * float(np.dot(C - a, d))
+    th0 = math.atan2(*(tw - C)[::-1])
+    r0 = float(np.hypot(*(tw - C)))
+    ths = np.linspace(th0, 0.0, 34)
+    rs = np.linspace(r0, PJ_R, 34)
+    arc = [tuple(C + r * np.array([math.cos(t), math.sin(t)])) for r, t in zip(rs, ths)]
+    pts = PJ_NW + arc + [(C[0] + PJ_R, PJ_NE[1] - 0.6), PJ_NE]
+    return orient(Polygon(pts), 1.0), th0
+
+
+def _bez(P, u):
+    """A cubic Bezier (4 control points, (k, 2)) and its unit tangent at u."""
+    P = np.asarray(P, float)
+    u = np.atleast_1d(u)[:, None]
+    q = ((1 - u) ** 3) * P[0] + 3 * ((1 - u) ** 2) * u * P[1] + 3 * (1 - u) * u * u * P[2] + u ** 3 * P[3]
+    d = 3 * ((1 - u) ** 2) * (P[1] - P[0]) + 6 * (1 - u) * u * (P[2] - P[1]) + 3 * u * u * (P[3] - P[2])
+    return q, d / np.linalg.norm(d, axis=1, keepdims=True)
+
+
+def pj_flight(F, sg, zb, stone, ochre, n=24, w=1.5):
+    """One flight of the horseshoe stair, in the stair's frame F (s along
+    the landing, t out): from the forecourt beside the lower door (s = 2 sg)
+    out and round to the landing's end, n solid steps between two curving
+    parapets."""
+    P = [(2.0 * sg, 6.4), (4.3 * sg, 6.7), (5.7 * sg, 5.1), (4.6 * sg, 2.75)]
+    rise = PJ_LAND / n
+    u = np.linspace(0.0, 1.0, n + 1)
+    q, d = _bez(P, u)
+    nrm = np.column_stack([-d[:, 1], d[:, 0]])           # left of the way up
+    zg = zb - 0.4
+    for k in range(n):
+        z1 = zb + (k + 1) * rise
+        L0, L1 = q[k] + nrm[k] * w / 2, q[k + 1] + nrm[k + 1] * w / 2
+        R0, R1 = q[k] - nrm[k] * w / 2, q[k + 1] - nrm[k + 1] * w / 2
+        up = (0, 0, 1)
+        F.quad((*L0, z1), (*R0, z1), (*R1, z1), (*L1, z1), ochre * 1.04, up)
+        F.quad((*L0, z1 - rise), (*R0, z1 - rise), (*R0, z1), (*L0, z1), ochre * 0.86, (-d[k][0], -d[k][1], 0))
+        # The two parapets: solid stone from the ground, their tops
+        # sloping with the flight; inner faces from the tread up.
+        for side in (1.0, -1.0):
+            o0, o1 = q[k] + side * nrm[k] * (w / 2 + 0.24), q[k + 1] + side * nrm[k + 1] * (w / 2 + 0.24)
+            i0, i1 = q[k] + side * nrm[k] * w / 2, q[k + 1] + side * nrm[k + 1] * w / 2
+            zt0, zt1 = zb + k * rise + 1.0, zb + (k + 1) * rise + 1.0
+            nn = (side * nrm[k][0], side * nrm[k][1], 0)
+            F.quad((*o0, zg), (*o1, zg), (*o1, zt1), (*o0, zt0), stone, nn, style=RUBBLE, uvm=0.9)
+            F.quad((*i0, z1), (*i1, z1), (*i1, zt1), (*i0, zt0), ochre * 0.95, (-nn[0], -nn[1], 0))
+            F.quad((*i0, zt0), (*i1, zt1), (*o1, zt1 + 0.03), (*o0, zt0 + 0.03), ochre * 1.08, (0, 0, 1))
+    # The bottom: a riser to the ground, carved newel pedestals with a
+    # scroll on each parapet's foot.
+    for side in (1.0, -1.0):
+        c = q[0] + side * nrm[0] * (w / 2 + 0.12)
+        Fn = Frame(F.m, F.xy(*c), F.u)
+        Fn.box(-0.45, 0.45, -0.45, 0.45, zg, zb + 1.45, ochre)
+        Fn.box(-0.55, 0.55, -0.55, 0.55, zb + 1.45, zb + 1.62, ochre * 1.06)
+        Fn.box(-0.32, 0.32, -0.32, 0.32, zb + 1.62, zb + 1.95, ochre * 1.02)
+    # The flight's underside where it leaves the ground: closed by its
+    # outer parapet faces; the end walls at the bottom.
+    for k in (0,):
+        L0, R0 = q[k] + nrm[k] * (w / 2 + 0.24), q[k] - nrm[k] * (w / 2 + 0.24)
+        F.quad((*L0, zg), (*R0, zg), (*R0, zb + 1.0), (*L0, zb + 1.0), stone, (-d[k][0], -d[k][1], 0))
+    return n
+
+
+def palais_justice(m, mntR, stats):
+    """The Palais de Justice: rusticated ground floor, sandy ashlar above,
+    paired arched windows, a frieze and deep tiled eaves, the round apse on
+    the south with the horseshoe entrance stair. Returns its plan."""
+    poly, th0 = pj_outline()
+    stone = np.array(hexrgb(PJ_STONE), float)
+    ochre = np.array(hexrgb(PJ_OCHRE), float)
+    wood = np.array(hexrgb("#6a4529"), float)
+    C = np.array(PJ_C)
+    P = np.asarray(poly.exterior.coords)
+    gz = mntR.sample(P[:, 0], P[:, 1])
+    base = float(np.nanmin(gz)) if np.isfinite(gz).any() else 60.6
+    # The forecourt in front of the stair.
+    ax = math.radians(PJ_AXIS)
+    v = np.array([math.cos(ax), math.sin(ax)])
+    O = C + PJ_R * v
+    F = Frame(m, O, (-v[1], v[0]))                      # s along the landing (west to east), t out
+    fz = mntR.sample(*np.array([F.xy(0.0, 4.5)]).T)[0]
+    zb = float(fz) if np.isfinite(fz) else 60.75
+    zl = zb + PJ_LAND
+    zg1 = zb + PJ_GF                                    # top of the rusticated floor
+    n_win = 0
+    # Walls, facet by facet: rusticated to zg1, ashlar to the eaves.
+    for a, b in zip(P[:-1], P[1:]):
+        L = float(np.hypot(*(b - a)))
+        if L < 0.05:
+            continue
+        Fw = Frame(m, a, b - a)
+        g = mntR.sample(*np.array([Fw.xy(s_, 1.0) for s_ in np.linspace(0, L, 3)]).T)
+        z0 = (float(np.nanmin(g)) if np.isfinite(g).any() else base) - 0.6
+        Fw.quad((0.0, 0.0, z0), (L, 0.0, z0), (L, 0.0, zg1), (0.0, 0.0, zg1), stone * 0.95, (0, 1, 0),
+                style=RUBBLE, uvm=0.5)
+        Fw.quad((0.0, 0.0, zg1), (L, 0.0, zg1), (L, 0.0, PJ_EAVE), (0.0, 0.0, PJ_EAVE), stone, (0, 1, 0),
+                style=RUBBLE, uvm=0.95)
+        Fw.box(-0.02, L + 0.02, 0.0, 0.22, zg1 - 0.05, zg1 + 0.3, ochre * 1.05, sides="tT")       # string course
+        Fw.box(-0.02, L + 0.02, 0.0, 0.14, PJ_EAVE - 1.5, PJ_EAVE - 1.3, ochre * 1.05, sides="tT")   # frieze
+        Fw.box(-0.02, L + 0.02, 0.0, 0.3, PJ_EAVE - 0.35, PJ_EAVE, stone * 1.06, sides="tT", bottom=True)
+    # Windows: arched, in pairs on the upper floors, one per bay below.
+    # Bays along the straight walls every 3.6 m; on the apse every 20
+    # degrees either side of the stair's axis.
+    bays = []
+    straight = [(np.array(a), np.array(b)) for a, b in zip(P[:-1], P[1:]) if np.hypot(*(np.array(b) - a)) > 6]
+    for a, b in straight:
+        L = float(np.hypot(*(b - a)))
+        nb = int((L - 2.0) / 3.6)
+        for k in range(nb):
+            s_ = (L - (nb - 1) * 3.6) / 2 + k * 3.6
+            bays.append((Frame(m, a, b - a), s_, False))
+    for k in range(-4, 4):
+        th = PJ_AXIS + 20.0 * k
+        if not (math.degrees(th0) + 6 < th < -6):
+            continue
+        t_ = math.radians(th)
+        o = C + PJ_R * np.array([math.cos(t_), math.sin(t_)])
+        bays.append((Frame(m, o - 0.5 * np.array([-math.sin(t_), math.cos(t_)]), (-math.sin(t_), math.cos(t_))),
+                     0.5, k == 0))
+    for i, (Fb, s_, axis) in enumerate(bays):
+        on_stair = abs((Fb.u @ np.array([-v[1], v[0]]))) > 0.75 and np.hypot(*(Fb.xy(s_, 0) - O)) < 6.5
+        c = 0.03
+        # Ground floor: one round-headed window (behind the stair: none).
+        if not on_stair:
+            Fb.window("+t", c, s_, 1.0, zb + 1.3, zb + 3.0, i, 0, frame=ochre, arch=True, sill=True)
+            n_win += 1
+        # First floor: a pair (the stair's axis: the upper door instead).
+        if not axis:
+            for ds in (-0.62, 0.62):
+                Fb.window("+t", c, s_ + ds, 0.9, zl + 1.3, zl + 3.4, i, 1, frame=ochre, arch=True, sill=True,
+                          band=0.16)
+            Fb.slab("+t", c, s_ - 0.08, s_ + 0.08, zl + 1.3, zl + 3.4, 0.14, ochre)          # the mullion
+            n_win += 2
+        # Second floor: a pair under one relieving arch.
+        for ds in (-0.55, 0.55):
+            Fb.window("+t", c, s_ + ds, 0.8, zl + 4.7, zl + 6.1, i, 2, frame=ochre, arch=True, sill=True, band=0.14)
+        Fb.arch_ring("+t", c, s_, 2.3, zl + 6.1, 0.1, 0.22, ochre)
+        n_win += 2
+    # The landing: solid stone either side of the lower door's porch, a
+    # lintel over the porch, the balustrade along its front and ends.
+    WL, TL = 5.4, 2.8
+    tb = -(PJ_R - math.sqrt(PJ_R ** 2 - WL ** 2)) - 0.3
+    for s0, s1 in ((-WL, -1.45), (1.45, WL)):
+        F.box(s0, s1, tb, TL, zb - 0.4, zl, stone * 0.96, style=RUBBLE, uvm=0.55)
+    F.box(-1.45, 1.45, -0.3, TL, zl - 0.9, zl, stone * 0.96, bottom=True)
+    F.box(-WL - 0.05, WL + 0.05, tb, TL + 0.08, zl - 0.12, zl, ochre * 1.04)               # landing floor edge
+    F.box(-1.6, 1.6, TL, TL + 0.1, zl - 0.95, zl - 0.7, ochre * 1.06)                      # lintel moulding
+    for sg in (-1, 1):
+        F.column(sg * 1.62, TL - 0.32, zb, zl - 1.05, 0.27, ochre)
+    F.quad((-1.45, 0.0, zb + 0.02), (1.45, 0.0, zb + 0.02), (1.45, TL, zb + 0.02), (-1.45, TL, zb + 0.02),
+           ochre * 0.9, (0, 0, 1))
+    # The lower door, in the wall at the back of the porch.
+    F.box(-0.95, 0.95, -0.05, 0.08, zb, zb + 2.9, wood, sides="T")
+    F.arch_glass("+t", 0.08, 0.0, 1.9, zb + 2.9, 0, 0, col="#4a3a2c", dark=True)
+    F.arch_ring("+t", 0.0, 0.0, 1.9, zb + 2.9, 0.12, 0.25, ochre)
+    F.balustrade("+t", TL + 0.05, -3.85, 3.85, zl, ochre, h=1.0)
+    for sg in (-1, 1):
+        F.box(sg * 3.85 - 0.25, sg * 3.85 + 0.25, TL - 0.45, TL + 0.05, zl, zl + 1.15, ochre * 1.02)   # end posts
+        F.balustrade("+s" if sg > 0 else "-s", sg * WL, tb + 0.3, TL - 0.45, zl, ochre, h=1.0)
+    # The upper door and its gabled porch on two columns.
+    F.box(-0.95, 0.95, -0.05, 0.1, zl, zl + 2.9, wood, sides="T")
+    F.arch_glass("+t", 0.1, 0.0, 1.9, zl + 2.9, 0, 1, col="#3c3a36")
+    zc = zl + 4.0
+    for sg in (-1, 1):
+        F.column(sg * 1.35, 1.05, zl, zc, 0.19, ochre)
+        F.box(sg * 1.35 - 0.3, sg * 1.35 + 0.3, -0.1, 0.3, zl, zc, ochre * 0.98)      # pilasters on the wall
+    F.box(-1.75, 1.75, -0.1, 1.4, zc, zc + 0.45, ochre * 1.05, bottom=True)
+    F.arch_ring("+t", 1.25, 0.0, 2.2, zc - 1.1, 0.15, 0.2, ochre * 0.97)
+    rise = 1.35
+    for sg in (-1, 1):
+        F.quad((0.0, -0.1, zc + 0.45 + rise), (0.0, 1.55, zc + 0.45 + rise), (sg * 1.95, 1.55, zc + 0.3),
+               (sg * 1.95, -0.1, zc + 0.3), ochre * 0.92, (sg * rise, 0, 1.9))
+    F.tri((-1.75, 1.4, zc + 0.45), (1.75, 1.4, zc + 0.45), (0.0, 1.4, zc + 0.45 + rise - 0.12), ochre * 1.02,
+          (0, 1, 0))
+    F.box(-0.3, 0.3, 1.38, 1.5, zc + 0.6, zc + 1.2, stone * 1.1)                         # the shield
+    # The two flights.
+    steps = pj_flight(F, -1, zb, stone, ochre) + pj_flight(F, 1, zb, stone, ochre)
+    # The eaves: deep, on brackets, the tiled hip roof (a low cap of
+    # 22 degree slopes round the light well, which stays a flat glazed roof).
+    over = poly.buffer(1.1, join_style=2, mitre_limit=3.0)
+    slope = math.tan(math.radians(22))
+    t = skeleton_roof(orient(over, 1.0), PJ_EAVE - 1.1 * slope, slope, 7.0, dt=0.4)
+    if t is not None:
+        vv, zz, tri = t
+        Q = enu_fast(vv[:, 0], vv[:, 1], zz)
+        m.tri(Q[tri[:, 0]], Q[tri[:, 1]], Q[tri[:, 2]], np.array(hexrgb("#b86545"), float), ROOF_TILE)
+    well = over.buffer(-11.0, join_style=2)
+    if not well.is_empty:
+        add_roof(m, orient(max(to_polys(well), key=lambda q: q.area), 1.0), PJ_EAVE - 1.1 * slope + 7.0 * slope + 0.02,
+                 np.array(hexrgb("#9a968e"), float), False)
+    # Soffit and brackets under the overhang.
+    Ps = np.asarray(over.exterior.coords)
+    for a, b in zip(Ps[:-1], Ps[1:]):
+        L = float(np.hypot(*(b - a)))
+        if L < 0.05:
+            continue
+        Fo = Frame(m, a, b - a)
+        Fo.quad((0.0, 0.0, PJ_EAVE - 1.1 * slope - 0.12), (L, 0.0, PJ_EAVE - 1.1 * slope - 0.12),
+                (L, -1.15, PJ_EAVE - 0.08), (0.0, -1.15, PJ_EAVE - 0.08), np.array(hexrgb("#a07a58"), float),
+                (0, 0, -1))
+        Fo.quad((0.0, 0.0, PJ_EAVE - 1.1 * slope - 0.12), (L, 0.0, PJ_EAVE - 1.1 * slope - 0.12),
+                (L, 0.0, PJ_EAVE - 1.1 * slope), (0.0, 0.0, PJ_EAVE - 1.1 * slope), np.array(hexrgb("#a07a58"), float),
+                (0, 1, 0))
+        for k in range(int(L / 0.9)):
+            s_ = (k + 0.5) * L / int(L / 0.9)
+            Fo.box(s_ - 0.07, s_ + 0.07, -1.1, -0.05, PJ_EAVE - 0.4, PJ_EAVE - 0.12, np.array(hexrgb("#8a6748"), float),
+                   bottom=True)
+    stats["palais_justice"] = {"windows": n_win, "steps": steps, "landing": round(zl, 2), "eave": PJ_EAVE}
+    return poly
 
 
 def rocher_ramparts(m, ways, pts, mnt, stats):
