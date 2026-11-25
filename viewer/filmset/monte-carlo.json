@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6708112,
+ "triangles": 6733766,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -55,28 +55,28 @@
    ]
   ]
  },
- "buildings": 2909,
+ "buildings": 2908,
  "dropped": 61,
  "rooftop": 127,
  "roof_plants": 106,
- "levels": 2911,
+ "levels": 2910,
  "towers": 10,
- "trees": 3743,
+ "trees": 3831,
  "yachts": 942,
- "real_floors": 1338,
+ "real_floors": 1337,
  "styles": [
   564,
   273,
   7,
   663,
-  644,
+  643,
   134,
   2,
   187,
   433
  ],
  "balconies": 1079,
- "shop_buildings": 225,
+ "shop_buildings": 224,
  "prison": {
   "roof": 48.6,
   "windows": 46
@@ -136,11 +136,12 @@
  ],
  "photo_facade_colours": 58,
  "photo_facade_types": 40,
- "photo_roofs": 2860,
+ "photo_roofs": 2833,
  "photo_lean": [
   0.010000000000000342,
   -0.019999999999999685
  ],
+ "quay_palms": 88,
  "casino_palms": 15,
  "mareterra_trees": 120,
  "boats_by_berth": {
@@ -163,6 +164,7 @@
  "heliport_red_white_m": 228,
  "heliport_tris": 33101,
  "heliport_m2": 4036,
+ "west_quay_wall_m": 3419,
  "tunnel_portals": 3,
  "road_m": 82249,
  "kerb_m": 62953,
@@ -223,15 +225,15 @@
  "gastaud_olives": 10,
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
- "park_lawn_m2": 89579,
+ "park_lawn_m2": 89578,
  "park_path_m2": 21311,
  "park_bed_m2": 70193,
  "park_flowers_m2": 2462,
  "park_paved_m2": 4481,
  "parks": 43,
  "track_clear": true,
- "roof_kit": 3935,
- "roof_texels_per_m": 3.22,
+ "roof_kit": 4137,
+ "roof_texels_per_m": 3.27,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",
   "IGN BD TOPO (Etalab 2.0)",
