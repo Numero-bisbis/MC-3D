@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6710088,
+ "triangles": 6709538,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -61,7 +61,7 @@
  "roof_plants": 106,
  "levels": 2911,
  "towers": 10,
- "trees": 3743,
+ "trees": 3742,
  "yachts": 942,
  "real_floors": 1337,
  "styles": [
@@ -190,7 +190,7 @@
  "sky_mirror": 1,
  "quai_wall_m": 548,
  "quai_steps": 2,
- "quai_pines": 36,
+ "quai_pines": 35,
  "fairmont_roof_trees": 19,
  "fairmont_balconies": 204,
  "fairmont_blocks": 882,

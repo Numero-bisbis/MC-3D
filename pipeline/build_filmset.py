@@ -4664,34 +4664,12 @@ def quai_albert(gm, m, tm, ways, pts, mntR, stats, fps=()):
             return True
         lo = mntR.sample(np.array([x]), np.array([y]))
         return not (np.size(lo) and np.isfinite(lo[0]) and float(QA["zup"](x, y)[0]) - float(lo[0]) > 1.0)
-    trunk = []
-    for (x, y), t in pts:
-        if t.get("natural") == "tree" and upper(x, y):
-            trunk.append((x, y))
-    # The row is unbroken in the street photos (2025): fill the gaps of
-    # the OSM mapping at the row's own spacing, in line with the
-    # neighbours.
-    if len(trunk) > 2:
-        T = np.array(trunk)
-        order = QA["on"][QA["kd"].query(T)[1]]
-        T = T[np.argsort(order)]
-        blds_ = blds if blds is not None and not blds.is_empty else None
-        for p0, p1 in zip(T[:-1], T[1:]):
-            gap = float(np.linalg.norm(p1 - p0))
-            if gap < 15 or gap > 60:
-                continue
-            k = int(round(gap / 10.5))
-            for i in range(1, k):
-                q = p0 + (p1 - p0) * i / k
-                if upper(*q) and (blds_ is None or not blds_.contains(Point(*q))):
-                    trunk.append((float(q[0]), float(q[1])))
+    osm = [(x, y) for (x, y), t in pts if t.get("natural") == "tree" and upper(x, y)]
+    trunk = quai_pine_row(osm, upper, blds)
     planter, soil = np.array(hexrgb("#e6dfcf")), np.array(hexrgb("#5d4a3a"))
-    for x, y in trunk:
+    for x, y, ax in trunk:
         z = float(QA["zup"](x, y)[0])
         # Square to the boulevard.
-        j = QA["on"][QA["kd"].query([x, y])[1]]
-        j0, j1 = max(0, j - 2), min(len(TRACK["x"]) - 1, j + 2)
-        ax = np.array([TRACK["x"][j1] - TRACK["x"][j0], TRACK["y"][j1] - TRACK["y"][j0]])
         _box(m, x, y, ax, 2.3, 2.3, z - 0.3, z + 0.5, planter)
         _box(m, x, y, ax, 1.8, 1.8, z + 0.5, z + 0.52, soil)
         h = float(rnd.uniform(11.5, 15.0))
@@ -4700,6 +4678,47 @@ def quai_albert(gm, m, tm, ways, pts, mntR, stats, fps=()):
         stats["trees"] += 1
     stats["quai_pines"] = len(trunk)
     return len(trunk)
+
+
+QA_PINE_STEP = 11.0      # m between the pines along the boulevard (median OSM gap, street photos)
+QA_PINE_OFFSET = 9.0     # m from the lap's centre line: just behind the boulevard's kerb
+
+
+def quai_pine_row(osm, upper, blds):
+    """The stone pines along Boulevard Albert 1er stand in one straight,
+    evenly spaced row of planters just behind the kerb (street photos
+    2021-2025). OpenStreetMap maps them 7-11 m from the road with gaps of
+    4 to 38 m, so the trees only give the row's two ends: the planters
+    are laid out at an even step between them, all at the same distance
+    from the lap's centre line, each square to the road. Returns
+    (x, y, axis) for each planter."""
+    if len(osm) < 2:
+        return []
+    line = TRACK["line"]
+    L = line.length
+    O = np.array(osm, float)
+    s_ = np.array([line.project(Point(*q)) for q in O])
+    s_ = np.where(s_ > L / 2, s_ - L, s_)            # the row crosses the start line (s = 0)
+
+    def frame(s):
+        p, q = line.interpolate(s % L), line.interpolate((s + 3.0) % L)
+        p0 = line.interpolate((s - 3.0) % L)
+        t = np.array([q.x - p0.x, q.y - p0.y])
+        t /= max(np.hypot(*t), 1e-9)
+        return np.array([p.x, p.y]), t, np.array([-t[1], t[0]])
+    # Which side of the road: the OSM trees' own side.
+    side = np.sign(np.median([np.dot(q - frame(s)[0], frame(s)[2]) for q, s in zip(O, s_)]))
+    s0, s1 = float(s_.min()), float(s_.max())
+    n = max(1, int(round((s1 - s0) / QA_PINE_STEP)))
+    out = []
+    blds_ = blds if blds is not None and not blds.is_empty else None
+    for s in np.linspace(s0, s1, n + 1):
+        c, t, nrm = frame(s)
+        q = c + nrm * side * QA_PINE_OFFSET
+        if not upper(*q) or (blds_ is not None and blds_.buffer(1.5).contains(Point(*q))):
+            continue
+        out.append((float(q[0]), float(q[1]), t))
+    return out
 
 
 # --------------------------------------------------------------- sidewalks ----
