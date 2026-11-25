@@ -564,6 +564,13 @@ def ground_mesh(mnt, sea):
     Z, Zs = quai_ground(X, Y, Z)
     Z, Zs = sidewalk_ground(X, Y, Z, Zs)
     Z = rampe_clamp(X, Y, Z)
+    for pt_ in PORTALS:
+        if pt_.get("surface"):
+            # The street up to a tunnel's mouth: the grid's slope off the
+            # hill over the mouth stays off the road.
+            fr = contains_xy(pt_["front"], X, Y)
+            Z[fr] = np.minimum(Z[fr], pt_["zr"])
+            Zs[fr] = np.minimum(Zs[fr], pt_["zr"])
     land = valid[r, c] > 0.5
     # A lone land node among sea nodes (the end of a jetty, a quay corner)
     # would stand up from the sea floor as a needle: leave it to the sea.
@@ -663,7 +670,7 @@ def _detail_patch(mnt, Z, i0, i1, j0, j1):
     hm = np.where(w > 0.3, h / np.maximum(w, 1e-6), np.nan)
     r = np.clip(((Y1 - Yf) / RES).astype(int), 0, mnt.shape[0] - 1)
     c = np.clip(((Xf - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
-    Zm = hm[r, c]
+    Zm = _road_level(Xf, Yf, hm[r, c], mnt)
     edge = np.minimum.reduce([Xf - xs[0], xs[-1] - Xf, ys[0] - Yf, Yf - ys[-1]])
     wt = np.clip(edge / 6.0, 0.0, 1.0)
     if TRACK is not None:
@@ -680,10 +687,75 @@ def _detail_patch(mnt, Z, i0, i1, j0, j1):
     ii = np.arange(nxf * nyf).reshape(nyf, nxf)
     a, b, cc, d = ii[:-1, :-1], ii[:-1, 1:], ii[1:, :-1], ii[1:, 1:]
     tris = np.concatenate([np.stack([a, cc, b], -1).reshape(-1, 3), np.stack([b, cc, d], -1).reshape(-1, 3)])
+    FINE_PATCHES.append((xs[0], ys[0], st, Zf, np.ones((nyf - 1, nxf - 1), bool)))
     return P, N, uv, tris
 
 
 ROCHER_FINE_BOX = (1055890.0, 6302230.0, 1056720.0, 6302700.0)
+ROAD_FOOT = None      # the carriageways (buffered), for the fine ground patches (set in main)
+FINE_PATCHES = []     # (x0, y0, step, Z, kept quads) of each 1 m ground patch, for ground_z_fine()
+_ROAD_FIELD = None
+
+
+def _road_level(Xf, Yf, Zm, mnt):
+    """Fine ground heights under the carriageways: the LiDAR smoothed
+    (median over 2.5 m, then a 1 m blur), so the road laid on the fine
+    ground (road_surfaces, through ground_z_fine) is as smooth as the
+    tarmac and no ripple of the fine grid pokes through it."""
+    global _ROAD_FIELD
+    if ROAD_FOOT is None:
+        return Zm
+    if _ROAD_FIELD is None:
+        f = ndimage.median_filter(np.nan_to_num(mnt, nan=-99.0), size=5)
+        _ROAD_FIELD = np.where(f > -50, ndimage.gaussian_filter(f, 2.0), np.nan)
+    on = contains_xy(ROAD_FOOT, Xf, Yf)
+    if not on.any():
+        return Zm
+    r = np.clip(((Y1 - Yf) / RES).astype(int), 0, mnt.shape[0] - 1)
+    c = np.clip(((Xf - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
+    hf = _ROAD_FIELD[r, c]
+    return np.where(on & np.isfinite(hf), hf, Zm)
+
+
+def ground_z_fine(gz, x, y):
+    """ground_z(), but where a 1 m ground patch (Le Rocher's cliffs, the
+    Sainte-Devote ravine) replaces the 3 m grid, the patch's own triangles:
+    a road laid on the 3 m grid there sank under the finer ground (Rue des
+    Remparts: up to 50 cm, dark patches of ground through the tarmac)."""
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    z = np.array(ground_z(gz, x, y), float)
+    for x0, y0, st, Zf, kq in FINE_PATCHES:
+        fj = (x - x0) / st
+        fi = (y0 - y) / st
+        j0 = np.floor(fj).astype(int)
+        i0 = np.floor(fi).astype(int)
+        ok = (j0 >= 0) & (i0 >= 0) & (j0 < kq.shape[1]) & (i0 < kq.shape[0])
+        if not ok.any():
+            continue
+        jj, ii = np.where(ok, j0, 0), np.where(ok, i0, 0)
+        ok &= kq[ii, jj]
+        if not ok.any():
+            continue
+        fx, fy = np.clip(fj - jj, 0, 1), np.clip(fi - ii, 0, 1)
+        a, b = Zf[ii, jj], Zf[ii, jj + 1]
+        c, d = Zf[ii + 1, jj], Zf[ii + 1, jj + 1]
+        lo = a + fx * (b - a) + fy * (c - a)
+        hi = d + (1 - fx) * (c - d) + (1 - fy) * (b - d)
+        z = np.where(ok, np.where(fx + fy <= 1, lo, hi), z)
+    return z
+
+
+def on_fine(x, y):
+    out = np.zeros(np.shape(x), bool)
+    for x0, y0, st, Zf, kq in FINE_PATCHES:
+        j0 = np.floor((np.asarray(x) - x0) / st).astype(int)
+        i0 = np.floor((y0 - np.asarray(y)) / st).astype(int)
+        ok = (j0 >= 0) & (i0 >= 0) & (j0 < kq.shape[1]) & (i0 < kq.shape[0])
+        out |= ok & kq[np.where(ok, i0, 0), np.where(ok, j0, 0)]
+    return out
+
+
 
 
 def rocher_fine_cells(mnt, shape):
@@ -739,6 +811,7 @@ def _detail_mask_patch(mnt, Z, M):
     r = np.clip(((Y1 - Yf) / RES).astype(int), 0, mnt.shape[0] - 1)
     c = np.clip(((Xf - X0) / RES).astype(int), 0, mnt.shape[1] - 1)
     Zm = np.where(w[r, c] > 0.3, h[r, c] / np.maximum(w[r, c], 1e-6), np.nan)
+    Zm = _road_level(Xf, Yf, Zm, mnt)
     Mf = np.repeat(np.repeat(M[i0:i1, j0:j1], K, 0), K, 1)        # fine quads
     pad = np.pad(Mf, 1)
     inside = pad[:-1, :-1] & pad[:-1, 1:] & pad[1:, :-1] & pad[1:, 1:]   # nodes
@@ -757,6 +830,7 @@ def _detail_mask_patch(mnt, Z, M):
     seaq = low[:-1, :-1] & low[:-1, 1:] & low[1:, :-1] & low[1:, 1:]
     kq = Mf & ~seaq
     tris = np.concatenate([np.stack([a, cc, b], -1)[kq], np.stack([b, cc, d], -1)[kq]])
+    FINE_PATCHES.append((xs[0], ys[0], st, Zf, kq))
     used, tris = np.unique(tris, return_inverse=True)
     tris = tris.reshape(-1, 3)
     return P[used], N[used], uv[used], tris
@@ -6473,7 +6547,7 @@ GROUND_Z = None
 PORTAL_IN = 12.0                    # m of tunnel modelled inside the mouth
 
 
-def portals_setup(ways, mnt):
+def portals_setup(ways, mnt, mnt_raw=None):
     """Where an OpenStreetMap bridge's end meets a tunnel and the ground
     beyond rises well above the deck."""
     R = Raster(mnt)
@@ -6507,7 +6581,97 @@ def portals_setup(ways, mnt):
             if TRACK is not None and track_dist(*np.array(cut.exterior.coords).T).min() < TRACK_HALF + 3.5:
                 continue
             PORTALS.append({"e": e, "u": u, "l": l, "hw": hw, "cut": cut, "name": t.get("name")})
+    surface_portals_setup(ways, R, Raster(mnt_raw) if mnt_raw is not None else R)
     print("tunnel portals:", [p_["name"] for p_ in PORTALS])
+
+
+def _way_w(t):
+    W = float(ROAD_W.get(t.get("highway"), 6))
+    try:
+        if t.get("width"):
+            W = float(t["width"].replace("m", "").strip())
+        elif t.get("lanes"):
+            W = max(W, 3.1 * float(t["lanes"]))
+    except ValueError:
+        pass
+    return float(np.clip(W, 3.0, 14.0))
+
+
+def surface_portals_setup(ways, R, Rraw):
+    """Where a street on the ground runs into a tunnel in a hillside
+    (Le Rocher's tunnels, the Pecheurs and Fort Antoine tunnels, Serravalle,
+    Pont Cadre, the Larvotto and Louis II tunnels...). The 3 m ground grid
+    ran on over the mouth, so the road ended against a grassy ramp (or
+    climbed it): the same mouth as a bridge's, at the road's own height."""
+    ends = {}
+    for t, pts, closed in ways:
+        if t.get("highway") in ROAD_W and not t.get("tunnel") and not t.get("bridge") and not closed \
+                and len(pts) > 1 and t.get("layer", "0") == "0":
+            for e_, rest in ((pts[0], pts), (pts[-1], pts[::-1])):
+                ends.setdefault((round(e_[0], 2), round(e_[1], 2)), []).append(LineString(rest))
+    own = []
+    for t, pts, closed in ways:
+        if t.get("tunnel") != "yes" or t.get("highway") not in ROAD_W or closed or len(pts) < 2:
+            continue
+        for e_, rest in ((pts[0], pts), (pts[-1], pts[::-1])):
+            k = (round(e_[0], 2), round(e_[1], 2))
+            if k not in ends:
+                continue
+            e = np.array(e_, float)
+            if not (X0 + 30 < e[0] < X1 - 30 and Y0 + 30 < e[1] < Y1 - 30):
+                continue
+            tl = LineString(rest)
+            if tl.length < 6:
+                continue
+            q = tl.interpolate(min(6.0, tl.length))
+            u = np.array([q.x, q.y]) - e
+            u /= max(np.linalg.norm(u), 1e-6)
+            out_ = min(ends[k], key=lambda ln: -ln.length)
+            so = [out_.interpolate(d) for d in (1.0, 2.0, 3.0) if d < out_.length] or [Point(*(e - u * 2.0))]
+            zo = R.sample(np.array([p.x for p in so]), np.array([p.y for p in so]))
+            qi = tl.interpolate(min(9.0, tl.length))
+            zi = Rraw.sample(np.array([qi.x]), np.array([qi.y]))[0]
+            zo_raw = Rraw.sample(np.array([p.x for p in so]), np.array([p.y for p in so]))
+            if not np.isfinite(zo).any() or not np.isfinite(zi):
+                continue
+            zr = float(np.nanmedian(zo))
+            # (the hill as the LiDAR has it: the port's levelling and the
+            # kerbs set along the circuit's streets do not count)
+            if not np.isfinite(zo_raw).any() or zi < float(np.nanmedian(zo_raw)) + 4.5:
+                continue                        # a cut-and-cover or an underpass: no hill over the mouth
+            if any(np.hypot(*(e - p_["e"])) < 25 and float(u @ p_["u"]) > 0.5 for p_ in PORTALS):
+                continue                        # (a bridge's mouth, found above)
+            l = np.array([-u[1], u[0]])
+            own.append({"e": e, "u": u, "l": l, "hw": _way_w(t) / 2, "zr": zr, "name": t.get("name"),
+                        "surface": True})
+    # Two carriageways side by side (one tunnel each way): one mouth.
+    merged = []
+    for p_ in sorted(own, key=lambda a: -a["hw"]):
+        for m_ in merged:
+            d = p_["e"] - m_["e"]
+            if np.hypot(*d) < 14 and float(p_["u"] @ m_["u"]) > 0.7:
+                o = float(d @ m_["l"])
+                m_["lo"] = min(m_.get("lo", -m_["hw"]), o - p_["hw"])
+                m_["hi"] = max(m_.get("hi", m_["hw"]), o + p_["hw"])
+                break
+        else:
+            merged.append(p_)
+    for p_ in merged:
+        lo, hi = p_.pop("lo", -p_["hw"]), p_.pop("hi", p_["hw"])
+        p_["e"] = p_["e"] + p_["l"] * (lo + hi) / 2           # centred on both carriageways
+        p_["hw"] = (hi - lo) / 2
+        e, u, l = p_["e"], p_["u"], p_["l"]
+        W = p_["hw"] + 2.5
+
+        def P_(a, b):
+            return tuple(e + u * a + l * b)
+        p_["cut"] = Polygon([P_(-3.5, -W), P_(PORTAL_IN, -W), P_(PORTAL_IN, W), P_(-3.5, W)])
+        p_["front"] = Polygon([P_(-6.0, -W), P_(0.0, -W), P_(0.0, W), P_(-6.0, W)])
+        if TRACK is not None and track_dist(*np.array(p_["cut"].exterior.coords).T).min() < TRACK_HALF + 3.5:
+            continue
+        if TUNNEL is not None and p_["cut"].intersects(TUNNEL["ground"].buffer(5)):
+            continue
+        PORTALS.append(p_)
 
 
 def _grid_z(x, y):
@@ -6543,7 +6707,10 @@ def portals(gm, m, stats):
         back = Polygon([tuple(e + l * big), tuple(e - l * big), tuple(e - l * big + u * big), tuple(e + l * big + u * big)])
         hole = pt_["hole"]
         hf, hb = hole.intersection(front), hole.intersection(back)
-        _flat_slab(gm, hf, lambda x, y: np.minimum(_grid_z(x, y), zr - 1.2))
+        # (under a bridge's deck the ground falls away; at a street's mouth
+        # it is the street's own level, just under the tarmac)
+        drop = 0.03 if pt_.get("surface") else 1.2
+        _flat_slab(gm, hf, lambda x, y: np.minimum(_grid_z(x, y), zr - drop))
         _flat_slab(gm, hb, lambda x, y: np.maximum(_grid_z(x, y), z_roof))
         # Lateral extent of the headwall: the hole's width at the mouth.
         cross = LineString([tuple(e - l * big), tuple(e + l * big)]).intersection(hole.buffer(0.01))
@@ -6555,7 +6722,7 @@ def portals(gm, m, stats):
         offs = np.linspace(w0, w1, 9)
         zg_top = float(np.max(np.maximum(_grid_z(e[0] + l[0] * offs + u[0] * 0.3, e[1] + l[1] * offs + u[1] * 0.3), z_roof)))
         z_bot = float(np.min(np.minimum(_grid_z(e[0] + l[0] * offs - u[0] * 0.3, e[1] + l[1] * offs - u[1] * 0.3),
-                                        zr - 1.2))) - 0.5
+                                        zr - drop))) - 0.5
         zt = zg_top + 0.9                            # a parapet over the mouth
 
         def E1(a, b, z):
@@ -10911,6 +11078,10 @@ def _slab(gm, poly, mntR, gz, style, lift=0.08, area=3, uv2f=None):
         if gz is not None:
             fi, fj = (v[:, 0] - X0) / GRID, (Y1 - v[:, 1]) / GRID
             z = np.fmax(z, ndimage.map_coordinates(gz, [fj, fi], order=1, mode="nearest"))
+            fz = on_fine(v[:, 0], v[:, 1])
+            if fz.any():
+                # (over Le Rocher's 1 m ground: never under its triangles)
+                z = np.where(fz, np.fmax(z, ground_z_fine(gz, v[:, 0], v[:, 1])), z)
         if not np.isfinite(z).any():
             continue
         z = np.where(np.isfinite(z), z, np.nanmedian(z))
@@ -11778,8 +11949,11 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
             style = MK_NONE if oneway or W < 5.5 else MK_CENTRE
         else:
             style = MK_NONE
-        # Along-road samples: every 1.5 m, plus the edges of each zebra.
-        ss = list(np.linspace(0, L, max(2, int(math.ceil(L / 2.0)) + 1)))
+        # Along-road samples: every 2 m (1 m over the fine ground patches,
+        # whose 1 m grid the road follows), plus the edges of each zebra.
+        q0 = shapely.line_interpolate_point(ln, np.linspace(0, L, max(2, int(L / 2.0) + 1)))
+        fine_ = bool(on_fine(shapely.get_x(q0), shapely.get_y(q0)).any())
+        ss = list(np.linspace(0, L, max(2, int(math.ceil(L / (1.0 if fine_ else 2.0))) + 1)))
         spans = []
         if ckd is not None:
             for k in ckd.query_ball_point(ln.centroid.coords[0], L / 2 + 5):
@@ -11796,14 +11970,24 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
         tl = np.hypot(tx, ty) + 1e-9
         nx_, ny_ = -ty / tl, tx / tl
         offs = np.array([-half, -half / 2, 0.0, half / 2, half]) if W > 6.5 else np.array([-half, 0.0, half])
+        if fine_:
+            offs = np.linspace(-half, half, 2 * int(math.ceil(half / 1.0)) + 1)
         X = P[:, 0, None] + nx_[:, None] * offs
         Y = P[:, 1, None] + ny_[:, None] * offs
-        Z = ground_z(gz, X, Y)
+        Z = ground_z_fine(gz, X, Y)
+        for pt_ in PORTALS:
+            if pt_.get("surface"):
+                # (the last metres before a tunnel's mouth: the street's level)
+                fr = contains_xy(pt_["cut"].union(pt_["front"]), X, Y)
+                Z = np.where(fr, np.minimum(Z, pt_["zr"]), Z)
         if TRACK is not None and float(np.median(track_dist(P[:, 0], P[:, 1]))) > 2.5:
             # Side streets level across (the 3 m grid's humps beside them,
-            # walls and banks, had tilted their edges into dark ramps).
+            # walls and banks, had tilted their edges into dark ramps);
+            # not on the fine patches, whose ground under the road is
+            # already the smoothed tarmac (_road_level).
             zc = Z[:, len(offs) // 2:len(offs) // 2 + 1]
-            Z = np.clip(Z, zc - 0.15, zc + 0.15)
+            fz = on_fine(X, Y)
+            Z = np.where(fz, Z, np.clip(Z, zc - 0.15, zc + 0.15))
         # Not over the water (a road ending on a quay edge).
         wet = (Z <= SEA_FLOOR + 0.5).any(1)
         Z = Z + ROAD_LIFT + 0.004 * ROAD_RANK.get(hw, 0)
@@ -11880,8 +12064,8 @@ def road_surfaces(m, ways, pts, gz, bmask, stats):
                     continue
                 xa, ya = P[ii, 0] + nx_[ii] * o0, P[ii, 1] + ny_[ii] * o0
                 xb, yb = P[ii, 0] + nx_[ii] * o1, P[ii, 1] + ny_[ii] * o1
-                za = ground_z(gz, xa, ya) + ROAD_LIFT
-                zb_ = ground_z(gz, xb, yb)
+                za = ground_z_fine(gz, xa, ya) + ROAD_LIFT
+                zb_ = ground_z_fine(gz, xb, yb)
                 ztop = np.maximum(za, zb_) + 0.13
                 A0 = enu_fast(xa, ya, za - 0.05); A1 = enu_fast(xa, ya, ztop)
                 B1 = enu_fast(xb, yb, ztop); B0 = enu_fast(xb, yb, zb_ - 0.1)
@@ -11914,6 +12098,8 @@ def street_lamps(m, ways, gz, bmask, sea):
     lamp light, G = distance from the shore over the sea (0-20 m), for the
     foam along quays and beaches."""
     def ground(x, y):
+        if on_fine(np.array([x]), np.array([y]))[0]:
+            return float(ground_z_fine(gz, np.array([x]), np.array([y]))[0])
         return float(ndimage.map_coordinates(gz, [[(Y1 - y) / GRID], [(x - X0) / GRID]], order=1, mode="nearest")[0])
     placed = []
     post_c, head_c = np.array(hexrgb("#2d3134")), np.array(hexrgb("#fff1c8"))
@@ -14196,6 +14382,10 @@ def _park_slab(gm, poly, mntR, gz, style, cf, bx0, by1, R, lift=0.08, area=2.5):
         if gz is not None:
             fi, fj = (v[:, 0] - X0) / GRID, (Y1 - v[:, 1]) / GRID
             z = np.fmax(z, ndimage.map_coordinates(gz, [fj, fi], order=1, mode="nearest"))
+            fz = on_fine(v[:, 0], v[:, 1])
+            if fz.any():
+                # (over Le Rocher's 1 m ground: never under its triangles)
+                z = np.where(fz, np.fmax(z, ground_z_fine(gz, v[:, 0], v[:, 1])), z)
         if not np.isfinite(z).any():
             continue
         z = np.where(np.isfinite(z), z, np.nanmedian(z))
@@ -14810,7 +15000,9 @@ def main():
     if SW is not None and mnt_ground is not mnt_f:
         m_ = raster_mask(SW["poly"])
         mnt_ground[m_] = mnt_f[m_]
-    portals_setup(ways, mnt_f)
+    portals_setup(ways, mnt_f, mnt)
+    global ROAD_FOOT
+    ROAD_FOOT = unary_union(_road_polys(ways)[0]).buffer(1.0)
     global FM, STADE_POLY
     FM = fairmont_setup(feats, mns, mnt_f)
     STADE_POLY = stade_setup(feats)

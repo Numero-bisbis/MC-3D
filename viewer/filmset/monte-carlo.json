@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6759728,
+ "triangles": 6860776,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -171,9 +171,9 @@
  "heliport_tris": 33101,
  "heliport_m2": 4036,
  "west_quay_wall_m": 3419,
- "tunnel_portals": 3,
+ "tunnel_portals": 44,
  "road_m": 82249,
- "kerb_m": 62976,
+ "kerb_m": 63101,
  "lamps": 1849,
  "spectators": 5638,
  "sidewalk_m2": 56844,
@@ -234,7 +234,7 @@
  "gastaud_olives": 10,
  "gastaud_statue": 1,
  "conda_orange_trees": 67,
- "park_lawn_m2": 89579,
+ "park_lawn_m2": 89576,
  "park_path_m2": 21311,
  "park_bed_m2": 70193,
  "park_flowers_m2": 2462,
