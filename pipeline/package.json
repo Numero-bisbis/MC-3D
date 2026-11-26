@@ -1,0 +1,11 @@
+{
+  "name": "mc3d-pipeline",
+  "private": true,
+  "description": "Node tools for the pipeline (film set tiling)",
+  "type": "module",
+  "dependencies": {
+    "@gltf-transform/core": "4.1.1",
+    "@gltf-transform/extensions": "4.1.1",
+    "meshoptimizer": "0.22.0"
+  }
+}

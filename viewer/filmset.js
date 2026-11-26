@@ -1119,25 +1119,101 @@
     return Cesium.Transforms.eastNorthUpToFixedFrame(o);
   }
 
+  // The set comes either as one file, or (on the live site, see
+  // pipeline/split_filmset.mjs) as square tiles that stream in nearest to
+  // the camera first. Tiles off screen are skipped by the GPU, in the view
+  // and in each shadow pass, so a street-level view draws a fraction of it.
+  const group = new Cesium.PrimitiveCollection({ destroyPrimitives: true });
+  scene.primitives.add(group);
+  group.show = false;
+  const allModels = () => {
+    const out = [];
+    for (let i = 0; i < group.length; i++) out.push(group.get(i));
+    if (tube) out.push(tube);
+    return out;
+  };
+  const modelOpts = (url) => ({
+    url,
+    modelMatrix: frame(),
+    // The file is written y-up with x = east, z = south; no extra turn.
+    upAxis: Cesium.Axis.Y,
+    forwardAxis: Cesium.Axis.X,
+    customShader: shader,
+    shadows: Cesium.ShadowMode.ENABLED,
+    backFaceCulling: true,
+    // Stay sharp: the set has no lower levels of detail.
+    maximumScreenSpaceError: 2,
+  });
+  const whenReady = (m) => new Promise((resolve) => {
+    if (m.ready) return resolve();
+    const rm = m.readyEvent.addEventListener(() => { rm(); resolve(); });
+  });
+  // Where the camera looks (the screen centre on the ground, else the
+  // camera itself), in the set's own frame: x east, z south.
+  function lookAt() {
+    const c = scene.canvas;
+    let p = null;
+    try { p = scene.globe.pick(viewer.camera.getPickRay(new Cesium.Cartesian2(c.clientWidth / 2, c.clientHeight / 2)), scene); } catch (e) { /* no globe yet */ }
+    p = p || viewer.camera.positionWC;
+    const inv = Cesium.Matrix4.inverseTransformation(frame(), new Cesium.Matrix4());
+    const enu = Cesium.Matrix4.multiplyByPoint(inv, p, new Cesium.Cartesian3());
+    return [enu.x, -enu.y];
+  }
+  const tileDist = (t, [fx, fz]) => (t.file.endsWith("base.glb") ? -1 : Math.hypot(t.c[0] - fx, t.c[2] - fz));
+  async function loadTiles() {
+    // Each next tile is the nearest one left to where the camera looks at
+    // that moment, so flying elsewhere mid-load brings that area in first.
+    const left = meta.tiles.slice();
+    const total = left.length;
+    let done = 0;
+    // The tiles close by (or the first few) are enough to show the set;
+    // the rest keep streaming in behind it.
+    const here = lookAt();
+    const firstN = Math.min(total, Math.max(6, left.filter((t) => tileDist(t, here) < 500).length));
+    let firstResolve;
+    const first = new Promise((r) => { firstResolve = r; });
+    const worker = async () => {
+      while (left.length) {
+        const at = lookAt();
+        let best = 0;
+        for (let i = 1; i < left.length; i++) if (tileDist(left[i], at) < tileDist(left[best], at)) best = i;
+        const t = left.splice(best, 1)[0];
+        try {
+          const m = await Cesium.Model.fromGltfAsync(modelOpts(`filmset/${t.file}`));
+          group.add(m);
+          await whenReady(m);
+          if (night > 0.5 && m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(0.25, 0.25);
+        } catch (e) {
+          console.error("film set tile failed", t.file, e);
+        }
+        done++;
+        if (done < firstN && !loadingEl.hidden) {
+          loadingEl.lastChild.textContent = `Building the film set… ${Math.round((100 * done) / firstN)}%`;
+        }
+        if (done >= firstN) firstResolve();
+      }
+    };
+    // A few at a time: enough to keep the connection busy, few enough
+    // that the nearest tiles arrive first.
+    const all = Promise.all([worker(), worker(), worker(), worker()]).then(() => firstResolve());
+    await first;
+    return { all };
+  }
+
   async function load() {
     if (loading) return loading;
     loading = (async () => {
       meta = await Cesium.Resource.fetchJson({ url: `${URL_BASE}.json` });
-      model = await Cesium.Model.fromGltfAsync({
-        url: `${URL_BASE}.glb`,
-        modelMatrix: frame(),
-        // The file is written y-up with x = east, z = south; no extra turn.
-        upAxis: Cesium.Axis.Y,
-        forwardAxis: Cesium.Axis.X,
-        customShader: shader,
-        shadows: Cesium.ShadowMode.ENABLED,
-        backFaceCulling: true,
-        // Stay sharp: everything is in one file anyway.
-        maximumScreenSpaceError: 2,
-      });
-      model.show = active;
-      scene.primitives.add(model);
-      // The Grand Prix tunnel's inside: lit by its own lamps, no shadows.
+      // Models only load while they are part of the drawn scene.
+      group.show = active;
+      if (meta.tiles && meta.tiles.length && !new URLSearchParams(location.search).has("onefile")) {
+        await loadTiles();
+      } else {
+        const one = await Cesium.Model.fromGltfAsync(modelOpts(`${URL_BASE}.glb`));
+        group.add(one);
+        await whenReady(one);
+      }
+      model = group;
       if (meta.tunnel) {
         tube = await Cesium.Model.fromGltfAsync({
           url: `${URL_BASE}-tunnel.glb`, modelMatrix: frame(),
@@ -1156,10 +1232,6 @@
         });
         scene.globe.clippingPolygons = clip;
       }
-      await new Promise((resolve) => {
-        if (model.ready) return resolve();
-        const rm = model.readyEvent.addEventListener(() => { rm(); resolve(); });
-      });
       return model;
     })();
     return loading;
@@ -1174,16 +1246,25 @@
 
   // Shadows sell the film look. On phones they start on and switch off by
   // themselves if the frame rate drops below about 30 fps.
-  let fpsWatch = null;
+  // Frames are drawn on demand (main.js), so a still view runs slowly on
+  // purpose: only the gaps between frames drawn back to back while the
+  // camera moves or a tour plays count.
+  let fpsWatch = null, moving = false;
+  viewer.camera.moveStart.addEventListener(() => { moving = true; });
+  viewer.camera.moveEnd.addEventListener(() => { moving = false; });
   function watchFps() {
     if (!MOBILE || fpsWatch) return;
-    let frames = 0, since = performance.now(), strikes = 0;
+    let frames = 0, spent = 0, prev = 0, strikes = 0;
     fpsWatch = scene.postRender.addEventListener(() => {
-      frames++;
       const now = performance.now();
-      if (now - since < 2000) return;
-      const fps = (frames * 1000) / (now - since);
-      frames = 0; since = now;
+      const dt = now - prev;
+      prev = now;
+      if (!(moving || document.body.classList.contains("touring")) || dt > 250) return;
+      frames++;
+      spent += dt;
+      if (spent < 2000) return;
+      const fps = (frames * 1000) / spent;
+      frames = 0; spent = 0;
       if (active && viewer.shadows && fps < 28) {
         if (++strikes >= 2) { viewer.shadows = false; }
       } else strikes = 0;
@@ -1225,6 +1306,9 @@
       scene.fog.density = 0.0004;
       loadingEl.lastChild.textContent = "Building the film set…";
       loadingEl.hidden = false;
+      // The sea ripples: a still view of the set is redrawn 24 times a second.
+      if (M.keepRendering) M.keepRendering("filmset", 24);
+      group.show = true;   // tiles load only while shown
       try {
         await load();
       } catch (e) {
@@ -1239,14 +1323,15 @@
       loadingEl.hidden = true;
       loadingEl.lastChild.textContent = "Loading Monaco…";
       if (!active) return;
-      model.show = true;
+      group.show = true;
       if (tube) tube.show = true;
       if (clip) clip.enabled = true;
       watchFps();
       if (night > 0.5) applyNight(); else setBloom();
     } else {
-      if (model) model.show = false;
+      group.show = false;
       if (tube) tube.show = false;
+      if (M.keepRendering) M.keepRendering("filmset", false);
       if (clip) clip.enabled = false;
       bloom.enabled = false;
       if (nightSaved) {
@@ -1330,7 +1415,7 @@
       viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T21:40:00Z");
       scene.light = moonLight();
       viewer.shadows = false;
-      for (const m of [model, tube]) if (m && m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(0.25, 0.25);
+      for (const m of allModels()) if (m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(0.25, 0.25);
     } else {
       if (nightSaved) {
         const layers = viewer.imageryLayers;
@@ -1340,7 +1425,7 @@
       viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-06-21T06:15:00Z");
       scene.light = dayLight();
       viewer.shadows = true;
-      for (const m of [model, tube]) if (m && m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(1, 1);
+      for (const m of allModels()) if (m.imageBasedLighting) m.imageBasedLighting.imageBasedLightingFactor = new Cesium.Cartesian2(1, 1);
     }
     if (M.legends && M.legends.skyNight) M.legends.skyNight(night, moonDir());
     setBloom();

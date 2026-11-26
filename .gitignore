@@ -4,3 +4,4 @@ viewer/tiles
 __pycache__/
 viewer/surface
 viewer/buildings
+pipeline/node_modules/
