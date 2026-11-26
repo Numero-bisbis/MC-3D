@@ -10191,6 +10191,8 @@ def rocher_streets(gm, ways, mnt, gz, fps, stats):
             palais_sq.append(Polygon(p_).buffer(0))
         if not hw or t.get("tunnel") or t.get("layer", "0") != "0" or hw == "steps" or len(p_) < 2:
             continue
+        if t.get("name") == BARBE_NAME and t.get("surface") == "asphalt":
+            continue                    # its lower part: sainte_barbe()
         ln = LineString(p_)
         if not ln.intersects(ROCHER_ZONE):
             continue
@@ -10224,6 +10226,137 @@ def rocher_streets(gm, ways, mnt, gz, fps, stats):
     stats["rocher_sett_m2"] = round(_slab(gm, sett, mntR, gz, SETT, lift=0.09))
     stats["rocher_brick_m2"] = round(_slab(gm, side, mntR, gz, PAVER, lift=0.14))
     return stats["rocher_sett_m2"]
+
+
+# ------------------------------------------------ Ruelle Sainte-Barbe ----
+# The lane from Place du Palais down to the terrace over the little cove on
+# the Rock's south side (the Anse under the Palace). OpenStreetMap's line
+# for its lower part crosses the cove at sea level, and the LiDAR's ground
+# misses the terrace altogether (it is built out over the rock: the ground
+# model drops straight to the water, so the lane fell down the cliff and
+# the houses on its inland side were cut back to the old town's level).
+# Traced from the 20 cm photo along the cove's rim, levels from the LiDAR
+# surface model: steps from the square (61 m) down to a terrace at 53 m,
+# a few steps up past the house on the cove's corner, then along the east
+# rim at 57 m and up to Rue Colonel Bellando de Castro.
+BARBE_NAME = "Ruelle Sainte-Barbe"
+BARBE_KNOTS = [(1056079.0, 6302367.9, 61.0), (1056080.6, 6302358.3, None), (1056082.7, 6302348.9, None),
+               (1056085.7, 6302335.2, None), (1056090.7, 6302335.9, 53.3), (1056103.0, 6302331.0, 53.3),
+               (1056117.0, 6302330.0, 53.3), (1056123.0, 6302327.2, 53.3), (1056127.0, 6302325.3, 54.9),
+               (1056133.0, 6302321.8, 54.9), (1056145.0, 6302317.8, 55.2), (1056152.0, 6302314.5, 56.5),
+               (1056156.5, 6302309.0, 57.1), (1056157.5, 6302298.0, 57.2), (1056156.0, 6302292.5, 57.5),
+               (1056161.0, 6302288.8, 59.0), (1056168.0, 6302290.0, 59.6), (1056178.9, 6302288.1, 59.8)]
+BARBE_TERRACE = 4                        # knots from here on: the terrace and the east rim
+BARBE_W = 2.8                            # m
+
+
+def barbe_profile(step=0.25):
+    """The lane's centre line every `step` m: points (n, 2), distances s,
+    levels z (linear between the known knots) and where the terrace starts."""
+    K = np.array([(x, y) for x, y, _ in BARBE_KNOTS])
+    sk = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(K, axis=0).T))])
+    kz = [(s_, z) for s_, (_, _, z) in zip(sk, BARBE_KNOTS) if z is not None]
+    s = np.arange(0.0, sk[-1] + 1e-6, step)
+    if s[-1] < sk[-1]:
+        s = np.append(s, sk[-1])
+    P = np.column_stack([np.interp(s, sk, K[:, 0]), np.interp(s, sk, K[:, 1])])
+    z = np.interp(s, [a for a, _ in kz], [b for _, b in kz])
+    return P, s, z, float(sk[BARBE_TERRACE])
+
+
+def barbe_ground(*arrs):
+    """Lay the lane into the terrain models: its strip at its own level
+    (the steps cut into the slope, the terrace built over the cove), and
+    on its inland side the ground raised to it (the houses there stand on
+    the terrace, not on the cove's floor)."""
+    P, s, z, s_ter = barbe_profile()
+    ln = LineString(P)
+    strip = ln.buffer(BARBE_W / 2 + 0.3, cap_style=2, join_style=2)
+    ter = LineString(P[s >= s_ter])
+    inland = ter.buffer(9.0, single_sided=True, cap_style=2, join_style=2).difference(strip)
+    for geom, mode in ((strip, "set"), (inland, "raise")):
+        mk = raster_mask(geom)
+        r, c = np.nonzero(mk)
+        if not len(r):
+            continue
+        x, y = cell_xy(r, c)
+        zz = np.interp(shapely.line_locate_point(ln, shapely.points(x, y)), s, z)
+        for a in arrs:
+            if a is None:
+                continue
+            if mode == "set":
+                a[r, c] = zz
+            else:
+                cur = a[r, c]
+                a[r, c] = np.where(np.isfinite(cur), np.maximum(cur, zz - 0.05), zz - 0.05)
+    return round(ln.length)
+
+
+def sainte_barbe(gm, m, mnt_orig, stats):
+    """The lane itself: grey setts, laid in treads of 15 cm where it
+    climbs (stone risers), and on the cove side a pale rubble parapet with
+    a coping, its face carried a few metres down the rock."""
+    P, s, z, s_ter = barbe_profile()
+    W = BARBE_W
+    rise = 0.15
+    zq = z[0] + rise * np.round((z - z[0]) / rise)
+    Lft, Rgt = _ribbon_edges(P, W)
+    stone = np.array(hexrgb("#a9a49a"), float)
+    rubble = np.array(hexrgb(WALL_RUBBLE), float)
+    cope = np.array(hexrgb("#e2ddd2"), float)
+    V, Z, T = [], [], []
+    n_steps = 0
+    for i in range(len(P) - 1):
+        za, zb = zq[i], zq[i + 1]
+        if abs(zb - za) < 0.05:
+            zz = (za, zb)
+        else:
+            zz = (za, za)
+            # The riser to the next tread, facing down the lane.
+            A, B = Lft[i + 1], Rgt[i + 1]
+            lo, hi = min(za, zb), max(za, zb)
+            Pq = enu_fast(np.array([A[0], B[0], B[0], A[0]]), np.array([A[1], B[1], B[1], A[1]]),
+                          np.array([lo, lo, hi, hi]) + 0.1)
+            d_ = P[i] - P[i + 1] if zb > za else P[i + 1] - P[i]
+            w_ = enu_fast(np.array([P[i + 1][0] + d_[0]]), np.array([P[i + 1][1] + d_[1]]), np.array([lo]))[0] - \
+                enu_fast(np.array([P[i + 1][0]]), np.array([P[i + 1][1]]), np.array([lo]))[0]
+            _quad(m, Pq[0][None], Pq[1][None], Pq[2][None], Pq[3][None], stone, w_[None])
+            n_steps += 1
+        k = len(V)
+        V += [Lft[i], Rgt[i], Rgt[i + 1], Lft[i + 1]]
+        Z += [zz[0], zz[0], zz[1], zz[1]]
+        T += [[k, k + 1, k + 2], [k, k + 2, k + 3]]
+    V, Z, T = np.array(V), np.array(Z) + 0.1, np.array(T)
+    Pv = enu_fast(V[:, 0], V[:, 1], Z)
+    a_, b_, c_ = Pv[T[:, 0]], Pv[T[:, 1]], Pv[T[:, 2]]
+    dn = np.cross(b_ - a_, c_ - a_)[:, 2] < 0
+    T[dn] = T[dn][:, [0, 2, 1]]
+    uv = np.column_stack([(V[:, 0] - X0) / (X1 - X0), (Y1 - V[:, 1]) / (Y1 - Y0)])
+    gm.add(Pv, [0.0, 0.0, 1.0], [255, 255, 255], GROUND, uv=uv, idx=T, style=SETT)
+    # The cove side (right of the way down): wherever the rock falls away.
+    mR = Raster(mnt_orig)
+    L_wall = 0.0
+    for i in range(0, len(P) - 1):
+        a2, b2 = Rgt[i], Rgt[i + 1]
+        d_ = b2 - a2
+        Ls = float(np.hypot(*d_))
+        if Ls < 1e-3:
+            continue
+        o = P[i] + (Rgt[i] - P[i]) * (1.0 + 2.5 / (W / 2))
+        g = mR.sample(np.array([o[0]]), np.array([o[1]]))[0]
+        zd = min(zq[i], zq[i + 1]) + 0.1
+        if not np.isfinite(g) or g > zd - 2.0:
+            continue
+        F = Frame(m, a2, d_)
+        zbot = max(float(g) - 0.5, zd - 3.5)          # below it, the cove's rock (ground model)
+        ztop = max(zq[i], zq[i + 1]) + 1.1
+        F.box(0.0, Ls, 0.0, 0.45, zbot, ztop, rubble, top=False, style=RUBBLE, uvm=0.45)
+        F.box(-0.02, Ls + 0.02, -0.05, 0.5, ztop, ztop + 0.12, cope)
+        L_wall += Ls
+    stats["barbe_m"] = round(float(s[-1]))
+    stats["barbe_steps"] = n_steps
+    stats["barbe_wall_m"] = round(L_wall)
+    return n_steps
 
 
 # ------------------------------------------- Fort Antoine, the ramparts ----
@@ -10704,11 +10837,27 @@ def rocher_ramparts(m, ways, pts, mnt, stats):
     return round(n_m)
 
 
+ROCHER_PATH_W = 2.6                     # m: the gardens' paths (20 cm photo: 2.5-3 m between the beds)
+ROCHER_GARDEN_PATHS = None              # their outlines (rocher_gardens_setup)
+
+
+def _rocher_garden_paths(ways, gardens):
+    return [LineString(p_) for t, p_, c in ways
+            if t.get("highway") in ("footway", "path", "steps", "pedestrian") and not c and len(p_) >= 2
+            and t.get("name") != BARBE_NAME and LineString(p_).intersects(gardens)]
+
+
 def rocher_gardens_setup(ways):
+    global ROCHER_GARDEN_PATHS
     near = ROCHER_ZONE.buffer(100.0)
     g = [Polygon(p_).buffer(0) for t, p_, c in ways
          if c and len(p_) > 3 and t.get("leisure") in ("garden", "park") and Polygon(p_).buffer(0).intersects(near)]
-    return unary_union(g) if g else None
+    if not g:
+        return None
+    G = unary_union(g)
+    ROCHER_GARDEN_PATHS = unary_union([ln.buffer(ROCHER_PATH_W / 2, cap_style=1) for ln in _rocher_garden_paths(ways, G)]
+                                      or [Polygon()]).intersection(G)
+    return G
 
 
 def rocher_gardens(gm, m, ways, pts, mnt, gz, stats):
@@ -10720,10 +10869,8 @@ def rocher_gardens(gm, m, ways, pts, mnt, gz, stats):
     if ROCHER_GARDENS is None:
         return 0
     gardens = ROCHER_GARDENS
-    paths = [LineString(p_) for t, p_, c in ways
-             if t.get("highway") in ("footway", "path", "steps", "pedestrian") and not c and len(p_) >= 2
-             and LineString(p_).intersects(gardens)]
-    pv = unary_union([ln.buffer(0.95, cap_style=1) for ln in paths] or [Polygon()]).intersection(gardens)
+    paths = _rocher_garden_paths(ways, gardens)
+    pv = ROCHER_GARDEN_PATHS
     stats["rocher_garden_path_m2"] = round(_slab(gm, pv, mntR, gz, PAVER, lift=0.08, area=1.5))
     wood, iron = np.array(hexrgb("#33463c")), np.array(hexrgb("#2c2a27"))
     nb = 0
@@ -10747,9 +10894,11 @@ def rocher_gardens(gm, m, ways, pts, mnt, gz, stats):
     return nb
 
 
-def _zone_trees(m, zone, mns, mnt, ortho, fps, kindfn, hmax=24.0, rad_k=0.85, seed=31):
+def _zone_trees(m, zone, mns, mnt, ortho, fps, kindfn, hmax=24.0, rad_k=0.85, seed=31, clear=None):
     """Trees where the LiDAR canopy peaks inside zone (buildings near it cut
-    out; red awnings and canopies are not trees). kindfn(h) names the kind."""
+    out; red awnings and canopies are not trees). kindfn(h) names the kind.
+    clear: paths to keep in sight from above (no trunk on them, crowns
+    trimmed to overhang them by 40 cm at most)."""
     zone = zone.difference(unary_union([p for p in fps if p.distance(zone) < 15] or [Polygon()]))
     if zone.is_empty:
         return 0
@@ -10775,7 +10924,13 @@ def _zone_trees(m, zone, mns, mnt, ortho, fps, kindfn, hmax=24.0, rad_k=0.85, se
         if not np.isfinite(z):
             continue
         kind = kindfn(h)
-        add_tree(m, x, y, z, min(h, hmax), rad * (0.9 if kind == "pine" else rad_k), kind, rnd)
+        rad = rad * (0.9 if kind == "pine" else rad_k)
+        if clear is not None:
+            d_ = clear.distance(Point(x, y))
+            if d_ < 0.8:
+                continue
+            rad = min(rad, max(1.2, d_ + 0.4))
+        add_tree(m, x, y, z, min(h, hmax), rad, kind, rnd)
         n_ += 1
     return n_
 
@@ -10792,8 +10947,11 @@ def rocher_trees(m, mns, mnt, ortho, fps, stats):
     # The gardens (Saint-Martin's pine wood on the south cliff), from the
     # canopy too: the generic finder thinned them to a few cypresses.
     if ROCHER_GARDENS is not None:
+        # The paths stay in sight from the air: no trunk on them, crowns
+        # trimmed back over them (the LiDAR canopy closes over most of
+        # them, so the garden read as one wood).
         n_ += _zone_trees(m, ROCHER_GARDENS.difference(zone), mns, mnt, ortho, fps,
-                          lambda h: "pine" if h > 6 else "broad", seed=53)
+                          lambda h: "pine" if h > 6 else "broad", seed=53, clear=ROCHER_GARDEN_PATHS)
     stats["rocher_trees"] = n_
     return n_
 
@@ -14171,6 +14329,18 @@ def parks(gm, bm, ways, pts, mnt, mns, ortho_hi, gz, fps, stats):
     found = parks_setup(ways, fps)
     if not found:
         return 0
+    # Place du Palais: south of the gate the square's pines stand in grass
+    # (Fly, 2026-11-26), in its garden and beyond it up to the paving; the
+    # closed canopy there is lawn, not a bed of undergrowth.
+    Fp_ = Frame(None, PALACE_O, PALACE_U)
+    lawn_zone = Fp_.poly(-60.0, 8.0, 0.5, 70.0).union(Fp_.poly(-58.0, 2.0, 0.0, 42.0))
+    sq_ = unary_union([Polygon(p_).buffer(0) for t, p_, c in ways if c and len(p_) > 3 and t.get("name") == "Place du Palais"]
+                      or [Polygon()])
+    gard_ = unary_union([g_ for _, g_ in found if g_.intersects(lawn_zone)] or [Polygon()])
+    lawn_zone = lawn_zone.union(gard_).difference(sq_.buffer(0.3))
+    extra = lawn_zone.difference(gard_)
+    if extra.area > 60:
+        found.append(("Place du Palais pines", extra))
     mntR = Raster(mnt)
     k_ = ortho_hi.size[0] / (X1 - X0)                        # photo px per metre
     blds = unary_union([p.buffer(0.3, join_style=2) for p in fps])
@@ -14197,6 +14367,8 @@ def parks(gm, bm, ways, pts, mnt, mns, ortho_hi, gz, fps, stats):
     lines = []
     for t, p_, c in ways:
         hw = t.get("highway")
+        if t.get("name") == BARBE_NAME and (hw == "steps" or t.get("surface") == "asphalt"):
+            continue                    # built by sainte_barbe()
         if hw in PW and t.get("tunnel") is None and t.get("layer", "0") not in ("-1", "-2") and not t.get("bridge"):
             try:
                 w = float(t.get("width", "").split()[0])
@@ -14270,7 +14442,9 @@ def parks(gm, bm, ways, pts, mnt, mns, ortho_hi, gz, fps, stats):
         # A wood (the tree cover nearly closed over a big patch) is a bed of
         # undergrowth, not lawn.
         cover = ndimage.uniform_filter((h >= 3.0).astype(np.float32), size=int(6 / R))
-        cl[(cover > 0.85) & (cl == 1)] = 3
+        lz = contains_xy(lawn_zone, CX, CY) if g.intersects(lawn_zone) else np.zeros(inside.shape, bool)
+        cl[(cover > 0.85) & (cl == 1) & ~lz] = 3
+        cl[lz & unknown & (cl == 3)] = 1                 # grass under the Palace's pines
         # Smooth the classes (soft vote over ~0.5 m), so their edges are
         # curves, not the grid's steps.
         vote = np.stack([ndimage.gaussian_filter((cl == c_).astype(np.float32), 2.0) for c_ in (1, 2, 3)])
@@ -15011,6 +15185,8 @@ def main():
     mnt_f, mns, wq_m2 = wq_flatten(mnt_f, mns)
     mnt_ground = np.where(np.nan_to_num(mnt_f, nan=-99) != np.nan_to_num(mnt_pre, nan=-99), mnt_f, mnt_ground)
     print("west quays…", wq_setup(ways, mnt_f, sea), "m2 of quay band;", wq_m2, "m2 of yard humps levelled")
+    mnt_barbe = mnt_f.copy()
+    print("Ruelle Sainte-Barbe…", barbe_ground(mnt_f, None if mnt_ground is mnt_f else mnt_ground), "m")
     fps = buildings(bm, feats, mns, mnt_f, ortho, stats, facades, photo)
     if MT is not None:
         # Mareterra's new blocks into the surface model, so they cast
@@ -15090,6 +15266,8 @@ def main():
           stats.get("rocher_garden_path_m2"), "m2 of paths")
     print("Le Rocher streets…", rocher_streets(gm, ways, mnt_f, gz, fps, stats), "m2 of setts,",
           stats.get("rocher_brick_m2"), "m2 of brick pavement")
+    print("Ruelle Sainte-Barbe…", sainte_barbe(gm, bm, mnt_barbe, stats), "steps,", stats.get("barbe_wall_m"),
+          "m of wall over the cove")
     print("Pêcheurs garden…", peche_terrace(gm, bm, mnt_f, gz, stats), "m of sea wall,",
           stats.get("peche_walk_m2"), "m2 of walk")
     print("Digue…", digue(bm, tm, Raster(mnt_f), stats), "trees,", stats.get("digue_m"), "m of breakwater")
