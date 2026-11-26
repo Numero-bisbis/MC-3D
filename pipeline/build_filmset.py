@@ -11186,7 +11186,174 @@ def place_darmes(gm, m, tm, ways, pts, mns, mnt, ortho, ortho_hi, gz, fps, stats
     mntR = Raster(mnt)
     armes_paving(gm, mntR, gz, stats)
     armes_trees(tm, mns, mnt, ortho, fps, stats)
+    armes_roundabout(m, gz, stats)
     return armes_furniture(m, ways, pts, mntR, ortho_hi, stats)
+
+
+# The roundabout at the square's west end, where Boulevard Charles III,
+# Rue Grimaldi, Avenue du Port, Avenue Prince Pierre and Avenue de la Porte
+# Neuve meet (OpenStreetMap calls the ring "Place d'Armes" too). IGN's
+# 10 cm photo: a round island 8 m across, a white kerb, a pale stone apron
+# and a small raised planter in the middle; tarmac from the island out to
+# about 13.7 m, two lanes with a dashed line between them. Street photos
+# (Mapillary 2015-2017): the planter holds clipped dark shrubs about a
+# metre tall, and blue "keep right" signs stand on the island. The film
+# set had drawn OSM's two lanes 6.2 m wide on the ring's centre line, so
+# the island came out 12 m across, a lumpy pale smear of the photo.
+ARMES_RB = None               # {"c", "island", "zone"}
+ARMES_RB_W = 9.5              # m of tarmac round the ring
+ARMES_RB_ISLAND = 4.0         # m, the island's radius (photo)
+ARMES_RB_PLANTER = 1.3        # m, the planter's radius
+ARMES_RB_APRON = (204, 192, 164)   # the apron's pale stone, in the ground map
+
+
+def armes_rb_setup(ways, mnt, mns, ortho):
+    """Find the ring, widen its tarmac to the photo's, and smooth the
+    ground over the whole roundabout (no humps, no 'trees' from the
+    surface model, the island's photo smear painted over)."""
+    from shapely.ops import polygonize
+    ring = [(t, LineString(p_)) for t, p_, c in ways
+            if t.get("name") == ARMES_NAME and t.get("junction") == "roundabout" and len(p_) > 1]
+    if not ring:
+        return None
+    polys = list(polygonize(unary_union([ln for _, ln in ring])))
+    if not polys:
+        return None
+    inner = max(polys, key=lambda q: q.area)
+    c = np.array(inner.centroid.coords[0])
+    # One closed ring instead of OSM's seven pieces: the road builder
+    # skips pieces under 2 m (one, at the east side, left a wedge of bare
+    # ground) and each piece's square end opens a notch at the kerbs.
+    merged = shapely.ops.linemerge(unary_union([ln for _, ln in ring]))
+    if merged.geom_type == "LineString":
+        t0 = dict(ring[0][0])
+        t0["width"] = str(ARMES_RB_W)      # every width lookup (roads, pavements) reads the tag
+        ids = {id(t) for t, _ in ring}
+        ways[:] = [w for w in ways if id(w[0]) not in ids] + [(t0, list(merged.coords), False)]
+    else:
+        for t, _ in ring:
+            t["width"] = str(ARMES_RB_W)
+    zone = Point(*c).buffer(13.5, 64)
+    zm = raster_mask(zone) & np.isfinite(mnt)
+    z = ndimage.median_filter(np.nan_to_num(mnt, nan=0.0), 9)
+    z = ndimage.gaussian_filter(z, 2.0)
+    mnt[zm] = z[zm]
+    mns[zm] = z[zm]
+    island = Point(*c).buffer(ARMES_RB_ISLAND, 64)
+    # Tarmac in the ground map under the ring (where a road's edge leaves
+    # a sliver, it is the road's grey, not the photo's island or a car).
+    tar = raster_mask(Point(*c).buffer(12.0, 64))
+    ortho[tar] = np.median(ortho[tar & ~raster_mask(island.buffer(1.0))], axis=0).astype(ortho.dtype)
+    ortho[raster_mask(island.buffer(0.3))] = ARMES_RB_APRON
+    print(f"Place d'Armes roundabout at {c[0]:.1f}, {c[1]:.1f}: ring {inner.area:.0f} m2")
+    return {"c": c, "island": island, "zone": zone}
+
+
+def _vdisc(m, c, nrm, z, r, col, n=16):
+    """A round road sign: a flat disc standing upright at height z,
+    facing nrm (both faces)."""
+    nrm = np.asarray(nrm, float) / np.linalg.norm(nrm)
+    side = np.array([-nrm[1], nrm[0]])
+    a = np.linspace(0, 2 * math.pi, n + 1)[:-1]
+    xs = c[0] + side[0] * r * np.cos(a)
+    ys = c[1] + side[1] * r * np.cos(a)
+    P = enu_fast(xs, ys, z + r * np.sin(a))
+    o = enu_fast(np.array([c[0]]), np.array([c[1]]), np.array([z]))
+    O = np.repeat(o, n, 0)
+    j = (np.arange(n) + 1) % n
+    m.tri(O, P, P[j], col, PLAIN)
+    m.tri(O, P[j], P, col, PLAIN)
+
+
+def armes_roundabout(m, gz, stats):
+    """The island: kerb, apron, planter with shrubs, keep-right signs.
+    The street falls about a metre across the roundabout, so the island
+    follows a plane fitted to the tarmac round it."""
+    if ARMES_RB is None:
+        return 0
+    c = ARMES_RB["c"]
+    a = np.linspace(0, 2 * math.pi, 96, endpoint=False)
+    rr = ARMES_RB_ISLAND + 0.6
+    xr, yr = c[0] + rr * np.cos(a), c[1] + rr * np.sin(a)
+    zr = ground_z_fine(gz, xr, yr) + ROAD_LIFT
+    ok = np.isfinite(zr)
+    A = np.column_stack([xr[ok] - c[0], yr[ok] - c[1], np.ones(ok.sum())])
+    pl_, *_ = np.linalg.lstsq(A, zr[ok], rcond=None)
+
+    def zp(x, y):
+        return pl_[0] * (np.asarray(x) - c[0]) + pl_[1] * (np.asarray(y) - c[1]) + pl_[2]
+
+    KERB = 0.16                                          # m proud of the road
+
+    def disc(poly, dz, col):
+        tr = triangulate(orient(poly, 1.0))
+        if tr is None:
+            return
+        v, tri = tr
+        P = enu_fast(v[:, 0], v[:, 1], zp(v[:, 0], v[:, 1]) + dz)
+        pa, pb, pc = P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]]
+        dn = np.cross(pb - pa, pc - pa)[:, 2] < 0
+        tri[dn] = tri[dn][:, [0, 2, 1]]
+        m.add(P, [0.0, 0.0, 1.0], col, PLAIN, idx=tri)
+
+    def band(r0, r1, dz0, dz1, col, n=96):
+        """Upright (r0 == r1) or flat ring between two radii, both faces."""
+        t = np.linspace(0, 2 * math.pi, n + 1)
+        x0, y0 = c[0] + r0 * np.cos(t), c[1] + r0 * np.sin(t)
+        x1, y1 = c[0] + r1 * np.cos(t), c[1] + r1 * np.sin(t)
+        P0 = enu_fast(x0, y0, zp(x0, y0) + dz0)
+        P1 = enu_fast(x1, y1, zp(x1, y1) + dz1)
+        m.tri(P0[:-1], P0[1:], P1[1:], col, PLAIN)
+        m.tri(P0[:-1], P1[1:], P1[:-1], col, PLAIN)
+        m.tri(P0[:-1], P1[1:], P0[1:], col, PLAIN)
+        m.tri(P0[:-1], P1[:-1], P1[1:], col, PLAIN)
+
+    R = ARMES_RB_ISLAND
+    kerb = np.array(hexrgb("#e9e6de"))
+    apron = np.array(ARMES_RB_APRON, float)
+    stone = np.array(hexrgb("#d8d0bf"))
+    soil = np.array(hexrgb("#5a4632"))
+    tarmac = np.array(hexrgb("#45484b"))
+    # A band of tarmac round the island, under the ring's inner edge (the
+    # road's own strips stop 25 cm short of the kerb).
+    band(R - 0.05, R + 0.9, -0.03, -0.03, tarmac)
+    band(R, R, -0.4, KERB, kerb)                        # the kerb's face
+    band(R - 0.3, R, KERB, KERB, kerb)                  # and its top
+    disc(Point(*c).buffer(R - 0.3, 64).difference(Point(*c).buffer(ARMES_RB_PLANTER, 48)), KERB - 0.01, apron)
+    # The planter: a low round stone wall, soil, clipped shrubs.
+    P_ = ARMES_RB_PLANTER
+    band(P_, P_, KERB - 0.05, KERB + 0.35, stone)
+    band(P_ - 0.15, P_, KERB + 0.35, KERB + 0.35, stone)
+    disc(Point(*c).buffer(P_ - 0.15, 48), KERB + 0.3, soil)
+    zt = float(zp(c[0], c[1])) + KERB
+    zpl = zt + 0.35
+    rnd = np.random.default_rng(83)
+    leaf = np.array(hexrgb("#3f5a2e"))
+    n_ = 0
+    for k in range(7):
+        if k == 0:
+            dx, dy, r_ = 0.0, 0.0, 0.62
+        else:
+            t_ = k * 2 * math.pi / 6 + rnd.uniform(-0.2, 0.2)
+            dx, dy, r_ = 0.62 * math.cos(t_), 0.62 * math.sin(t_), rnd.uniform(0.42, 0.52)
+        _ball(m, c[0] + dx, c[1] + dy, zpl + r_ * 0.75, r_, leaf * rnd.uniform(0.9, 1.1), None)
+        n_ += 1
+    # Keep-right signs on the island's north side, facing the traffic
+    # coming down Rue Grimaldi and Boulevard Charles III (photo: two poles).
+    iron = np.array(hexrgb("#55595c"))
+    blue = np.array(hexrgb("#1f5fae"))
+    white = np.array(hexrgb("#f2f2f2"))
+    for ang in (90.0, 140.0):
+        u = np.array([math.cos(math.radians(ang)), math.sin(math.radians(ang))])
+        p = c + u * (R - 0.7)
+        zs = float(zp(p[0], p[1])) + KERB
+        _cyl(m, p[0], p[1], zs, zs + 2.3, 0.035, iron, 6)
+        _vdisc(m, p + u * 0.05, u, zs + 2.0, 0.3, blue)
+        # (the white arrow, a bar across the disc)
+        _box(m, *(p + u * 0.07), np.array([-u[1], u[0]]), 0.34, 0.01, zs + 1.95, zs + 2.05, white, top=False)
+    stats["armes_roundabout"] = {"island_r": R, "z": round(zt, 2), "fall_m": round(float(np.hypot(*pl_[:2]) * 2 * R), 2),
+                                 "shrubs": n_}
+    return n_
 
 
 # La Condamine beyond the square. Square Théodore Gastaud (1923, redone in
@@ -15110,6 +15277,8 @@ def main():
     PORTIER = portier_setup(ways, mnt, mns, ortho, sea)
     global ARMES, CONDA, ROCHER_GARDENS, RAMPE
     ARMES = armes_setup(ways)
+    global ARMES_RB
+    ARMES_RB = armes_rb_setup(ways, mnt, mns, ortho)
     RAMPE = rampe_setup(ways)
     rampe_heights(mnt, ways)
     CONDA = condamine_setup(ways)
@@ -15171,6 +15340,11 @@ def main():
         for k_ in ("poly", "pale", "islands"):
             if k_ in SW:
                 SW[k_] = SW[k_].difference(PORTIER["zone"])
+    if SW is not None and ARMES_RB is not None:
+        # (the island is its own kerb and apron, not a pavement)
+        for k_ in ("poly", "pale", "islands"):
+            if k_ in SW:
+                SW[k_] = SW[k_].difference(ARMES_RB["island"].buffer(0.3))
     if SW is not None and mnt_ground is not mnt_f:
         m_ = raster_mask(SW["poly"])
         mnt_ground[m_] = mnt_f[m_]
