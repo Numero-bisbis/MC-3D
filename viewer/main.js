@@ -80,8 +80,47 @@ let tourQ = null;
     idle = setTimeout(() => {
       viewer.resolutionScale = SHARP_SCALE;
       if (google) google.maximumScreenSpaceError = GOOGLE_SSE.still;
+      scene.requestRender();
     }, 400);
   });
+}
+
+// Draw only when something changes. Cesium redraws by itself when the
+// camera moves, a flight or inertia runs, or tiles and models arrive; a
+// still view then costs nothing, instead of redrawing the whole city 60
+// times a second, which kept phones hot and throttled and made every
+// gesture start late. Things that animate on their own ask for frames with
+// MC3D.keepRendering(key, fps): fps 0 = every frame, false = stop. Tours
+// (body.touring) always get every frame.
+scene.requestRenderMode = true;
+scene.maximumRenderTimeChange = Infinity;
+const keepAlive = new Map();
+function keepRendering(key, fps) {
+  if (fps === false || fps === undefined || fps === null) keepAlive.delete(key);
+  else keepAlive.set(key, fps);
+  scene.requestRender();
+}
+{
+  let lastReq = 0;
+  const pump = (now) => {
+    let interval = Infinity;
+    if (document.body.classList.contains("touring")) interval = 0;
+    for (const f of keepAlive.values()) interval = Math.min(interval, f > 0 ? 1000 / f : 0);
+    if (now - lastReq >= interval - 4) { scene.requestRender(); lastReq = now; }
+    requestAnimationFrame(pump);
+  };
+  requestAnimationFrame(pump);
+  // A button or key can change the scene without moving the camera (night,
+  // a view mode, a tour step): keep drawing for a moment after any input.
+  let uiTimer;
+  const poke = () => {
+    keepRendering("ui", 0);
+    clearTimeout(uiTimer);
+    uiTimer = setTimeout(() => keepRendering("ui", false), 1500);
+  };
+  for (const ev of ["click", "keydown", "keyup", "pointerdown", "pointerup", "wheel", "touchstart", "touchend"]) {
+    document.addEventListener(ev, poke, { capture: true, passive: true });
+  }
 }
 
 // Imagery: Sentinel-2 cloudless for the wide view, IGN 20 cm orthophoto near Monaco.
@@ -600,12 +639,33 @@ const hideHint = () => hint.classList.add("gone");
 setTimeout(hideHint, 12000);
 scene.canvas.addEventListener("pointerdown", () => setTimeout(hideHint, 4000), { once: true });
 
+// The menu folds into a small "Menu" button. On phones it folds away by
+// itself once you pick a place or a view, or start moving around, so the
+// city gets the whole screen; one tap brings it back.
+const panel = document.getElementById("panel");
+const panelToggle = document.getElementById("panel-toggle");
+function setPanel(open) {
+  panel.classList.toggle("collapsed", !open);
+  panelToggle.setAttribute("aria-expanded", String(open));
+  panelToggle.firstChild.textContent = open ? "Hide" : "Menu";
+  panelToggle.lastChild.textContent = open ? "▴" : "▾";
+}
+panelToggle.onclick = () => setPanel(panel.classList.contains("collapsed"));
+if (MOBILE) {
+  document.getElementById("panel-body").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    // Tours hide the menu anyway; the colour buttons are a quick switch.
+    if (b && !b.dataset.style && !b.classList.contains("tour-btn")) setTimeout(() => setPanel(false), 250);
+  });
+  scene.canvas.addEventListener("pointerdown", () => setPanel(false));
+}
+
 window.__viewer = viewer;
 
 // Shared handle for add-ons loaded after this file (tours.js, lap.js).
 window.MC3D = {
   viewer, view, PLACES, GEOID_N, setMode, getMode: () => mode, setTourQuality, setTourSpeed,
-  hideOpenData,
+  hideOpenData, keepRendering,
   setPhotorealOff: () => (document.body.classList.contains("photoreal") ? choosePhotoreal(false) : null),
   // The Google tileset while the photoreal view is shown, else null.
   getGoogle: () => (google && google.show ? google : null),

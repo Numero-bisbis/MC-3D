@@ -35,6 +35,14 @@ jobs:
           cp -r build/tiles _site/tiles
           cp -r build/surface _site/surface
           cp -r build/buildings _site/buildings
+      # The film set streams in square tiles, nearest first (see
+      # pipeline/split_filmset.mjs); cut here so the committed glb stays the
+      # one source.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci --prefix pipeline
+      - run: node pipeline/split_filmset.mjs viewer/filmset/monte-carlo.glb _site/filmset
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

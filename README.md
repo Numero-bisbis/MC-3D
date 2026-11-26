@@ -81,9 +81,13 @@ stylised model of Monte-Carlo, like a set for an animated film: Casino
 square, the Boulingrins gardens, Port Hercule, La Condamine and the slopes
 up to Beausoleil: the whole Grand Prix circuit, 1.5 × 1.5 km. Nothing in it comes from Google: shapes come
 from IGN LiDAR HD and BD TOPO, streets and gardens from OpenStreetMap, and
-every colour and texture is authored by us. It is one 7 MB file
-(`viewer/filmset/monte-carlo.glb`) that loads once and then runs from memory,
-so there is no tile streaming at all. Each building gets one of nine real
+every colour and texture is authored by us. It is built as one file
+(`viewer/filmset/monte-carlo.glb`, about 70 MB now). At deploy time the Pages
+workflow cuts it into 250 m square tiles (`pipeline/split_filmset.mjs`, needs
+`npm ci --prefix pipeline`), which stream in nearest to where the camera
+looks, so the set shows after a handful of tiles and the GPU skips the tiles
+off screen. Without the tiles (a local run, or `?onefile`) the viewer loads
+the single file. Each building gets one of nine real
 Monaco façade types (Belle Époque palace, arched Casino front, Riviera house
 with shutters, painted villa, 1930s, 1960s-80s loggias, 1970s tower with
 balcony bands, contemporary glass and fins, glass tower), chosen from its
