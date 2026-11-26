@@ -8871,10 +8871,11 @@ def palais_princier(m, gm, mntR, stats):
         g = _ground_min(F, mntR, s0, s1, t0, t1)
         return min(Z - 0.5, g - 0.5) if g is not None else Z - 0.5
 
-    def wing(s0, s1, t0, t1, eave, faces, rows=None, bay=3.6, roof_=True, arch_top=False, colw=None):
+    def wing(s0, s1, t0, t1, eave, faces, rows=None, bay=3.6, roof_=True, arch_top=False, colw=None, blank=()):
         """A plain wing: walls from the ground (it drops to the cliffs on
         the outside), a cornice, a hipped tiled roof, rows of windows with
-        white surrounds on the listed faces."""
+        white surrounds on the listed faces. blank: (face, a0, a1) stretches
+        left without windows (the court's façades are drawn on their own)."""
         nonlocal n_win
         cw = wall if colw is None else colw
         zb = gmin(s0, s1, t0, t1)
@@ -8893,6 +8894,8 @@ def palais_princier(m, gm, mntR, stats):
             for i, z_ in enumerate(zs):
                 for k in range(nb):
                     a = a0 + (k + 0.5) * (a1 - a0) / nb
+                    if any(f_ == face and b0_ - 1.0 <= a <= b1_ + 1.0 for f_, b0_, b1_ in blank):
+                        continue
                     gz = _ground_min(F, mntR, *((a, a, c, c) if face[1] == "t" else (c, c, a, a)), n=2)
                     if gz is not None and z_ < gz + 0.8:
                         continue
@@ -9074,8 +9077,8 @@ def palais_princier(m, gm, mntR, stats):
     wing(-27.0, 0.0, -63.0, -21.0, 17.0, ("-s",))
     wing(-50.0, -27.0, -21.0, -1.6, 15.5, ("-s",))
     wing(-48.0, -33.0, -90.0, -21.0, 14.0, ("-s", "-t"))
-    wing(-33.0, 25.0, -92.0, -63.0, 17.0, ("-t", "+t"))
-    wing(23.0, 37.0, -63.0, -21.0, 17.5, ("-s", "+s"))
+    wing(-33.0, 25.0, -92.0, -63.0, 17.0, ("-t", "+t"), blank=(("+t", -27.0, 25.0),))
+    wing(23.0, 37.0, -63.0, -21.0, 17.5, ("+s",))
     wing(37.0, 58.0, -62.0, -15.0, 8.0, ("+s", "-t"), rows=[Z + 3.4], roof_=False)
     F.balustrade("+s", 58.0, -62.0, -15.0, Z + 8.0, trim, h=0.9)
     wing(25.0, 45.0, -92.0, -62.0, 11.0, ("+s", "-t"))
@@ -9105,22 +9108,48 @@ def palais_princier(m, gm, mntR, stats):
         F.box(a - 0.18, a + 0.18, CT[0] + 2, CT[1] - 2, zc, zc + 0.02, pc, sides="")
     for b in np.linspace(CT[0] + 3, CT[1] - 3, 8):
         F.box(CS[0] + 2, CS[1] - 2, b - 0.18, b + 0.18, zc, zc + 0.02, pc, sides="")
-    # Court faces of the wings round it: frescoed ochre, rows of windows.
-    # The gate comes in through the east wing (-t at t -21); the north wing
-    # (-s at s 23) and the west end (+t at t -63) are plain ochre fronts.
+    # Court faces of the wings round it. The wings' own window rows stop
+    # short of the court (they used to double these), and the court's
+    # storeys line up with the Galerie d'Hercule opposite: a ground floor
+    # to the band at zc + 5.5, the piano nobile with pedimented windows,
+    # a painted frieze under the cornice at zc + 12, then the roofs. One
+    # bay rhythm on every face; between the upper windows the tall painted
+    # panels of the 16th-century frescoes, white pilaster strips at the
+    # corners. The gate comes in through the east wing (-t at t -21); the
+    # north wing (-s at s 23) and the west end (+t at t -63) are plain.
+    fresco = np.array(hexrgb("#c99d68"), float)
+    frieze = np.array(hexrgb("#d9b47e"), float)
+    zt_c = Z + 16.5
     for face, c, a0, a1 in (("-s", 23.0, -63.0, -21.0), ("-t", -21.0, 0.0, 23.0), ("+t", -63.0, 0.0, 23.0)):
-        F.face_quad(face, c, a0, a1, zc, Z + 16.5, court_wall, out=0.02)
-        nb = int(round((a1 - a0) / 3.8))
+        F.face_quad(face, c, a0, a1, zc, zt_c, court_wall, out=0.02)
+        F.slab(face, c, a0, a1, zc - 0.05, zc + 0.6, 0.12, court_wall * 0.9)                # plinth
+        F.slab(face, c, a0, a1, zc + 5.5, zc + 5.95, 0.3, trim)                             # floor band
+        F.slab(face, c, a0, a1, zc + 10.55, zc + 10.75, 0.12, trim)                         # frieze, below
+        F.face_quad(face, c, a0, a1, zc + 10.75, zc + 11.85, frieze, out=0.06)
+        F.slab(face, c, a0, a1, zc + 11.85, zt_c, 0.35, trim)                               # cornice
+        for e in (a0, a1):
+            F.slab(face, c, min(e, e + (0.6 if e == a0 else -0.6)), max(e, e + (0.6 if e == a0 else -0.6)),
+                   zc + 0.6, zc + 11.85, 0.1, trim)                                          # corner strips
+        # Windows and panels a few cm proud of the ochre (no flicker far off).
+        cw = c + (0.06 if face[0] == "+" else -0.06)
+        nb = max(1, int(round((a1 - a0 - 1.2) / 3.6)))
+        bw = (a1 - a0 - 1.2) / nb
         for k in range(nb):
-            a = a0 + (k + 0.5) * (a1 - a0) / nb
-            if face == "-t" and abs(a - 11.0) < 2.0:
-                F.window(face, c, a, 3.0, zc, zc + 2.8, 0, 0, frame=marble, arch=True, dark=True, sill=False)
-                continue
-            for i, z_ in enumerate((zc + 1.2, zc + 6.2, zc + 10.6)):
-                F.window(face, c, a, 1.2, z_, z_ + 2.2, k, i, frame=trim, arch=(i == 1))
-                n_win += 1
-            # Painted panels between the windows (the frescoes).
-            F.face_quad(face, c, a + 0.95, a + 1.7, zc + 5.4, zc + 9.4, np.array(hexrgb("#c99d68")), out=0.04)
+            a = a0 + 0.6 + (k + 0.5) * bw
+            gate = face == "-t" and abs(a - 11.0) < bw / 2
+            if gate:
+                F.window(face, cw, a, 3.0, zc, zc + 3.0, 0, 0, frame=marble, arch=True, dark=True, sill=False)
+            else:
+                F.window(face, cw, a, 1.25, zc + 1.5, zc + 3.9, k, 0, frame=trim)
+            F.window(face, cw, a, 1.35, zc + 6.7, zc + 9.5, k, 1, frame=trim, pediment=True)
+            n_win += 2 - gate
+            # The painted panel between this window and the next.
+            if k < nb - 1:
+                b = a + bw / 2
+                F.face_quad(face, c, b - 0.5, b + 0.5, zc + 6.4, zc + 10.2, fresco, out=0.08)
+                F.face_quad(face, c, b - 0.38, b + 0.38, zc + 6.6, zc + 10.0, frieze, out=0.12)
+            # A lighter cartouche in the frieze over each window.
+            F.face_quad(face, c, a - 0.7, a + 0.7, zc + 10.95, zc + 11.65, court_wall, out=0.1)
     # The south side of the court: the Galerie d'Hercule, two tiers of open
     # arcades along the whole south wing (it serves the south wing's rooms),
     # and in the middle the double-revolution staircase in Carrara marble
@@ -9129,19 +9158,26 @@ def palais_princier(m, gm, mntR, stats):
     G = Frame(m, F.xy(0.0, -21.0), -F.v)
     GL = 42.0
     G.face_quad("+t", 0.0, 0.0, GL, zc, Z + 17.0, court_wall, out=0.02)
-    nbay = 9
+    # Eleven bays (an arch in the middle for the stair to land on), arches
+    # with their crowns under the bands so the frescoes stay in the
+    # spandrels and the frieze, not over the glass.
+    nbay = 11
     bw_ = GL / nbay
+    aw = bw_ - 0.95
     for k in range(nbay):
         a = (k + 0.5) * bw_
-        G.window("+t", 0.0, a, 3.0, zc, zc + 3.2, k, 0, frame=trim, arch=True, dark=True, sill=False)
-        G.window("+t", 0.0, a, 3.0, zc + 6.0, zc + 9.2, k, 1, frame=trim, arch=True, dark=True, sill=False)
-        G.balustrade("+t", 0.3, a - 1.5, a + 1.5, zc + 6.0, trim, h=0.9, depth=0.25)
-        # Frescoed panels over the upper arches (Hercules' labours).
-        G.face_quad("+t", 0.0, a - 1.6, a + 1.6, zc + 9.9, zc + 11.6, np.array(hexrgb("#c99d68")), out=0.04)
+        G.window("+t", 0.12, a, aw, zc, zc + 5.5 - aw / 2 - 0.45, k, 0, frame=trim, arch=True, dark=True,
+                 sill=False, band=0.2)
+        G.window("+t", 0.12, a, aw, zc + 6.0, zc + 10.55 - aw / 2 - 0.3, k, 1, frame=trim, arch=True, dark=True,
+                 sill=False, band=0.2)
+        G.balustrade("+t", 0.3, a - aw / 2, a + aw / 2, zc + 6.0, trim, h=0.9, depth=0.25)
+        # Frescoed panels in the frieze over the upper arches (Hercules' labours).
+        G.face_quad("+t", 0.0, a - 1.3, a + 1.3, zc + 10.75, zc + 11.85, fresco, out=0.08)
         if k < nbay - 1:
-            G.slab("+t", 0.0, a + bw_ / 2 - 0.45, a + bw_ / 2 + 0.45, zc, Z + 15.5, 0.2, trim)
+            G.slab("+t", 0.0, a + bw_ / 2 - 0.22, a + bw_ / 2 + 0.22, zc, zc + 10.55, 0.2, trim)
     G.slab("+t", 0.0, 0.0, GL, zc + 5.5, zc + 6.0, 0.6, trim)
-    G.slab("+t", 0.0, 0.0, GL, zc + 12.0, zc + 12.4, 0.35, trim)
+    G.slab("+t", 0.0, 0.0, GL, zc + 10.55, zc + 10.75, 0.12, trim)
+    G.slab("+t", 0.0, 0.0, GL, zc + 11.85, Z + 17.0, 0.35, trim)
     # Staircase: a landing on the middle arch, two flights curving out and
     # down, their feet turned into the court (as at Fontainebleau), black
     # Portor balls along the marble rail.

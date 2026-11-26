@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6840998,
+ "triangles": 6836474,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -127,7 +127,7 @@
  "palace": {
   "square": 62.47,
   "court": 66.51,
-  "windows": 590
+  "windows": 488
  },
  "palace_cannons": 7,
  "stade_wall_m": 730,
