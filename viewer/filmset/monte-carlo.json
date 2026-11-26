@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6836474,
+ "triangles": 6829314,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -55,15 +55,15 @@
    ]
   ]
  },
- "buildings": 2908,
+ "buildings": 2907,
  "dropped": 61,
  "rooftop": 127,
  "roof_plants": 106,
- "levels": 2910,
+ "levels": 2909,
  "towers": 10,
  "trees": 3830,
  "yachts": 942,
- "real_floors": 1336,
+ "real_floors": 1335,
  "styles": [
   565,
   272,
@@ -71,20 +71,26 @@
   663,
   643,
   134,
-  2,
+  1,
   187,
   433
  ],
  "balconies": 1079,
- "shop_buildings": 224,
+ "shop_buildings": 223,
  "prison": {
   "roof": 48.6,
   "windows": 46
  },
- "landmarks": 11,
+ "landmarks": 12,
  "verandas": 3,
  "hdp": 1,
  "casino_halls": 6,
+ "rascasse": {
+  "arches": 15,
+  "bays": 39,
+  "ground": 1.8,
+  "eave": 8.2
+ },
  "heracles_wings": {
   "south": {
    "base": 3.59,
@@ -140,9 +146,9 @@
   15.8,
   20.7
  ],
- "photo_facade_colours": 57,
- "photo_facade_types": 40,
- "photo_roofs": 2833,
+ "photo_facade_colours": 56,
+ "photo_facade_types": 39,
+ "photo_roofs": 2832,
  "photo_lean": [
   0.010000000000000342,
   -0.019999999999999685
@@ -175,7 +181,7 @@
  "road_m": 82250,
  "kerb_m": 63101,
  "lamps": 1851,
- "spectators": 5638,
+ "spectators": 5551,
  "sidewalk_m2": 56809,
  "kerb_stone_m": 13051,
  "kerb_red_white_m": 820,
@@ -196,7 +202,7 @@
  "statues": 33,
  "flags": 27,
  "sky_mirror": 1,
- "quai_wall_m": 548,
+ "quai_wall_m": 547,
  "quai_steps": 2,
  "quai_pines": 35,
  "fairmont_roof_trees": 19,
@@ -250,7 +256,7 @@
  "park_paved_m2": 4534,
  "parks": 44,
  "track_clear": true,
- "roof_kit": 4172,
+ "roof_kit": 4160,
  "roof_texels_per_m": 3.27,
  "sources": [
   "IGN LiDAR HD MNT/MNS (Etalab 2.0)",

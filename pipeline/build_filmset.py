@@ -3504,6 +3504,10 @@ def buildings(m, feats, mns, mnt, ortho, stats, facades, photo=None):
             if key == CHAPITEAU:
                 footprint.append(chapiteau(m, mntR, stats))
                 continue
+            if key == RASCASSE:
+                footprint.append(rascasse(m, mntR, stats))
+                stats["landmarks"] = stats.get("landmarks", 0) + 1
+                continue
             if key == JUSTICE:
                 footprint.append(palais_justice(m, mntR, stats))
                 stats["landmarks"] = stats.get("landmarks", 0) + 1
@@ -10823,6 +10827,265 @@ def palais_justice(m, mntR, stats):
                    bottom=True)
     stats["palais_justice"] = {"windows": n_win, "steps": steps, "landing": round(zl, 2), "eave": PJ_EAVE}
     return poly
+
+
+
+# ------------------------------------------------------- La Rascasse ----
+# The bar at the Rascasse hairpin (1 Quai Antoine 1er), a former fishermen's
+# hut on the quay inside the corner. Street photos (Mapillary 2771717106382261
+# and 181370737207077, 2018, from the quay; 3502114146555790, 2019) and the
+# LiDAR (2021) give: one long block of sandy cream stucco, about 30 x 12.5 m,
+# its east end round (the hairpin wraps round it); a dark glazed ground floor
+# under a stone band; an upper floor of big round arches; a terracotta tiled
+# pent roof all round (eaves 8.2 m NGF) round a roof terrace under white
+# awnings and parasols (9-10 m in the LiDAR); the dark brown "LA RASCASSE"
+# board on the tiles facing the harbour; a living green wall and a small
+# arched window toward the east end of the harbour side; a chimney with a
+# tiled cap. On the harbour side a one-storey glass room stands out from the
+# ground floor, its roof a terrace (4.9 m) behind a black glass railing.
+# BD TOPO 74074372 has only the middle of it.
+RASCASSE = "BATIMENT0000000074074372"
+RAS_O = (1056231.8, 6302584.6)               # the south wall's west end (BD TOPO)
+RAS_U = (27.2, 6.4)                          # along the south wall, west to east
+RAS_W = 12.5                                 # m, the block's depth (LiDAR)
+RAS_S0, RAS_S1 = -1.5, 23.5                  # the straight walls; the round end beyond
+RAS_EAVE = 8.2                               # m NGF
+RAS_FLOOR = 5.0                              # the upper floor (and the glass room's roof)
+RAS_ANNEX = (9.0, 25.0, 6.0)                 # the glass room: s from, s to, depth out (north)
+RAS_STUCCO = "#e8d5ae"                       # sandy cream (photos)
+RAS_STONE = "#efe3c8"                        # bands, arch surrounds, piers
+RAS_TILE = "#b65a3a"
+RAS_BOARD = "#3a2723"                        # the sign: dark brown, pale letters
+
+# A 3 x 5 pixel font, enough for the sign.
+_RAS_FONT = {"L": ("100", "100", "100", "100", "111"), "A": ("010", "101", "111", "101", "101"),
+             "R": ("110", "101", "110", "101", "101"), "S": ("011", "100", "010", "001", "110"),
+             "C": ("011", "100", "100", "100", "011"), "E": ("111", "100", "110", "100", "111"), " ": ()}
+
+
+def ras_outline(off=0.0, n_end=14):
+    """The block's plan in its frame (s along, t south: t = 0 the south
+    wall, t = -RAS_W the harbour side), offset outward by `off`, as (s, t)
+    points anticlockwise in plan (east is +s, north is -t)."""
+    r = RAS_W / 2 + off
+    tc = -RAS_W / 2
+    pts = [(RAS_S0 - off, -RAS_W - off), (RAS_S1, -RAS_W - off)]
+    # Round the east end, from the harbour side to the south wall.
+    for th in np.linspace(-math.pi / 2, math.pi / 2, n_end + 1)[1:-1]:
+        pts.append((RAS_S1 + r * math.cos(th), tc + r * math.sin(th)))
+    pts += [(RAS_S1, off), (RAS_S0 - off, off)]
+    return pts
+
+
+def ras_sign(F, s0, t, z0, text, h=0.5, out=-1.0, board=None):
+    """A sign board on F's face t (facing out = -1: toward -t, +1: +t),
+    centred on s0, its letters as pale pixels. Returns the board's width."""
+    px = h / 5.0
+    cw = 4 * px
+    W = len(text) * cw + 2 * px
+    pale = np.array(hexrgb("#efe6d2"), float)
+    bc = np.array(hexrgb(board or RAS_BOARD), float)
+    a = s0 - W / 2
+    F.box(a - 0.15, a + W + 0.15, t - 0.08, t + 0.08, z0, z0 + h + 0.5, bc, bottom=True)
+    face = t + out * 0.1
+    for i, ch in enumerate(text):
+        rows = _RAS_FONT.get(ch, ())
+        for r_, row in enumerate(rows):
+            for c_, bit in enumerate(row):
+                if bit != "1":
+                    continue
+                # Read left to right from in front: toward +s when the board
+                # faces +t, toward -s when it faces -t.
+                k = i * 4 + c_ + 1
+                sa = a + k * px if out > 0 else a + W - (k + 1) * px
+                za = z0 + 0.25 + (4 - r_) * px
+                F.box(sa, sa + px * 0.92, face - 0.02, face + 0.02, za, za + px * 0.92, pale, top=False,
+                      sides="t" if out < 0 else "T")
+    return W
+
+
+def rascasse(m, mntR, stats):
+    """La Rascasse, built piece by piece. Returns its plan (with the glass
+    room) for the building mask."""
+    F = Frame(m, RAS_O, RAS_U)
+    stucco = np.array(hexrgb(RAS_STUCCO), float)
+    stone = np.array(hexrgb(RAS_STONE), float)
+    tile = np.array(hexrgb(RAS_TILE), float)
+    iron = np.array(hexrgb("#1f2326"), float)
+    dark = np.array(hexrgb("#2b3034"), float)
+    wood = np.array(hexrgb("#8a6a4c"), float)
+    white = np.array(hexrgb("#f3efe6"), float)
+    green = np.array(hexrgb("#4d6b34"), float)
+    st = ras_outline()
+    poly = orient(Polygon([F.xy(*p) for p in st]), 1.0)
+    P = np.asarray(poly.exterior.coords)
+    gz = mntR.sample(P[:, 0], P[:, 1])
+    gmin = float(np.nanmin(gz)) if np.isfinite(gz).any() else 1.9
+    base = gmin - 0.6
+    n_arch = n_bay = 0
+    # The walls, face by face (outline anticlockwise: each face's own t is out).
+    for a, b in zip(P[:-1], P[1:]):
+        L = float(np.hypot(*(b - a)))
+        if L < 0.05:
+            continue
+        Fw = Frame(m, a, b - a)
+        mid = Fw.xy(L / 2, 1.0)
+        g_ = mntR.sample(np.array([mid[0], a[0], b[0]]), np.array([mid[1], a[1], b[1]]))
+        zg = float(np.nanmax(g_)) if np.isfinite(g_).any() else gmin
+        zg = min(max(zg, gmin), RAS_FLOOR - 2.0)
+        # Plinth, the dark glazed ground floor between stone piers, the
+        # band at the upper floor, the stucco up to the eaves.
+        Fw.quad((0, 0, base), (L, 0, base), (L, 0, zg + 0.35), (0, 0, zg + 0.35), stone * 0.92, (0, 1, 0))
+        Fw.quad((0, -0.25, zg + 0.35), (L, -0.25, zg + 0.35), (L, -0.25, RAS_FLOOR - 0.1), (0, -0.25, RAS_FLOOR - 0.1),
+                dark, (0, 1, 0))
+        Fw.quad((0, 0, zg + 0.35), (L, 0, zg + 0.35), (L, -0.25, zg + 0.35), (0, -0.25, zg + 0.35), stone, (0, 0, 1))
+        nb = max(1, int(round(L / 2.6)))
+        for k in range(nb + 1):
+            s_ = k * L / nb
+            Fw.box(s_ - 0.22, s_ + 0.22, -0.25, 0.02, zg + 0.35, RAS_FLOOR - 0.1, stone, top=False)
+        for k in range(nb):
+            s_ = (k + 0.5) * L / nb
+            Fw.glass("+t", -0.24, s_ - (L / nb) / 2 + 0.25, s_ + (L / nb) / 2 - 0.25, zg + 0.4, RAS_FLOOR - 0.6, k, 0)
+            Fw.box(s_ - 0.03, s_ + 0.03, -0.24, -0.18, zg + 0.4, RAS_FLOOR - 0.6, iron, top=False)
+            n_bay += 1
+        Fw.box(-0.02, L + 0.02, -0.02, 0.18, RAS_FLOOR - 0.6, RAS_FLOOR + 0.05, stone, bottom=True)
+        Fw.quad((0, 0, RAS_FLOOR - 0.1), (L, 0, RAS_FLOOR - 0.1), (L, 0, RAS_EAVE), (0, 0, RAS_EAVE), stucco, (0, 1, 0))
+        Fw.box(-0.02, L + 0.02, -0.02, 0.12, RAS_EAVE - 0.35, RAS_EAVE, stone)
+    # The upper floor's arches: on the straight faces in their own frames,
+    # round the east end on tangent frames.
+    zs = RAS_EAVE - 1.75                       # springing line
+    def arches(Fa, c, s_list, w, out_face):
+        nonlocal n_arch
+        for k, s_ in enumerate(s_list):
+            Fa.window(out_face, c, s_, w, RAS_FLOOR + 0.35, zs, k, 1, frame=stone, arch=True, depth=0.1, band=0.25,
+                      sill=False)
+            # A transom and a mullion: the arches are glazed doors.
+            Fa.slab(out_face, c, s_ - w / 2, s_ + w / 2, zs - 0.08, zs + 0.04, 0.06, iron)
+            Fa.slab(out_face, c, s_ - 0.04, s_ + 0.04, RAS_FLOOR + 0.35, zs, 0.06, iron)
+            n_arch += 1
+    # South (track) side: t = 0 faces +t.
+    arches(F, 0.0, [1.0 + 3.9 * k for k in range(6)], 2.5, "+t")
+    # Harbour side: t = -RAS_W faces -t; arches to the green wall, then the
+    # small arched window.
+    arches(F, -RAS_W, [1.2 + 3.7 * k for k in range(4)], 2.6, "-t")
+    F.window("-t", -RAS_W, 21.0, 1.0, RAS_FLOOR + 1.0, zs + 0.2, 0, 1, frame=stone, arch=True, depth=0.08, band=0.18)
+    # The west end, on the climb from the quay: two arches.
+    arches(F, RAS_S0, [-9.3, -3.2], 2.4, "-s")
+    # The living wall, from the glass room's roof to under the eaves.
+    gw0, gw1 = 15.6, 18.6
+    F.box(gw0, gw1, -RAS_W - 0.35, -RAS_W + 0.01, RAS_FLOOR + 0.1, RAS_EAVE - 0.4, green, bottom=True)
+    rnd = rng_for(RASCASSE)
+    for k in range(40):
+        s_ = rnd.uniform(gw0 + 0.1, gw1 - 0.3)
+        z_ = rnd.uniform(RAS_FLOOR + 0.3, RAS_EAVE - 0.8)
+        F.box(s_, s_ + rnd.uniform(0.2, 0.45), -RAS_W - 0.45, -RAS_W - 0.3, z_, z_ + rnd.uniform(0.2, 0.4),
+              green * rnd.uniform(0.75, 1.15), bottom=True)
+    # The round end: three arches on its tangents.
+    r = RAS_W / 2
+    for th in (-math.radians(55), 0.0, math.radians(55)):
+        c = np.array([RAS_S1 + r * math.cos(th), -RAS_W / 2 + r * math.sin(th)])
+        q = F.xy(*c)
+        # Tangent along the wall (anticlockwise in plan) and out.
+        ds = np.array([-math.sin(th), math.cos(th)])
+        tan_xy = F.xy(*(c + ds)) - q
+        Ft = Frame(m, q, tan_xy)
+        arches(Ft, 0.12, [0.0], 2.2, "+t")
+    # The tiled pent roof: from the eaves line 0.55 m out up to 1.8 m in.
+    eave = ras_outline(0.55)
+    inner = ras_outline(-1.8)
+    zr = RAS_EAVE + 0.75
+    for i in range(len(eave)):
+        j = (i + 1) % len(eave)
+        e0, e1, i0, i1 = eave[i], eave[j], inner[i], inner[j]
+        ctr = np.mean([e0, e1, i0, i1], 0)
+        # Out: away from the terrace's middle.
+        mid = np.array([min(max(ctr[0], RAS_S0 + 3), RAS_S1), -RAS_W / 2])
+        n_ = ctr - mid
+        n_ = n_ / max(1e-6, np.linalg.norm(n_))
+        F.tri((*e0, RAS_EAVE - 0.05), (*e1, RAS_EAVE - 0.05), (*i1, zr), tile, (n_[0] * 0.75, n_[1] * 0.75, 2.4),
+              ROOF_TILE)
+        F.tri((*e0, RAS_EAVE - 0.05), (*i1, zr), (*i0, zr), tile, (n_[0] * 0.75, n_[1] * 0.75, 2.4), ROOF_TILE)
+        # The soffit under the overhang, and the tiles' front edge.
+        w0, w1 = ras_outline(0.0)[i], ras_outline(0.0)[j]
+        F.quad((*w0, RAS_EAVE - 0.12), (*w1, RAS_EAVE - 0.12), (*e1, RAS_EAVE - 0.12), (*e0, RAS_EAVE - 0.12),
+               np.array(hexrgb("#d9c49c"), float), (0, 0, -1))
+        F.quad((*e0, RAS_EAVE - 0.12), (*e1, RAS_EAVE - 0.12), (*e1, RAS_EAVE - 0.02), (*e0, RAS_EAVE - 0.02),
+               tile * 0.8, (n_[0], n_[1], 0))
+        # The terrace's parapet behind the tiles.
+        F.quad((*i0, zr), (*i1, zr), (*i1, zr + 0.35), (*i0, zr + 0.35), stucco * 0.95, (-n_[0], -n_[1], 0))
+    # The terrace: wooden deck, a white canvas pergola, parasols, planters.
+    tpoly = orient(Polygon([F.xy(*p) for p in inner]), 1.0)
+    add_roof(m, tpoly, zr - 0.1, wood, False)
+    zt = zr - 0.1
+    # Pergola over the middle (the LiDAR's 9.8-10 m ridge): slim posts, canvas.
+    pg = (6.0, 17.5, -RAS_W + 3.0, -3.0)
+    for s_ in np.linspace(pg[0], pg[1], 5):
+        for t_ in (pg[2], pg[3]):
+            F.box(s_ - 0.06, s_ + 0.06, t_ - 0.06, t_ + 0.06, zt, zt + 2.7, iron, top=False)
+    F.box(pg[0] - 0.1, pg[1] + 0.1, pg[2] - 0.1, pg[3] + 0.1, zt + 2.7, zt + 2.82, white, bottom=True)
+    for (s_, t_) in ((2.5, -4.0), (2.5, -8.5), (21.5, -4.5), (21.5, -8.0), (25.5, -6.25)):
+        F.box(s_ - 0.04, s_ + 0.04, t_ - 0.04, t_ + 0.04, zt, zt + 2.5, np.array(hexrgb("#b9b2a4"), float),
+              top=False)
+        q = F.xy(s_, t_)
+        sq = orient(Polygon([F.xy(s_ + dx, t_ + dy) for dx, dy in ((1.3, 1.3), (-1.3, 1.3), (-1.3, -1.3), (1.3, -1.3))]),
+                    1.0)
+        add_cap(m, sq, zt + 2.2, 0.4, white, PLAIN)
+        add_roof(m, orient(sq, -1.0), zt + 2.2, white * 0.78, False)
+        # A low table and stools under it.
+        F.box(s_ - 0.45, s_ + 0.45, t_ - 0.45, t_ + 0.45, zt + 0.42, zt + 0.48, white * 0.95, bottom=True)
+    for (s_, t_) in ((0.0, -1.0), (0.0, -RAS_W + 1.0), (5.0, -1.0), (5.0, -RAS_W + 1.0), (19.0, -1.0),
+                     (19.0, -RAS_W + 1.0)):
+        F.box(s_ - 0.45, s_ + 0.45, t_ - 0.35, t_ + 0.35, zt, zt + 0.55, stone * 0.95)
+        F.box(s_ - 0.38, s_ + 0.38, t_ - 0.3, t_ + 0.3, zt + 0.55, zt + 1.2, green * 0.9)
+    # The chimney with its tiled cap (harbour side, toward the east end).
+    F.box(19.6, 20.5, -RAS_W + 1.0, -RAS_W + 1.9, RAS_EAVE, zr + 1.5, stucco)
+    Fc = Frame(m, F.xy(20.05, -RAS_W + 1.45), RAS_U)
+    Fc.gable_roof(-0.6, 0.6, -0.6, 0.6, zr + 1.5, 0.35, tile, wall=stucco)
+    # The sign on the tiles facing the harbour, and one over the track.
+    ras_sign(F, 6.0, -RAS_W - 0.2, RAS_EAVE + 0.05, "LA RASCASSE", h=0.8, out=-1.0)
+    ras_sign(F, 8.0, 0.2, RAS_EAVE + 0.05, "LA RASCASSE", h=0.8, out=1.0)
+    # The glass room on the harbour side, its roof a terrace.
+    a0, a1, dep = RAS_ANNEX
+    t0, t1 = -RAS_W - dep, -RAS_W
+    q = np.array([F.xy(s_, t0 - 1.0) for s_ in (a0, (a0 + a1) / 2, a1)])
+    ga = mntR.sample(q[:, 0], q[:, 1])
+    za = float(np.nanmin(ga)) if np.isfinite(ga).any() else gmin
+    F.box(a0, a1, t0, t1, za - 0.5, za + 0.25, stone * 0.92, top=True)
+    for face, c, s0_, s1_ in (("-t", t0, a0, a1), ("-s", a0, t0, t1), ("+s", a1, t0, t1)):
+        L = s1_ - s0_
+        nb = max(1, int(round(L / 1.6)))
+        for k in range(nb):
+            u0, u1 = s0_ + k * L / nb, s0_ + (k + 1) * L / nb
+            F.glass(face, c, u0 + 0.05, u1 - 0.05, za + 0.25, RAS_FLOOR - 0.55, k, 0)
+        for k in range(nb + 1):
+            u_ = s0_ + k * L / nb
+            if face[1] == "t":
+                F.box(u_ - 0.06, u_ + 0.06, c - 0.08, c + 0.04, za + 0.25, RAS_FLOOR - 0.5, iron, top=False)
+            else:
+                sg = 1.0 if face[0] == "+" else -1.0
+                F.box(c - 0.04 * sg, c + 0.08 * sg, u_ - 0.06, u_ + 0.06, za + 0.25, RAS_FLOOR - 0.5, iron, top=False)
+    F.box(a0 - 0.15, a1 + 0.15, t0 - 0.15, t1, RAS_FLOOR - 0.55, RAS_FLOOR - 0.1, stone, bottom=True)
+    F.box(a0, a1, t0, t1, RAS_FLOOR - 0.1, RAS_FLOOR - 0.04, wood)
+    # Its black glass railing, and planters with palms along the front.
+    for (s0_, t0_, s1_, t1_) in ((a0, t0, a1, t0), (a0, t0, a0, t1), (a1, t0, a1, t1)):
+        if s0_ == s1_:
+            F.box(s0_ - 0.03, s0_ + 0.03, t0_, t1_, RAS_FLOOR - 0.1, RAS_FLOOR + 1.0, np.array(hexrgb("#262c30"), float))
+        else:
+            F.box(s0_, s1_, t0_ - 0.03, t0_ + 0.03, RAS_FLOOR - 0.1, RAS_FLOOR + 1.0, np.array(hexrgb("#262c30"), float))
+    for s_ in np.linspace(a0 + 1.2, a1 - 1.2, 5):
+        F.box(s_ - 0.4, s_ + 0.4, t0 + 0.4, t0 + 1.1, RAS_FLOOR - 0.1, RAS_FLOOR + 0.5, iron)
+        x, y = F.xy(s_, t0 + 0.75)
+        _cyl(m, x, y, RAS_FLOOR + 0.5, RAS_FLOOR + 2.4, 0.07, np.array(hexrgb("#6b5a44"), float), 6)
+        for k in range(6):
+            th = k * math.pi / 3 + 0.3
+            F.tri((s_, t0 + 0.75, RAS_FLOOR + 2.4),
+                  (s_ + 1.1 * math.cos(th) - 0.15 * math.sin(th), t0 + 0.75 + 1.1 * math.sin(th) + 0.15 * math.cos(th),
+                   RAS_FLOOR + 1.9),
+                  (s_ + 1.1 * math.cos(th) + 0.15 * math.sin(th), t0 + 0.75 + 1.1 * math.sin(th) - 0.15 * math.cos(th),
+                   RAS_FLOOR + 1.9), green, (0, 0, 1), LEAF)
+    room = orient(Polygon([F.xy(a0, t0), F.xy(a1, t0), F.xy(a1, t1), F.xy(a0, t1)]), 1.0)
+    stats["rascasse"] = {"arches": n_arch, "bays": n_bay, "ground": round(gmin, 2), "eave": RAS_EAVE}
+    return orient(unary_union([poly, room]).buffer(0.05, join_style=2), 1.0)
 
 
 def rocher_ramparts(m, ways, pts, mnt, stats):
