@@ -13351,15 +13351,38 @@ def stade_louis_ii(m, mns, mntR, photo, outline, stats):
         zi = S.sample(gx[ins], gy[ins]) if ins.any() else np.array([np.nan])
         ring = q.buffer(-1.2).exterior if isinstance(q.buffer(-1.2), Polygon) else q.exterior
         rp = shapely.line_interpolate_point(ring, np.linspace(0, 1, 80), normalized=True)
-        ze = S.sample(shapely.get_x(rp), shapely.get_y(rp))
-        eave = float(np.nanpercentile(ze, 20)) if np.isfinite(ze).any() else 31.0
-        top = float(np.nanpercentile(zi, 97)) if np.isfinite(zi).any() else eave + 4
-        eave = min(max(eave, zp + 4.0), 40.0)
-        top = max(top, eave + 1.0)
+        rx, ry = shapely.get_x(rp), shapely.get_y(rp)
+        ze = S.sample(rx, ry)
+        # The roofs fall away from the pitch (LiDAR: 41 m NGF at the front
+        # edge, 35-37 m at the back): the eaves lie on a plane fitted to the
+        # LiDAR round the piece, leaving out the open strip over the front
+        # rows (the pitch's level there would drag the roof down onto the seats).
+        up_ = np.isfinite(ze) & (ze > zp + 6.0)
+        if up_.sum() >= 12:
+            Am = np.column_stack([np.ones(up_.sum()), rx[up_] - rx.mean(), ry[up_] - ry.mean()])
+            coef = np.linalg.lstsq(Am, ze[up_], rcond=None)[0]
+            # A little under the LiDAR's eaves, which catch the gutters.
+            coef[0] -= 0.4
+        else:
+            coef = np.array([31.0, 0.0, 0.0])
+        cx_, cy_ = rx.mean(), ry.mean()
+
+        def eplane(x, y, coef=coef, cx_=cx_, cy_=cy_):
+            return np.clip(coef[0] + coef[1] * (np.asarray(x) - cx_) + coef[2] * (np.asarray(y) - cy_), zp + 4.0, 42.0)
+        qc = np.asarray(q.exterior.coords)[:, :2]
+        ec = eplane(qc[:, 0], qc[:, 1])
+        eave = float(ec.min())
+        # The hips rise from there to the LiDAR's top for the piece.
+        zin = zi - eplane(gx[ins], gy[ins]) if ins.any() else np.array([np.nan])
+        hip = float(np.nanpercentile(zin, 97)) if np.isfinite(zin).any() else 3.0
+        hip = min(max(hip, 1.0), 8.0)
         eaves.append(eave)
-        zg = mntR.sample(*np.asarray(q.exterior.coords)[:, :2].T)
+        zg = mntR.sample(*qc.T)
         base_ = float(np.nanmin(zg)) if np.isfinite(zg).any() else 5.0
-        rs = skeleton_roof(q, eave, slope, (top - eave) / slope, dt=0.5)
+        rs = skeleton_roof(q, 0.0, slope, hip / slope, dt=0.5)
+        if rs is not None:
+            v_, zz_, tri_ = rs
+            rs = (v_, zz_ + eplane(v_[:, 0], v_[:, 1]), tri_)
         if rs is None:
             add_roof(m, q, eave, hexrgb("#c8754a"), False)
         else:
@@ -13368,7 +13391,7 @@ def stade_louis_ii(m, mns, mntR, photo, outline, stats):
             if photo is not None:
                 lx, ly = photo["lean"]
                 ph = dict(photo, shift=((eave - base_) * lx, (eave - base_) * ly))
-                dz = zz - eave
+                dz = zz - eplane(v[:, 0], v[:, 1])
                 uv = np.column_stack([v[:, 0] - X0 + dz * lx, Y1 - v[:, 1] - dz * ly])
                 photo["mesh"].tri(P[tri[:, 0]], P[tri[:, 1]], P[tri[:, 2]], [255, 255, 255], ROOF_FLAT,
                                   uv=np.stack([uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]], 1), style=PHOTO_ROOF)
@@ -13380,7 +13403,7 @@ def stade_louis_ii(m, mns, mntR, photo, outline, stats):
         rl = q.exterior
         n_ = max(4, int(rl.length / 1.0))
         rq = shapely.line_interpolate_point(rl, np.linspace(0, rl.length, n_, endpoint=False))
-        edges.append((shapely.get_x(rq), shapely.get_y(rq), np.full(n_, eave)))
+        edges.append((shapely.get_x(rq), shapely.get_y(rq), eplane(shapely.get_x(rq), shapely.get_y(rq))))
     if not edges:
         return outline
     outer = outline.exterior
@@ -13401,10 +13424,8 @@ def stade_louis_ii(m, mns, mntR, photo, outline, stats):
                 j = np.r_[r_, r_[-1] + 1]
                 xs, ys, zt = bx[j], by[j], ze[j]
                 if kind_ == "cut":
-                    # Between two roof pieces: a gable wall up to this one's
-                    # eave (hidden where the neighbour is as high).
-                    for sg_ in (1, -1):
-                        _strip_wall(m, xs[::sg_], ys[::sg_], np.full(len(xs), 5.0), zt[::sg_], frame_c * 0.95)
+                    # Between two roof pieces: both eaves lie on the LiDAR's
+                    # plane, so no gable wall (one hung under the roofs, over the seats).
                     continue
                 if kind_ == "out":
                     zb = mntR.sample(xs, ys)
@@ -13418,14 +13439,16 @@ def stade_louis_ii(m, mns, mntR, photo, outline, stats):
                     # edge over the three roofed stands (their seating is
                     # built by stade_stands), pale concrete elsewhere.
                     s_, t_ = F_st(F, xs, ys)
-                    main = bool(np.all((np.abs(t_ - STADE_NW) < 0.8) | (np.abs(t_ - STADE_SE) < 0.8)
-                                       | (np.abs(s_ - STADE_NE) < 0.8)))
+                    main = bool(np.all((np.abs(t_ - STADE_NW) < 4.5) | (np.abs(t_ - STADE_SE) < 4.5)
+                                       | (np.abs(s_ - STADE_NE) < 4.5)))
                     zb = (zt - 2.6) if main else np.full(len(xs), zp)
                     away = 2 * np.array([xs.mean(), ys.mean()]) - ctr      # face the pitch
                     _strip_wall(m, xs, ys, zb, zt, frame_c if main else concrete, out=away)
     stats["stade_wall_m"] = n_out
     stade_floor(F, m, zp)
-    stade_stands(F, m, mns, seat, white, dark, frame_c)
+    rows_, n_seat = stade_stands(F, m, S, outline, seat, white, dark, frame_c)
+    print('stade stands rows', rows_, 'seat pieces', n_seat)
+    stats['stade_seat_pieces'] = n_seat
     stade_away(F, m, zp, white)
     stats["landmarks"] = stats.get("landmarks", 0) + 1
     stats["stade_louis_ii"] = 1
@@ -13515,62 +13538,270 @@ def stade_floor(F, m, zp):
         arc(c_s, c_t, r_, math.pi - th_, math.pi + th_, 20)
 
 
-def stade_stands(F, m, mns, seat, white, dark, frame_c):
-    """Under the three roofs: raked rows of red seats (white every few rows),
-    a dark back wall and a grey soffit up to the cream fascia."""
-    zp = STADE_PITCH_Z
-    S = _MNS_S.get(id(mns))
-    if S is None:
-        return
-    soffit_c = np.array(hexrgb("#8f8a82"), float)
-    stair = np.array(hexrgb("#9a948a"), float)
-    # (front line: along a, at c; out: +1/-1 = which way the stand climbs;
-    # axis "t": the row runs along s at t = c; "s": runs along t at s = c).
-    sides = [("t", STADE_NW, -1, STADE_SW + 2, STADE_NE - 2, 22.0),
-             ("t", STADE_SE, +1, STADE_SW + 2, STADE_NE - 2, 22.0),
-             ("s", STADE_NE, +1, STADE_NW + 2, STADE_SE - 2, 16.0)]
-    for ax, c, out, a0, a1, depth in sides:
-        def P(a, d, z):
-            return (a, c + out * d, z) if ax == "t" else (c + out * d, a, z)
+# The three roofed stands as one horseshoe of rows: the two long stands and
+# the north-east end share every row's offset and height, so the rows meet
+# on the diagonal in the corners (the "secondes"). LiDAR: the roofs fall
+# away from the pitch, 41 m NGF at the front edge to 35-37 m at the back
+# over the long stands, 32 to 26 m over the end; the building runs 34 m
+# back from the stands' fronts. Rows 0.8 m deep, 0.46 m rise (30 deg),
+# a lower tier, a landing in front of a band of glazed boxes, then the
+# upper tier up under the roof. Seats: red with white scattered through
+# them, the red lighter toward the top (the 2025 red-and-white mosaic).
+STADE_ROW = (0.8, 0.46)
+STADE_LOWER = 20                         # rows in the lower tier
+STADE_BOX = (2.2, 2.8)                   # the landing's depth, the box band's height
+STADE_GAP = 2.3                          # clear height kept under the roof
+STADE_AISLE = 14.0
 
-        def n_(dd, dz):
-            return (0, out * dd, dz) if ax == "t" else (out * dd, 0, dz)
-        # Roof underside height along the back of the stand.
-        aa = np.linspace(a0, a1, 40)
-        pts = [F.xy(*P(a, depth, 0)[:2]) for a in aa] + [F.xy(*P(a, 0.5, 0)[:2]) for a in aa]
-        zz = np.array([S[int((Y1 - y) / RES), int((x - X0) / RES)] for x, y in pts])
-        z_back = float(np.percentile(zz[:40], 5)) - 1.2
-        z_front = float(np.percentile(zz[40:], 5)) - 2.6
-        rd, rise = 0.8, 0.42
-        nrow = int(depth / rd)
-        z0 = zp + 1.4
-        d_top = rd
-        # Front wall (the barrier) from the pitch to the first row.
-        F.quad(P(a0, 0, zp), P(a1, 0, zp), P(a1, 0, z0), P(a0, 0, z0), frame_c, n_(-1, 0))
-        z_top = z0
-        for k in range(nrow):
-            z = z0 + k * rise
-            if z + rise > z_back - 2.5:
+
+def stade_rows(n):
+    """Each row's front offset from the stand's front line, and its tread height."""
+    rd, rise = STADE_ROW
+    z0 = STADE_PITCH_Z + 1.4
+    d, z = [], []
+    for k in range(n):
+        up = k >= STADE_LOWER
+        d.append(k * rd + (STADE_BOX[0] if up else 0.0))
+        z.append(z0 + k * rise + (STADE_BOX[1] if up else 0.0))
+    return np.array(d), np.array(z)
+
+
+def stade_stands(F, m, S, outline, seat, white, dark, frame_c):
+    """The seating under the three roofs: raked rows of red and white
+    seats with grey aisles, vomitories, a band of boxes, a dark back wall
+    up to the roof and a grey soffit out to the cream fascia."""
+    zp = STADE_PITCH_Z
+    rd, rise = STADE_ROW
+    soffit_c = np.array(hexrgb("#8f8a82"), float)
+    stair = np.array(hexrgb("#a49e94"), float)
+    glass = np.array(hexrgb("#2f3d47"), float)
+    end_c = np.array(hexrgb("#cfc6b6"), float)
+    inner = outline.buffer(-1.5, join_style=2)
+    NMAX = 60
+    dd, zz = stade_rows(NMAX + 1)
+    # side: (axis, front c, out, a_start, miter ends: (sign along a) at which ends)
+    #   axis "t": rows run along s at t = c + out*d; "s": along t at s = c + out*d.
+    sides = {
+        "NW": ("t", STADE_NW, -1, STADE_SW + 2.0),
+        "SE": ("t", STADE_SE, +1, STADE_SW + 2.0),
+        "NE": ("s", STADE_NE, +1, None),
+    }
+
+    def st(ax, c, out, a, d):
+        """(s, t) of the point a along, d out."""
+        a, d = np.broadcast_arrays(np.asarray(a, float), np.asarray(d, float))
+        return (a, c + out * d) if ax == "t" else (c + out * d, a)
+
+    def span(name, d):
+        """The row's ends along a at offset d before clipping: the start (or
+        the miter with the NW stand) and the miter with the NE end (or SE)."""
+        ax, c, out, a0 = sides[name]
+        if ax == "t":
+            return a0, STADE_NE + d
+        return STADE_NW - d, STADE_SE + d
+
+    def roof_ok(ax, c, out, a, d, ztop):
+        s_, t_ = st(ax, c, out, a, d)
+        xy = F.O[None] + s_[:, None] * F.u[None] + t_[:, None] * F.v[None]
+        zr = S.sample(xy[:, 0], xy[:, 1])
+        under = np.isfinite(zr) & (zr > zp + 6.0)
+        ins = contains_xy(inner, xy[:, 0], xy[:, 1])
+        return ins & (~under | (zr - 1.0 - ztop > STADE_GAP))
+
+    rng = np.random.default_rng(1985)
+    T = {k: [] for k in ("A", "B", "C", "D", "col", "n")}
+
+    def quad(a_, b_, c_, d_, col, n):
+        T["A"].append(a_); T["B"].append(b_); T["C"].append(c_); T["D"].append(d_)
+        T["col"].append(col); T["n"].append(n)
+
+    info = {}
+    for name, (ax, c, out, a0) in sides.items():
+        nvec = (0.0, out, 0.0) if ax == "t" else (out, 0.0, 0.0)
+        back = (-nvec[0], -nvec[1], 0.0)
+        rows = []
+        for k in range(NMAX):
+            d0, d1 = dd[k], dd[k] + rd
+            z = zz[k]
+            lo, hi = span(name, d1)
+            aa = np.arange(lo, hi + 0.01, 0.5)
+            ok = roof_ok(ax, c, out, aa, (d0 + d1) / 2, z + rise + 1.1) & roof_ok(ax, c, out, aa, d1, z + rise + 1.1)
+            if ok.sum() < 20:
                 break
-            d0, d1 = k * rd, (k + 1) * rd
-            col = white if k % 9 == 8 else seat * (0.96 + 0.04 * (k % 2))
-            F.quad(P(a0, d0, z), P(a1, d0, z), P(a1, d1, z), P(a0, d1, z), col, n_(0, 1))
-            F.quad(P(a0, d1, z), P(a1, d1, z), P(a1, d1, z + rise), P(a0, d1, z + rise), col * 0.78, n_(-1, 0))
-            z_top = z + rise
-            d_top = d1
-        # Stairways every 14 m: grey strips over the seats.
-        for a in np.arange(a0 + 7.0, a1 - 3.0, 14.0):
-            F.quad(P(a - 0.6, 0, z0 + 0.02), P(a + 0.6, 0, z0 + 0.02), P(a + 0.6, d_top, z_top + 0.02),
-                   P(a - 0.6, d_top, z_top + 0.02), stair, n_(-0.3, 1))
-        # Back wall up to the soffit, the soffit out to the fascia.
-        F.quad(P(a0, d_top, z_top), P(a1, d_top, z_top), P(a1, d_top, z_back), P(a0, d_top, z_back), dark, n_(-1, 0))
-        F.quad(P(a0, d_top, z_back), P(a1, d_top, z_back), P(a1, 0.0, z_front), P(a0, 0.0, z_front), soffit_c,
-               n_(0, -1))
-        # The stand's two ends.
-        for a, sg in ((a0, -1), (a1, 1)):
-            q = [P(a, 0, zp), P(a, d_top, zp), P(a, d_top, z_back), P(a, 0, z_front)]
-            nn = (sg, 0, 0) if ax == "t" else (0, sg, 0)
-            F.quad(*q, np.array(hexrgb("#cfc6b6"), float), nn)
+            # The run round the stand's middle.
+            mid = int(np.argmin(np.abs(aa - (STADE_SW + STADE_NE) / 2 if ax == "t" else aa - (STADE_NW + STADE_SE) / 2)))
+            if not ok[mid]:
+                break
+            i0, i1 = mid, mid
+            while i0 > 0 and ok[i0 - 1]:
+                i0 -= 1
+            while i1 < len(aa) - 1 and ok[i1 + 1]:
+                i1 += 1
+            rows.append((k, d0, d1, z, aa[i0], aa[i1]))
+        info[name] = rows
+    # A row ends on a miter only where the neighbour has the same row.
+    have = {n_: {r[0]: r for r in rs} for n_, rs in info.items()}
+
+    def ends(name, k, d0, d1, ea0, ea1):
+        """(inner a0, outer a0, inner a1, outer a1, miter0, miter1)."""
+        lo0, hi0 = span(name, d0)
+        lo1, hi1 = span(name, d1)
+        if name == "NE":
+            m0 = k in have["NW"] and ea0 <= lo1 + 0.6
+            m1 = k in have["SE"] and ea1 >= hi1 - 0.6
+        else:
+            m0 = False
+            m1 = k in have["NE"] and ea1 >= hi1 - 0.6
+        ia0, oa0 = (lo0, lo1) if m0 else (ea0, ea0)
+        ia1, oa1 = (hi0, hi1) if m1 else (ea1, ea1)
+        return ia0, oa0, ia1, oa1, m0, m1
+
+    n_seat = 0
+    for name, (ax, c, out, a0) in sides.items():
+        rows = info[name]
+        if not rows:
+            continue
+        nvec = (0.0, out, 0.0) if ax == "t" else (out, 0.0, 0.0)
+        nrow = len(rows)
+        mid_a = (STADE_SW + STADE_NE) / 2 if ax == "t" else (STADE_NW + STADE_SE) / 2
+        for k, d0, d1, z, ea0, ea1 in rows:
+            ia0, oa0, ia1, oa1, m0, m1 = ends(name, k, d0, d1, ea0, ea1)
+            # Pieces along the row: ~2.5 m of seats, grey aisles every 14 m.
+            cuts = set(np.arange(ia0, ia1, 1.25).tolist() + [ia1])
+            ais = np.arange(mid_a - 7.0 - STADE_AISLE * 8, ia1, STADE_AISLE)
+            for x in ais:
+                for e in (x - 0.6, x + 0.6):
+                    if ia0 < e < ia1:
+                        cuts.add(float(e))
+            cuts = np.array(sorted(cuts))
+            ftop = k / max(nrow - 1, 1)
+            for p0, p1 in zip(cuts[:-1], cuts[1:]):
+                if p1 - p0 < 0.05:
+                    continue
+                # The outer edge follows the inner one but meets the miters.
+                q0 = oa0 if (m0 and p0 <= ia0 + 1e-6) else p0
+                q1 = oa1 if (m1 and p1 >= ia1 - 1e-6) else p1
+                is_aisle = np.min(np.abs(ais - (p0 + p1) / 2)) < 0.61 if len(ais) else False
+                if is_aisle:
+                    col = stair
+                elif rng.random() < 0.1 + 0.12 * ftop:
+                    col = white
+                else:
+                    col = seat * (0.86 + 0.2 * ftop) * (0.97 + 0.06 * rng.random())
+                A = (*st(ax, c, out, p0, d0), z)
+                Bq = (*st(ax, c, out, p1, d0), z)
+                C = (*st(ax, c, out, q1, d1), z)
+                D = (*st(ax, c, out, q0, d1), z)
+                quad(A, Bq, C, D, col, (0, 0, 1))
+                # The riser (the next row's seat backs).
+                quad(D, C, (*C[:2], z + rise), (*D[:2], z + rise), col * 0.8, (-nvec[0], -nvec[1], 0))
+                n_seat += 1
+            # Plain ends: a cap from the platform up to the row.
+            for e, sg, mm in ((ia0, -1, m0), (ia1, 1, m1)):
+                if mm:
+                    continue
+                p_ = st(ax, c, out, e, d0)
+                q_ = st(ax, c, out, e, d1)
+                nn = (sg, 0, 0) if ax == "t" else (0, sg, 0)
+                quad((*p_, zp), (*q_, zp), (*q_, z + rise), (*p_, z + rise), end_c, nn)
+        # The front barrier, and the box band over the landing.
+        k0 = rows[0]
+        ia0, oa0, ia1, oa1, m0, m1 = ends(name, *k0[:3], k0[4], k0[5])
+        z0 = k0[3]
+        quad((*st(ax, c, out, ia0, 0.0), zp), (*st(ax, c, out, ia1, 0.0), zp), (*st(ax, c, out, ia1, 0.0), z0),
+             (*st(ax, c, out, ia0, 0.0), z0), frame_c, (-nvec[0], -nvec[1], 0))
+        quad((*st(ax, c, out, ia0, -0.05), z0 - 0.9), (*st(ax, c, out, ia1, -0.05), z0 - 0.9),
+             (*st(ax, c, out, ia1, -0.05), z0 - 0.15), (*st(ax, c, out, ia0, -0.05), z0 - 0.15),
+             np.array(hexrgb("#1f2a33"), float), (-nvec[0], -nvec[1], 0))     # LED boards
+        rk = {r[0]: r for r in rows}
+        if STADE_LOWER in rk and STADE_LOWER - 1 in rk:
+            kL = rk[STADE_LOWER - 1]
+            kU = rk[STADE_LOWER]
+            zl = kL[3] + rise
+            dl0, dl1 = kL[2], kU[1]
+            la0, _, la1, _, lm0, lm1 = ends(name, *kU[:3], kU[4], kU[5])
+            sa0 = max(kL[4], la0) if not lm0 else span(name, dl0)[0]
+            sa1 = min(kL[5], la1) if not lm1 else span(name, dl0)[1]
+            ta0 = span(name, dl1)[0] if lm0 else sa0
+            ta1 = span(name, dl1)[1] if lm1 else sa1
+            # The landing, then the glazed band with cream mullions every 3.6 m.
+            quad((*st(ax, c, out, sa0, dl0), zl), (*st(ax, c, out, sa1, dl0), zl), (*st(ax, c, out, ta1, dl1), zl),
+                 (*st(ax, c, out, ta0, dl1), zl), stair, (0, 0, 1))
+            zt_ = kU[3]
+            nb = (-nvec[0], -nvec[1], 0)
+            quad((*st(ax, c, out, ta0, dl1), zl), (*st(ax, c, out, ta1, dl1), zl),
+                 (*st(ax, c, out, ta1, dl1), zt_ - 0.5), (*st(ax, c, out, ta0, dl1), zt_ - 0.5), glass, nb)
+            quad((*st(ax, c, out, ta0, dl1 - 0.02), zt_ - 0.5), (*st(ax, c, out, ta1, dl1 - 0.02), zt_ - 0.5),
+                 (*st(ax, c, out, ta1, dl1 - 0.02), zt_), (*st(ax, c, out, ta0, dl1 - 0.02), zt_), frame_c, nb)
+            for x in np.arange(ta0 + 1.8, ta1 - 0.5, 3.6):
+                quad((*st(ax, c, out, x - 0.12, dl1 - 0.04), zl), (*st(ax, c, out, x + 0.12, dl1 - 0.04), zl),
+                     (*st(ax, c, out, x + 0.12, dl1 - 0.04), zt_ - 0.5), (*st(ax, c, out, x - 0.12, dl1 - 0.04), zt_ - 0.5),
+                     frame_c, nb)
+            # The landing's glass parapet line.
+            quad((*st(ax, c, out, sa0, dl0 + 0.05), zl), (*st(ax, c, out, sa1, dl0 + 0.05), zl),
+                 (*st(ax, c, out, sa1, dl0 + 0.05), zl + 1.0), (*st(ax, c, out, sa0, dl0 + 0.05), zl + 1.0),
+                 np.array(hexrgb("#c9d3d6"), float), nb)
+        # Vomitories in the lower tier: dark portals between the aisles.
+        kv = [r for r in rows if 7 <= r[0] <= 10]
+        if len(kv) == 4:
+            dv0, dv1 = kv[0][1], kv[-1][2]
+            zb_, zt2 = kv[0][3], kv[-1][3] + rise + 0.25
+            ea0, ea1 = max(r[4] for r in kv), min(r[5] for r in kv)
+            for x in np.arange(mid_a - STADE_AISLE * 8, ea1, STADE_AISLE * 2):
+                if x - 1.6 < ea0 + 1 or x + 1.6 > ea1 - 1:
+                    continue
+                s0_, t0_ = st(ax, c, out, x - 1.0, dv0)
+                s1_, t1_ = st(ax, c, out, x + 1.0, dv1)
+                F.box(s0_, s1_, t0_, t1_, zb_, zt2, end_c)
+                s0_, t0_ = st(ax, c, out, x - 0.8, dv0 - 0.03)
+                s1_, t1_ = st(ax, c, out, x + 0.8, dv0 - 0.03)
+                quad((s0_, t0_, zb_ + 0.05), (s1_, t1_, zb_ + 0.05), (s1_, t1_, zt2 - 0.35), (s0_, t0_, zt2 - 0.35),
+                     np.array(hexrgb("#24221f"), float), (-nvec[0], -nvec[1], 0))
+        # Back wall from the top row up to the roof, and the soffit from there
+        # out to the roof's front edge.
+        kt = rows[-1]
+        dt_ = kt[2]
+        ia0, oa0, ia1, oa1, m0, m1 = ends(name, *kt[:3], kt[4], kt[5])
+        aa = np.linspace(oa0, oa1, max(4, int((oa1 - oa0) / 1.5)))
+        s_, t_ = st(ax, c, out, aa, dt_)
+        xy = F.O[None] + s_[:, None] * F.u[None] + t_[:, None] * F.v[None]
+        zr = S.sample(xy[:, 0], xy[:, 1]) - 1.0
+        zr = np.where(np.isfinite(zr) & (zr > kt[3] + rise), zr, kt[3] + rise + STADE_GAP)
+        zr = ndimage.median_filter(zr, size=5, mode="nearest")
+        _strip_wall(m, xy[:, 0], xy[:, 1], np.full(len(aa), kt[3] + rise), zr, np.array(hexrgb("#6e6861"), float),
+                    out=np.array(F.xy(*st(ax, c, out, (oa0 + oa1) / 2, dt_ + 10)), float))
+        # The roof's front edge: the first offset where the LiDAR is up.
+        am = np.linspace(ia0 + 4, ia1 - 4, 20)
+        d_front = 0.0
+        for d_ in np.arange(0.0, 8.0, 0.5):
+            s2, t2 = st(ax, c, out, am, d_)
+            xy2 = F.O[None] + s2[:, None] * F.u[None] + t2[:, None] * F.v[None]
+            if np.nanmedian(S.sample(xy2[:, 0], xy2[:, 1])) > zp + 6:
+                d_front = d_
+                break
+        s2, t2 = st(ax, c, out, am, d_front + 0.5)
+        xy2 = F.O[None] + s2[:, None] * F.u[None] + t2[:, None] * F.v[None]
+        z_front = float(np.nanpercentile(S.sample(xy2[:, 0], xy2[:, 1]), 20)) - 2.6
+        lo_f, hi_f = span(name, d_front)
+        if not m0:
+            lo_f = ia0
+        if not m1:
+            hi_f = ia1
+        for i in range(len(aa) - 1):
+            # Each strip of soffit: from the back wall's top to the front.
+            fa0 = lo_f + (aa[i] - oa0) / max(oa1 - oa0, 1e-6) * (hi_f - lo_f)
+            fa1 = lo_f + (aa[i + 1] - oa0) / max(oa1 - oa0, 1e-6) * (hi_f - lo_f)
+            quad((*st(ax, c, out, aa[i], dt_), zr[i]), (*st(ax, c, out, aa[i + 1], dt_), zr[i + 1]),
+                 (*st(ax, c, out, fa1, d_front), z_front), (*st(ax, c, out, fa0, d_front), z_front), soffit_c,
+                 (0, 0, -1))
+    if T["A"]:
+        A, Bq, C, D = (np.array(T[k], float) for k in "ABCD")
+        P = [F.E(X[:, 0], X[:, 1], X[:, 2]) for X in (A, Bq, C, D)]
+        ctr = (A + Bq + C + D) / 4
+        nn = np.array(T["n"], float)
+        want = F.E(ctr[:, 0] + nn[:, 0], ctr[:, 1] + nn[:, 1], ctr[:, 2] + nn[:, 2]) - F.E(ctr[:, 0], ctr[:, 1], ctr[:, 2])
+        _quad(m, *P, np.array(T["col"], float), want)
+    return {n_: len(r) for n_, r in info.items()}, n_seat
 
 
 def stade_away(F, m, zp, white):

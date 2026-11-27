@@ -29,7 +29,7 @@
    43.7457566
   ]
  ],
- "triangles": 6829314,
+ "triangles": 6860654,
  "tunnel": true,
  "drive": {
   "file": "monte-carlo-drive.png",
@@ -137,6 +137,7 @@
  },
  "palace_cannons": 7,
  "stade_wall_m": 730,
+ "stade_seat_pieces": 8824,
  "stade_louis_ii": 1,
  "chapiteau": 1,
  "fort_antoine": 1,
