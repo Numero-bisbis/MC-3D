@@ -888,17 +888,65 @@
     if (state === "off" || state === "pick" && !lap) return;
     if (state === "paused" && !looked && !flying) applyCamera();
     if ((state === "playing" || state === "intro" || flying) && ctrl.enableInputs) ctrl.enableInputs = false;
-    if (state !== "playing") return;
+    if (state !== "playing") { lookAhead(false); return; }
     const now = performance.now();
-    tl += Math.min(0.5, (now - last) / 1000);     // real time, so the lap takes the real lap time
+    tl += step(Math.min(0.5, (now - last) / 1000));   // real time, so the lap takes the real lap time
     last = now;
-    if (tl >= tPost) { tl = tPost; draw(); applyCamera(); finish(); return; }
+    if (tl >= tPost) { tl = tPost; draw(); applyCamera(); lookAhead(false); finish(); return; }
     // Report the speed so the scenery detail can follow it (main.js).
     if (M.setTourSpeed) { const u = uAt(tl); M.setTourSpeed(speedAt(tl, u)); }
     draw();
     applyCamera();
+    lookAhead(true);
   }
   scene.preUpdate.addEventListener(tick);
+
+  // A slow frame (a burst of new scenery arriving, the phone busy) used to
+  // move the car on by the whole gap at once: at 80 m/s a 0.3 s hiccup is
+  // a 24 m jump, which is why the fast modern laps looked the jerkiest.
+  // Now each frame moves at most a little more than a normal frame, and
+  // the time owed is made up over the next second, slightly quicker than
+  // real time, so the lap still takes exactly the real lap time.
+  let owed = 0, usual = 0;
+  function step(dt) {
+    usual = usual ? usual + (Math.min(dt, usual * 2) - usual) * 0.1 : Math.min(dt, 1 / 30);
+    owed += dt;
+    if (owed > 1) owed = 0.3;                       // a long stall: skip it, don't race for seconds
+    const s = Math.min(owed, Math.max(usual * 1.35, 1 / 45));
+    owed -= s;
+    return s;
+  }
+
+  // Loading ahead. Cesium only asks for the scenery the camera sees now, so
+  // a fast lap kept arriving in streets whose tiles had not been requested
+  // yet, and the picture waited for them: worst with the recent cars, which
+  // cover the circuit at up to 85 m/s. Cesium has a pass that loads the end of a
+  // camera flight early; during the lap it is pointed at where the camera
+  // will be 1 to 3.5 s later (one of four points per frame, in turn), so
+  // the tiles there are asked for first and are in by the time the car is.
+  // ?ahead=0 turns it off, to compare.
+  const AHEAD = new URLSearchParams(location.search).get("ahead") === "0" ? [] : [1, 1.8, 2.6, 3.5];
+  const ghostFlight = { cancelTween() {}, complete: undefined };
+  let aheadK = 0;
+  function lookAhead(on) {
+    if (!on || flying || !AHEAD.length || !scene.preloadFlightCamera) {
+      if (cam._currentFlight === ghostFlight) cam._currentFlight = undefined;
+      return;
+    }
+    if (cam._currentFlight && cam._currentFlight !== ghostFlight) return;   // a real flight
+    const t = Math.min(tPost, tl + AHEAD[aheadK++ % AHEAD.length]);
+    const u = uAt(t);
+    const pc = scene.preloadFlightCamera;
+    if (cam.frustum instanceof Cesium.PerspectiveFrustum) {
+      pc.frustum.fov = cam.frustum.fov;
+      pc.frustum.aspectRatio = cam.frustum.aspectRatio;
+      pc.frustum.near = cam.frustum.near;
+      pc.frustum.far = cam.frustum.far;
+    }
+    pc.setView(cameraFor(u, speedAt(t, u)));
+    scene.preloadFlightCullingVolume = pc.frustum.computeCullingVolume(pc.positionWC, pc.directionWC, pc.upWC);
+    cam._currentFlight = ghostFlight;
+  }
 
   function setFov() {
     const f = cam.frustum;
@@ -919,7 +967,7 @@
     clearTimers();
     ui.lights.classList.remove("show");
     const go = () => {
-      state = "playing"; looked = false; last = performance.now();
+      state = "playing"; looked = false; last = performance.now(); owed = 0;
       ctrl.enableInputs = false; hud.playing(true); hud.tip("");
     };
     if (looked) {             // the visitor looked around: glide back first
@@ -1175,7 +1223,8 @@
       if (mine !== run) break;
       const u = stops[k];
       cam.setView(cameraFor(u, lap.V[wrap(Math.round(u))]));
-          let frames = 0;
+      const t0 = performance.now();
+      let frames = 0;
       while (!skip && mine === run) {
         await frameDone();
         frames++;
@@ -1218,6 +1267,7 @@
     state = "off";
     run++;
     clearTimers();
+    lookAhead(false);
     cam.cancelFlight();
     hidePicker();
     ctrl.enableInputs = true;

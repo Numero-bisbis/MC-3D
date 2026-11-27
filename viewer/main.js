@@ -402,9 +402,18 @@ function applyTourDetail() {
   const eff = tourQ.sse * mul;
   if (Math.abs(eff - google.maximumScreenSpaceError) > 0.02 * eff) google.maximumScreenSpaceError = eff;
 }
+// The detail follows the fast parts of the lap, not every corner: it gets
+// coarser at once when the car speeds up but only comes back over a few
+// seconds after it slows. Following the speed exactly made the scenery
+// switch between fine and coarse tiles at every braking point, and the
+// fine tiles asked for in a slow corner arrived after the car had left it.
 function setTourSpeed(v) {
   if (!tourQ) return;
-  tourQ.speed = v || 0;
+  v = v || 0;
+  const now = performance.now(), dt = Math.min(1, (now - (tourQ.at || now)) / 1000);
+  tourQ.at = now;
+  if (v === 0 || v >= tourQ.speed) tourQ.speed = v;
+  else tourQ.speed += (v - tourQ.speed) * (1 - Math.exp(-dt / 4));
 }
 viewer.scene.postRender.addEventListener(adaptTour);
 function setTourQuality(on) {
